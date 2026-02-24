@@ -56,7 +56,7 @@
 - file_read: 读取文本文件
 - file_write: 写入文件
 - file_list: 列出目录文件
-- file_delete: 删除文件
+- file_delete: 删除文件或文件夹
 - dir_create: 创建目录
 - dir_change: 切换目录
 - read_pdf: 读取PDF文件内容（支持.pdf, .docx等文档格式）

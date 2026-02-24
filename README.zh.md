@@ -1,41 +1,127 @@
-<!-- 语言选择 -->
+# 🤖 Minibot
+
 <div align="center">
 
+<img src="images/logo.png" alt="Minibot Logo" width="1200">
+
 **[English](README.md) | [中文](README.zh.md)**
+
+![Python Version](https://img.shields.io/badge/python-3.8-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
+
+基于原创 SuperAgent 架构的超轻量级 AI 自动化工具，通过自然语言交互执行任务。
+
+[功能特性](#-核心特性) • [安装](#-安装) • [演示截图](#-演示截图) • [文档](#-文档)
 
 </div>
 
 ---
 
-# Minibot - 轻量级 AI 自动化工具
+## ✨ 概述
 
-一个超轻量级的 AI 自动化工具，可以在终端中执行各种任务，包括系统命令、文件操作、网页搜索、URL 内容读取等。
+Minibot 是基于原创 SuperAgent 架构的超轻量级 AI 自动化工具，通过自然语言交互在终端中执行各种任务。
 
-## 🌟 项目优势
+## 🏗️ 架构设计
 
-- **超轻量级** - 代码简洁，依赖少，快速启动
-- **24小时工作** - 支持长时间运行，可设置定时任务
-- **计划工作直至完成** - AI 会自动规划任务步骤，逐步完成复杂工作流
-- **灵活的 API 支持** - 支持 OpenAI、Anthropic 等官方 API，也支持国内 API 服务
-- **自然语言交互** - 用自然语言描述任务，无需学习复杂命令
-- **无限上下文** - 智能记忆压缩让上下文可管理，同时支持无限任务链接
-- **完整的工具集** - 文件操作、网页搜索、文档解析等一应俱全
+```mermaid
+graph TB
+    User[👤 用户输入] --> Channel[通道层]
+    Channel --> CLI[CLI 模式]
+    Channel --> Desktop[桌面模式]
+    Channel --> Gateway[网关模式]
 
-## 功能特性
+    CLI --> Executor[自然任务执行器]
+    Desktop --> Executor
+    Gateway --> Executor
 
-✨ **核心功能**
-- 🤖 自然语言交互 - 用自然语言描述任务
-- 🔧 系统命令执行 - 执行 shell 命令
-- 📁 文件操作 - 读写、复制、移动、删除文件
-- 📄 文档解析 - 支持 PDF、Word、Markdown、JSON 等格式
-- 🔍 网页搜索 - 使用 Tavily API 搜索网页
-- 🌐 URL 内容读取 - 自动提取网页内容
-- ⏰ 定时器 - 设置定时任务
-- ✅ 命令审批 - 交互式命令确认
+    Executor --> Loop[🔄 思维链<br/>循环决策]
+
+    Loop --> AI[AI 引擎]
+    Loop --> Tools[工具执行器]
+    Loop --> Memory[♾️ 无限记忆<br/>模块]
+
+    AI --> API[OpenAI/Anthropic API]
+    AI --> Loop
+
+    Tools --> Shell[Shell 工具]
+    Tools --> File[文件工具]
+    Tools --> Web[网页搜索]
+    Tools --> PDF[PDF 工具]
+    Tools --> Skill[技能系统]
+
+    Tools --> Loop
+
+    Memory --> Compress[智能压缩]
+    Memory --> Archive[存档存储]
+    Memory --> History[执行历史]
+
+    Memory --> Loop
+
+    Loop --> Output[✅ 任务完成]
+
+    style User fill:#e1f5ff
+    style Loop fill:#ffe1e1,stroke:#ff0000,stroke-width:3px
+    style Memory fill:#e1ffe1,stroke:#00aa00,stroke-width:3px
+    style AI fill:#f0e1ff
+    style Executor fill:#fff4e1
+```
+
+**🔥 核心创新：**
+
+- **🔄 思维链循环决策**：AI 引擎持续推理、规划和执行，直到任务完成
+  - 分析当前状态 → 规划下一步 → 执行工具 → 验证结果 → 继续或结束
+
+- **♾️ 无限记忆模块**：革命性压缩系统实现无限上下文
+  - **智能压缩**：97% Token 压缩率（30,000 → 1,000 tokens）
+  - **指针式存储**：完整历史存档，随时可访问
+  - **三层记忆**：当前任务 → 累积压缩 → 时间戳存档
+
+**核心组件：**
+- **通道层**：多模式交互（CLI/桌面/网关）
+- **自然任务执行器**：编排多步骤任务规划
+- **AI 引擎**：与 LLM API 通信进行推理
+- **工具执行器**：执行 20+ 内置工具
+- **技能系统**：模块化知识扩展
+
+## 🌟 核心特性
+
+<details>
+<summary><b>🚀 核心能力</b></summary>
+
+- 🤖 **自然语言交互** - 用自然语言描述任务
+- 🔧 **系统命令执行** - 安全执行 shell 命令
+- 📁 **文件操作** - 读写、复制、移动、删除文件
+- 📄 **文档解析** - 支持 PDF、Word、Markdown、JSON 格式
+- 🔍 **网页搜索** - 使用 Tavily API 搜索网页
+- 🌐 **URL 内容读取** - 自动提取网页内容
+- ⏰ **定时器** - 设置定时任务
+
+</details>
+
+<details>
+<summary><b>🎯 高级功能</b></summary>
+
+- ✅ **命令审批** - 交互式命令确认
 - 📤 **文件发送** - 发送文件到飞书（网关模式）
 - 💬 **飞书集成** - 实时任务进度更新
+- 🖥️ **桌面端界面** - 精美的图形界面
 - 🎓 **Skill 系统** - 模块化知识库，包含 6+ 内置 Skill
-- 🔄 **智能工具加载** - AI 有意识地按需加载 Skill 和工具
+- 🔄 **智能工具加载** - AI 有意识地按需加载工具
+- 🧠 **记忆压缩** - 无限上下文，智能压缩
+- ⚡ **24小时工作** - 支持长时间运行
+
+</details>
+
+## 💡 为什么选择 Minibot？
+
+| 特性 | 传统 AI | Minibot |
+|------|---------|---------|
+| **能力** | 只能聊天 | 执行真实任务 |
+| **控制** | 对话交流 | 控制服务器并执行命令 |
+| **上下文** | 有限会话 | 智能压缩，无限上下文 |
+| **规划** | 单次响应 | AI 自动多步骤规划 |
+| **界面** | 仅网页/App | CLI / 桌面 / 网关 |
+
+**Minibot 填补了空白** - 不仅仅是聊天，而是真正**控制你的服务器**并自主执行任务。
 
 ## 安装
 
@@ -47,13 +133,26 @@ cd Minibot
 pip install -e .
 ```
 
-## 演示截图
+## 📸 演示截图
 
-![Minibot 运行界面](images/demo.png)
+### CLI 模式
+<p align="center">
+  <img src="images/cli.png" alt="CLI 模式" width="800">
+</p>
 
-## 快速开始
+### 桌面模式
+<p align="center">
+  <img src="images/desktop.png" alt="桌面模式" width="800">
+</p>
 
-### 1. 配置环境变量（必需）
+### 网关模式（飞书）
+<p align="center">
+  <img src="images/Feishu.gif" alt="飞书集成" width="300">
+</p>
+
+## 🚀 快速开始
+
+### 1️⃣ 配置环境变量
 
 复制 `.env.example` 到 `.env` 并填入你的 API 凭证：
 
@@ -90,13 +189,22 @@ TEMPERATURE=0.7
 - ✅ 国内 API 服务 (如 yunwu.ai 等)
 - ✅ 其他兼容 OpenAI 格式的 API
 
-### 2. 运行 Minibot
+### 2️⃣ 运行 Minibot
+
+选择你喜欢的模式：
 
 ```bash
+# CLI 模式（默认）
 python chat.py
+
+# 桌面模式（图形界面）
+python chat.py desktop
+
+# 网关模式（飞书集成）
+python chat.py gateway
 ```
 
-### 3. 网关模式（飞书集成）
+### 3️⃣ 网关模式（飞书集成）
 
 在网关模式下运行，从飞书接收任务并发送实时更新：
 
@@ -121,9 +229,43 @@ python chat.py gateway
 3. 订阅 `im.message.receive_v1` 事件
 4. 运行：`python chat.py gateway`
 
-## 使用示例
+### 4️⃣ 桌面模式（图形界面）
 
-### 示例 1：搜索网页信息
+在桌面模式下运行，获得精美的图形界面和实时监控：
+
+```bash
+python chat.py desktop
+```
+
+**桌面模式功能：**
+- 🖥️ 现代化轻量级 UI，带侧边栏导航
+- 📊 实时 token 使用量监控，可视化指示器
+- 📁 工作区文件浏览器（output/temp 文件夹）
+- 🧠 记忆文件查看器（execution_history.md、accumulated_compression.md）
+- 🎯 Skills 管理（添加、查看、删除自定义 Skill）
+- ⚙️ 应用内设置编辑器（修改 API 密钥、模型、参数等）
+- ✅ 可视化命令审批对话框
+- 💬 聊天界面，显示思考步骤和工具执行结果
+
+**桌面 UI 组件：**
+- **聊天区域**：主对话界面，消息气泡形式
+- **Token 指示器**：显示当前内存使用量 vs 压缩阈值
+- **侧边栏**：工作区文件、记忆文件、Skills 管理
+- **设置弹窗**：配置 API 密钥、模型、最大步数、tokens 等
+- **快捷命令**：支持 `/clear` 和 `/compact` 命令
+
+**桌面模式配置：**
+点击侧边栏的设置按钮（⚙️）即可配置：
+- API Base URL、API Key、API Model
+- Tavily API Key
+- 最大步数（默认：20）
+- 最大 Tokens（默认：30000）
+- 压缩阈值（默认：25000）
+- 最大搜索次数（默认：3）
+
+## 📚 使用示例
+
+### 示例 1：网页搜索
 
 ```
 你: 搜索最新的 AI 技术发展
@@ -131,35 +273,11 @@ python chat.py gateway
 接下来我要: 使用 web_search 工具搜索最新 AI 技术
 
 ===== JSON START =====
-{"action": "execute_tool", "tool": "web_search", "params": {"query": "latest AI technology 2024"}}
+{"action": "execute_tool", "tool": "web_search", "params": {"query": "latest AI technology 2025"}}
 ===== JSON END =====
 ```
 
-### 示例 2：读取 URL 内容
-
-```
-你: 读取这个网页的内容 https://example.com
-
-接下来我要: 使用 read_url 工具读取网页内容
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "read_url", "params": {"url": "https://example.com"}}
-===== JSON END =====
-```
-
-### 示例 3：设置定时器
-
-```
-你: 30分钟后提醒我吃饭
-
-接下来我要: 设置 30 分钟的定时器
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "set_timer", "params": {"minutes": 30, "message": "该吃饭了！"}}
-===== JSON END =====
-```
-
-### 示例 4：创建和修改配置文件
+### 示例 2：文件操作
 
 ```
 你: 创建一个 config.json 文件，包含应用配置信息
@@ -171,103 +289,21 @@ python chat.py gateway
 ===== JSON END =====
 ```
 
-### 示例 5：批量文件操作
+### 示例 3：多步骤工作流
 
 ```
-你: 创建一个项目结构，包括 src、tests、docs 三个目录，并在 src 中创建 main.py 文件
+你: 创建一个项目，包含 src、tests 目录和 main.py 文件
 
-接下来我要: 创建项目目录结构
+接下来我要: 创建项目目录和 main.py 文件
 
 ===== JSON START =====
 {"action": "execute_tool", "tool": "dir_create", "params": {"path": "/path/to/project/src"}}
 ===== JSON END =====
 
-接下来我要: 创建 tests 目录
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "dir_create", "params": {"path": "/path/to/project/tests"}}
-===== JSON END =====
-
-接下来我要: 创建 docs 目录
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "dir_create", "params": {"path": "/path/to/project/docs"}}
-===== JSON END =====
-
-接下来我要: 在 src 中创建 main.py 文件
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_write", "params": {"path": "/path/to/project/src/main.py", "content": "#!/usr/bin/env python3\n\ndef main():\n    print('Hello, World!')\n\nif __name__ == '__main__':\n    main()"}}
-===== JSON END =====
+（AI 继续创建 tests 目录和 main.py...）
 ```
 
-### 示例 6：读取和修改现有文件
-
-```
-你: 读取 README.md 文件，然后在其中添加一个新的章节
-
-接下来我要: 读取 README.md 文件
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_read", "params": {"path": "/path/to/README.md"}}
-===== JSON END =====
-
-接下来我要: 在文件末尾添加新章节
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_write", "params": {"path": "/path/to/README.md", "content": "[原文件内容]\n\n## 新章节\n\n这是新添加的章节内容。"}}
-===== JSON END =====
-```
-
-### 示例 7：复杂工作流 - 生成项目文档
-
-```
-你: 创建一个完整的项目，包括源代码、测试文件和文档
-
-接下来我要: 创建项目根目录
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "dir_create", "params": {"path": "/path/to/myproject"}}
-===== JSON END =====
-
-接下来我要: 创建源代码目录
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "dir_create", "params": {"path": "/path/to/myproject/src"}}
-===== JSON END =====
-
-接下来我要: 创建 Python 模块
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_write", "params": {"path": "/path/to/myproject/src/__init__.py", "content": "\"\"\"MyProject Package\"\"\"\n__version__ = '1.0.0'"}}
-===== JSON END =====
-
-接下来我要: 创建主模块
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_write", "params": {"path": "/path/to/myproject/src/core.py", "content": "class Calculator:\n    def add(self, a, b):\n        return a + b\n    \n    def subtract(self, a, b):\n        return a - b"}}
-===== JSON END =====
-
-接下来我要: 创建项目 README
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_write", "params": {"path": "/path/to/myproject/README.md", "content": "# MyProject\n\n一个示例项目\n\n## 功能\n\n- 加法\n- 减法\n\n## 使用方法\n\n```python\nfrom src.core import Calculator\ncalc = Calculator()\nprint(calc.add(1, 2))\n```"}}
-===== JSON END =====
-
-接下来我要: 创建测试目录
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "dir_create", "params": {"path": "/path/to/myproject/tests"}}
-===== JSON END =====
-
-接下来我要: 创建测试文件
-
-===== JSON START =====
-{"action": "execute_tool", "tool": "file_write", "params": {"path": "/path/to/myproject/tests/test_core.py", "content": "import unittest\nfrom src.core import Calculator\n\nclass TestCalculator(unittest.TestCase):\n    def setUp(self):\n        self.calc = Calculator()\n    \n    def test_add(self):\n        self.assertEqual(self.calc.add(1, 2), 3)\n    \n    def test_subtract(self):\n        self.assertEqual(self.calc.subtract(5, 3), 2)"}}
-===== JSON END =====
-```
-
-## 可用工具
+## 🛠️ 可用工具
 
 | 工具名 | 描述 | 参数 |
 |------|------|------|
@@ -293,30 +329,38 @@ python chat.py gateway
 | `generate_pdf` | 从文档生成 PDF | `input_path`, `output_path`, `format` |
 | `load_skill` | 加载 Skill 的完整内容 | `skill_name` |
 
-## 配置说明
+## ⚙️ 配置说明
 
 ### API 配置
 
-- **API_BASE_URL**: AI API 的基础 URL
-- **API_KEY**: API 密钥
-- **API_MODEL**: 使用的模型名称
-- **TAVILY_API_KEY**: Tavily 搜索 API 密钥
+| 参数 | 说明 |
+|------|------|
+| `API_BASE_URL` | AI API 的基础 URL |
+| `API_KEY` | API 密钥 |
+| `API_MODEL` | 使用的模型名称 |
+| `TAVILY_API_KEY` | Tavily 搜索 API 密钥 |
 
-### 其他配置
+### 执行配置
 
-- **MAX_TOKENS**: 最大 token 数
-- **TEMPERATURE**: 温度参数（0-1）
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `MAX_TOKENS` | 30000 | 每次响应的最大 token 数 |
+| `TEMPERATURE` | 0.7 | AI 创造力（0-1） |
+| `MAX_STEPS` | 20 | 每个任务的最大执行步数 |
+| `COMPRESS_AT` | 25000 | 自动压缩的 token 阈值 |
+| `MAX_WEB_SEARCHES` | 3 | 每个任务的最大搜索次数 |
 
 ### 命令说明
 
 | 命令 | 模式 | 功能 |
 |------|------|------|
-| `/clear` | CLI & 网关 | 清除对话历史和执行历史 |
+| `/clear` | CLI、网关、桌面 | 清除对话历史和执行历史 |
+| `/compact` | CLI、网关、桌面 | 手动压缩记忆 |
 | `/stop` | 网关模式 | 停止当前正在执行的任务 |
 | `Ctrl+C` | CLI | 中断当前任务 |
 | `exit` / `quit` | CLI | 退出程序 |
 
-## 项目结构
+## 📁 项目结构
 
 ```
 Minibot/
@@ -349,7 +393,12 @@ Minibot/
 │   │   ├── project-setup/
 │   │   └── skill-creator/
 │   └── ui/
-│       └── cli.py                    # CLI 界面
+│       ├── cli.py                    # CLI 界面
+│       └── desktop/                  # 桌面端 UI
+│           ├── main.py               # Eel 后端（Python）
+│           ├── index.html            # UI 布局
+│           ├── app.js                # 前端逻辑
+│           └── styles.css            # 轻量级主题
 ├── Memory/
 │   ├── execution_history.md          # 当前任务执行历史
 │   ├── accumulated_compression.md    # 之前任务的压缩摘要
@@ -373,7 +422,7 @@ Minibot/
 └── README.md                         # 本文件
 ```
 
-## 记忆系统架构
+## 🧠 记忆系统架构
 
 Minibot 拥有一个智能的多层级记忆系统，专为长时间运行的任务设计，能够高效管理上下文：
 
@@ -472,7 +521,7 @@ Minibot 通过智能压缩机制实现**无限上下文容量**：
 - 之前任务的上下文被累积供下一个任务使用
 - 系统可以处理无限的任务序列
 
-## Skill 系统
+## 🎓 Skill 系统
 
 Minibot 包含强大的 Skill 系统，用于模块化知识管理：
 
@@ -536,51 +585,22 @@ workspace/
 - 缓存数据 → `workspace/cache/`
 - 系统信息包含所有路径供 AI 参考
 
-## 常见问题
-
-### Q: 如何获取 API 密钥？
-
-A: 根据你选择的 API 服务获取：
-- **OpenAI**: 访问 https://platform.openai.com/api-keys 获取 API 密钥
-- **Anthropic**: 访问 https://console.anthropic.com 获取 API 密钥
-- **国内服务**: 访问 https://yunwu.ai 或其他国内 API 服务商注册获取
-
-### Q: 如何获取 Tavily API 密钥？
-
-A: 访问 https://tavily.com 注册并获取 API 密钥。
-
-### Q: 支持哪些文件格式？
-
-A: 支持多种文件格式：
-- **文档**: PDF、Word (.docx/.doc)、Excel (.xls/.xlsx)、Markdown、JSON、纯文本
-- **图片**: JPG、JPEG、PNG、GIF、WebP、BMP（最大 10 MB，分辨率不超过 12000x12000）
-- **媒体**: MP4 视频、OPUS 音频
-- **其他**: 任何二进制文件格式（最大 30 MB）
-
-### Q: 如何禁用命令审批？
-
-A: 在交互式菜单中选择 "all" 选项，允许所有命令。
-
-### Q: 可以长时间运行吗？
-
-A: 可以。Minibot 支持 24 小时运行，你可以设置定时任务让它在指定时间执行工作。
-
-### Q: 支持哪些 API 服务？
-
-A: 支持任何兼容 OpenAI API 格式的服务，包括：
-- OpenAI 官方 API
-- Anthropic API
-- 国内 API 服务（如 yunwu.ai）
-- 其他兼容服务
-
-## 贡献
+## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！
 
-## 许可证
+## 📄 许可证
 
-MIT License - 详见 LICENSE 文件
+本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 
-## 联系方式
+## 📞 联系方式
 
 邮箱: 2774421277@qq.com
+
+---
+
+<div align="center">
+
+**⭐ 如果这个项目对你有帮助，请考虑给个 Star！**
+
+</div>

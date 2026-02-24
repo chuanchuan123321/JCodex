@@ -45,3 +45,23 @@ Thumbs.db
 *.log
 .agent_history
 CLAUDE.md
+AGENTS.md
+
+# Desktop UI (Eel)
+.eel/
+*.eel.log
+eel.log
+web/
+
+# Memory files (dynamically generated)
+Memory/*.md
+Memory/*.json
+Memory/*/
+
+# Workspace (preserve structure, ignore generated content)
+workspace/output/*
+workspace/temp/*
+workspace/cache/*
+!workspace/output/.gitkeep
+!workspace/temp/.gitkeep
+!workspace/cache/.gitkeep

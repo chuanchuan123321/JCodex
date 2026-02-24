@@ -1,4 +1,5 @@
 """Extended tool executor with document reading capabilities"""
+
 import json
 from typing import Dict, Any, Callable, Optional
 from agent.tools.shell import ShellTool
@@ -48,107 +49,107 @@ class ExtendedToolExecutor:
             {
                 "name": "shell",
                 "description": "Execute shell commands on the system",
-                "params": "command (string): The shell command to execute"
+                "params": "command (string): The shell command to execute",
             },
             {
                 "name": "file_read",
                 "description": "Read the contents of a text file",
-                "params": "path (string): Path to the file to read"
+                "params": "path (string): Path to the file to read",
             },
             {
                 "name": "file_write",
                 "description": "Write content to a file",
-                "params": "path (string): File path, content (string): Content to write"
+                "params": "path (string): File path, content (string): Content to write",
             },
             {
                 "name": "file_list",
                 "description": "List files in a directory",
-                "params": "path (string): Directory path (default: current directory)"
+                "params": "path (string): Directory path (default: current directory)",
             },
             {
                 "name": "file_delete",
-                "description": "Delete a file",
-                "params": "path (string): Path to the file to delete"
+                "description": "Delete a file or folder (supports both files and directories)",
+                "params": "path (string): Path to the file or folder to delete",
             },
             {
                 "name": "dir_create",
                 "description": "Create a directory",
-                "params": "path (string): Path to the directory to create"
+                "params": "path (string): Path to the directory to create",
             },
             {
                 "name": "dir_change",
                 "description": "Change the current working directory",
-                "params": "path (string): Path to change to"
+                "params": "path (string): Path to change to",
             },
             {
                 "name": "read_pdf",
                 "description": "Read and extract text from PDF files",
-                "params": "path (string): Path to the PDF file"
+                "params": "path (string): Path to the PDF file",
             },
             {
                 "name": "read_markdown",
                 "description": "Read and parse markdown files",
-                "params": "path (string): Path to the markdown file"
+                "params": "path (string): Path to the markdown file",
             },
             {
                 "name": "read_json",
                 "description": "Read and parse JSON files",
-                "params": "path (string): Path to the JSON file"
+                "params": "path (string): Path to the JSON file",
             },
             {
                 "name": "search_files",
                 "description": "Search for files by name or pattern",
-                "params": "pattern (string): File name pattern to search for, path (string): Directory to search in"
+                "params": "pattern (string): File name pattern to search for, path (string): Directory to search in",
             },
             {
                 "name": "get_file_info",
                 "description": "Get detailed information about a file",
-                "params": "path (string): Path to the file"
+                "params": "path (string): Path to the file",
             },
             {
                 "name": "copy_file",
                 "description": "Copy a file to a new location",
-                "params": "source (string): Source file path, destination (string): Destination path"
+                "params": "source (string): Source file path, destination (string): Destination path",
             },
             {
                 "name": "move_file",
                 "description": "Move or rename a file",
-                "params": "source (string): Source file path, destination (string): Destination path"
+                "params": "source (string): Source file path, destination (string): Destination path",
             },
             {
                 "name": "create_file",
                 "description": "Create a new file with content",
-                "params": "path (string): File path, content (string): File content"
+                "params": "path (string): File path, content (string): File content",
             },
             {
                 "name": "web_search",
                 "description": "Search the web for information",
-                "params": "query (string): Search query"
+                "params": "query (string): Search query",
             },
             {
                 "name": "read_url",
                 "description": "Read and extract content from a URL",
-                "params": "url (string): The URL to read"
+                "params": "url (string): The URL to read",
             },
             {
                 "name": "set_timer",
                 "description": "Set a timer that will trigger after specified minutes",
-                "params": "minutes (number): Minutes to wait, message (string): Message to display when timer ends"
+                "params": "minutes (number): Minutes to wait, message (string): Message to display when timer ends",
             },
             {
                 "name": "send_file",
                 "description": "Send a file to the user via Feishu",
-                "params": "path (string): Path to the file to send"
+                "params": "path (string): Path to the file to send",
             },
             {
                 "name": "generate_pdf",
                 "description": "Generate PDF from Markdown, text, HTML, or Word documents",
-                "params": "input_path (string): Input file path, output_path (string): Output PDF file path, format (string): Input format (markdown/text/html/docx)"
+                "params": "input_path (string): Input file path, output_path (string): Output PDF file path, format (string): Input format (markdown/text/html/docx)",
             },
             {
                 "name": "load_skill",
                 "description": "Load a skill's complete content to get detailed guidance and instructions",
-                "params": "skill_name (string): Name of the skill to load (e.g., 'web', 'github', 'python')"
+                "params": "skill_name (string): Name of the skill to load (e.g., 'web', 'github', 'python')",
             },
         ]
 
@@ -209,12 +210,20 @@ class ExtendedToolExecutor:
         return f"Error: {files[0] if files else 'Unknown error'}"
 
     def execute_file_delete(self, params: Dict[str, Any]) -> str:
-        """Delete file"""
+        """Delete file or directory"""
         path = params.get("path", "")
         if not path:
             return "Error: path parameter required"
 
-        success, message = self.file_tool.delete_file(path)
+        # 先检查是文件还是目录
+        from pathlib import Path
+
+        file_path = Path(path).resolve()
+
+        if file_path.is_dir():
+            success, message = self.file_tool.delete_directory(path)
+        else:
+            success, message = self.file_tool.delete_file(path)
         return message if success else f"Error: {message}"
 
     def execute_dir_create(self, params: Dict[str, Any]) -> str:
@@ -245,10 +254,11 @@ class ExtendedToolExecutor:
             expanded_path = FileTool.expand_path(path)
 
             # 检查文件类型
-            if expanded_path.endswith('.docx') or expanded_path.endswith('.doc'):
+            if expanded_path.endswith(".docx") or expanded_path.endswith(".doc"):
                 # 处理Word文档
                 try:
                     from docx import Document
+
                     doc = Document(expanded_path)
                     text = ""
                     for para in doc.paragraphs:
@@ -263,13 +273,16 @@ class ExtendedToolExecutor:
 
                     return f"Document contents:\n{text}"
                 except ImportError:
-                    return "Error: python-docx not installed. Try: pip install python-docx"
+                    return (
+                        "Error: python-docx not installed. Try: pip install python-docx"
+                    )
 
-            elif expanded_path.endswith('.pdf'):
+            elif expanded_path.endswith(".pdf"):
                 # 处理PDF文件
                 try:
                     import PyPDF2
-                    with open(expanded_path, 'rb') as file:
+
+                    with open(expanded_path, "rb") as file:
                         reader = PyPDF2.PdfReader(file)
                         text = ""
                         for page in reader.pages:  # Read all pages
@@ -305,7 +318,9 @@ class ExtendedToolExecutor:
             success, content = self.file_tool.read_file(path)
             if success:
                 data = json.loads(content)
-                return f"JSON contents:\n{json.dumps(data, indent=2, ensure_ascii=False)}"
+                return (
+                    f"JSON contents:\n{json.dumps(data, indent=2, ensure_ascii=False)}"
+                )
             return f"Error: {content}"
         except json.JSONDecodeError as e:
             return f"Error: Invalid JSON format - {str(e)}"
@@ -318,7 +333,9 @@ class ExtendedToolExecutor:
             return "Error: pattern parameter required"
 
         try:
-            result = self.shell_tool.execute(f"find {FileTool.expand_path(path)} -name '*{pattern}*' -type f | head -20")
+            result = self.shell_tool.execute(
+                f"find {FileTool.expand_path(path)} -name '*{pattern}*' -type f | head -20"
+            )
             if result.success:
                 return f"Found files:\n{result.stdout}"
             return f"No files found matching pattern: {pattern}"
@@ -345,6 +362,7 @@ class ExtendedToolExecutor:
 
         try:
             import shutil
+
             source_path = FileTool.expand_path(source)
             dest_path = FileTool.expand_path(destination)
             shutil.copy2(source_path, dest_path)
@@ -361,6 +379,7 @@ class ExtendedToolExecutor:
 
         try:
             import shutil
+
             source_path = FileTool.expand_path(source)
             dest_path = FileTool.expand_path(destination)
             shutil.move(source_path, dest_path)
@@ -394,7 +413,7 @@ class ExtendedToolExecutor:
                 "api_key": tavily_api_key,
                 "query": query,
                 "include_answer": True,
-                "max_results": 5
+                "max_results": 5,
             }
 
             response = requests.post(search_url, json=payload, timeout=10)
@@ -446,18 +465,19 @@ class ExtendedToolExecutor:
             response = requests.get(url, headers=headers, timeout=15)
 
             # Try to detect and set correct encoding
-            if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
+            if response.encoding is None or response.encoding.lower() == "iso-8859-1":
                 # Try to detect encoding from content
                 try:
                     import chardet
+
                     detected = chardet.detect(response.content)
-                    if detected and detected.get('encoding'):
-                        response.encoding = detected['encoding']
+                    if detected and detected.get("encoding"):
+                        response.encoding = detected["encoding"]
                     else:
-                        response.encoding = 'utf-8'
+                        response.encoding = "utf-8"
                 except ImportError:
                     # If chardet not available, try common encodings
-                    for encoding in ['utf-8', 'gb2312', 'gbk', 'big5', 'iso-8859-1']:
+                    for encoding in ["utf-8", "gb2312", "gbk", "big5", "iso-8859-1"]:
                         try:
                             response.content.decode(encoding)
                             response.encoding = encoding
@@ -473,7 +493,8 @@ class ExtendedToolExecutor:
             # Try using BeautifulSoup if available
             try:
                 from bs4 import BeautifulSoup
-                soup = BeautifulSoup(content, 'html.parser')
+
+                soup = BeautifulSoup(content, "html.parser")
 
                 # Remove script and style elements
                 for script in soup(["script", "style"]):
@@ -484,8 +505,10 @@ class ExtendedToolExecutor:
 
                 # Clean up whitespace
                 lines = (line.strip() for line in text.splitlines())
-                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                text = '\n'.join(chunk for chunk in chunks if chunk)
+                chunks = (
+                    phrase.strip() for line in lines for phrase in line.split("  ")
+                )
+                text = "\n".join(chunk for chunk in chunks if chunk)
 
                 if text:
                     return f"URL 内容:\n{text}"
@@ -497,14 +520,18 @@ class ExtendedToolExecutor:
                 import re
 
                 # Remove script and style tags
-                content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL)
-                content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL)
+                content = re.sub(
+                    r"<script[^>]*>.*?</script>", "", content, flags=re.DOTALL
+                )
+                content = re.sub(
+                    r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL
+                )
 
                 # Remove HTML tags
-                content = re.sub(r'<[^>]+>', '', content)
+                content = re.sub(r"<[^>]+>", "", content)
 
                 # Clean up whitespace
-                content = re.sub(r'\s+', ' ', content).strip()
+                content = re.sub(r"\s+", " ", content).strip()
 
                 if content:
                     return f"URL 内容:\n{content}"
@@ -563,20 +590,22 @@ class ExtendedToolExecutor:
             return "Error: 必须指定文件路径"
 
         import os
+
         if not os.path.isfile(file_path):
             return f"Error: 文件不存在 - {file_path}"
 
         # Get the current executor context to access bus and chat info
         # This is a bit hacky but necessary for the current architecture
         import inspect
+
         frame = inspect.currentframe()
         executor = None
 
         # Walk up the stack to find NaturalTaskExecutor
         while frame:
-            if 'self' in frame.f_locals:
-                obj = frame.f_locals['self']
-                if hasattr(obj, 'bus') and hasattr(obj, 'current_chat_id'):
+            if "self" in frame.f_locals:
+                obj = frame.f_locals["self"]
+                if hasattr(obj, "bus") and hasattr(obj, "current_chat_id"):
                     executor = obj
                     break
             frame = frame.f_back
@@ -614,11 +643,13 @@ class ExtendedToolExecutor:
 
         # Auto-detect format from file extension if not specified
         if not format_type:
-            if input_path.lower().endswith('.md'):
+            if input_path.lower().endswith(".md"):
                 format_type = "markdown"
-            elif input_path.lower().endswith('.html'):
+            elif input_path.lower().endswith(".html"):
                 format_type = "html"
-            elif input_path.lower().endswith('.docx') or input_path.lower().endswith('.doc'):
+            elif input_path.lower().endswith(".docx") or input_path.lower().endswith(
+                ".doc"
+            ):
                 format_type = "docx"
             else:
                 format_type = "text"
@@ -632,9 +663,7 @@ class ExtendedToolExecutor:
 
         # Call PDF tool
         success, message = self.pdf_tool.generate_pdf(
-            expanded_input,
-            expanded_output,
-            format_type
+            expanded_input, expanded_output, format_type
         )
 
         if success:
@@ -653,4 +682,3 @@ class ExtendedToolExecutor:
 
         success, content = self.skill_tool.load_skill(skill_name)
         return content
-

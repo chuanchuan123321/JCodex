@@ -1,4 +1,5 @@
 """Skills system for Minibot - modular capability extensions"""
+
 import os
 import json
 from pathlib import Path
@@ -52,7 +53,7 @@ class SkillsLoader:
                             skills[metadata["name"]] = {
                                 **metadata,
                                 "location": "builtin",
-                                "path": str(skill_file)
+                                "path": str(skill_file),
                             }
 
         # Load workspace skills (override builtin)
@@ -66,7 +67,7 @@ class SkillsLoader:
                             skills[metadata["name"]] = {
                                 **metadata,
                                 "location": "workspace",
-                                "path": str(skill_file)
+                                "path": str(skill_file),
                             }
 
         # Filter unavailable skills
@@ -145,7 +146,9 @@ class SkillsLoader:
 
             summary += f"  <skill>\n"
             summary += f"    <name>{skill['name']}</name>\n"
-            summary += f"    <description>{skill.get('description', 'N/A')}</description>\n"
+            summary += (
+                f"    <description>{skill.get('description', 'N/A')}</description>\n"
+            )
             summary += f"    <location>{skill['location']}</location>\n"
             summary += f"    <status>{status}</status>\n"
 
@@ -175,11 +178,11 @@ class SkillsLoader:
     def _parse_skill_metadata(self, skill_file: Path) -> Optional[Dict]:
         """Parse YAML frontmatter from SKILL.md"""
         try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
+            with open(skill_file, "r", encoding="utf-8") as f:
                 content = f.read()
 
             # Extract frontmatter
-            match = re.match(r'^---\n(.*?)\n---', content, re.DOTALL)
+            match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
             if not match:
                 return None
 
@@ -187,12 +190,12 @@ class SkillsLoader:
             metadata = {}
 
             # Parse YAML-like format
-            for line in frontmatter.split('\n'):
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    metadata[key.strip()] = value.strip().strip('"\'')
+            for line in frontmatter.split("\n"):
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    metadata[key.strip()] = value.strip().strip("\"'")
 
-            return metadata if metadata.get('name') else None
+            return metadata if metadata.get("name") else None
         except Exception as e:
             print(f"Error parsing skill metadata: {e}")
             return None
@@ -200,11 +203,11 @@ class SkillsLoader:
     def _extract_skill_content(self, skill_file: Path) -> str:
         """Extract content without frontmatter"""
         try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
+            with open(skill_file, "r", encoding="utf-8") as f:
                 content = f.read()
 
             # Remove frontmatter
-            match = re.match(r'^---\n.*?\n---\n(.*)', content, re.DOTALL)
+            match = re.match(r"^---\n.*?\n---\n(.*)", content, re.DOTALL)
             if match:
                 return match.group(1).strip()
             return content
@@ -222,7 +225,7 @@ class SkillsLoader:
         Returns:
             Formatted script information
         """
-        script_extensions = {'.py', '.sh', '.js', '.ts', '.go', '.rb', '.lua'}
+        script_extensions = {".py", ".sh", ".js", ".ts", ".go", ".rb", ".lua"}
         scripts = []
 
         try:
@@ -236,11 +239,19 @@ class SkillsLoader:
         if not scripts:
             return ""
 
-        # Build script information
+        # Build script information with workspace parent path
         info = []
+        # Get the workspace path to show parent directory
+        workspace_path = self.workspace_skills.parent
+
         for script in sorted(scripts):
             script_name = script.name
-            script_path = str(script)
+            # Show path relative to workspace
+            try:
+                script_path = str(script.relative_to(workspace_path))
+            except ValueError:
+                # If not relative to workspace, show full path
+                script_path = str(script)
             info.append(f"- **{script_name}** - `{script_path}`")
 
         return "\n".join(info)
@@ -309,11 +320,7 @@ class SkillsLoader:
     def _check_command_exists(command: str) -> bool:
         """Check if a command exists in PATH"""
         try:
-            subprocess.run(
-                ["which", command],
-                capture_output=True,
-                timeout=1
-            )
+            subprocess.run(["which", command], capture_output=True, timeout=1)
             return True
         except Exception:
             return False

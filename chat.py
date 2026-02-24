@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Minibot - 轻量级 AI 自动化工具"""
+
 import sys
-sys.path.insert(0, '/Users/a1-6/Desktop/AI智能体')
+
+sys.path.insert(0, "/Users/a1-6/Desktop/AI智能体")
 
 # 修复macOS终端UTF-8输入问题
 import os
 import locale
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-locale.setlocale(locale.LC_ALL, '')
+
+os.environ["PYTHONIOENCODING"] = "utf-8"
+locale.setlocale(locale.LC_ALL, "")
+
+# 加载环境变量
+from dotenv import load_dotenv
+
+load_dotenv("/Users/a1-6/Desktop/AI智能体/.env")
 
 from agent.core.ai_engine import AIEngine
 from agent.core.extended_tool_executor import ExtendedToolExecutor
@@ -20,6 +28,12 @@ from agent.config.loader import load_config
 import json
 import asyncio
 from pathlib import Path
+
+# 从环境变量读取配置
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "30000"))
+COMPRESS_AT = int(os.getenv("COMPRESS_AT", "25000"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
+MAX_WEB_SEARCHES = int(os.getenv("MAX_WEB_SEARCHES", "3"))
 
 
 class NaturalTaskExecutor:
@@ -59,10 +73,13 @@ class NaturalTaskExecutor:
         self.pending_context = None  # 待执行的上下文
         self.should_stop = False  # 是否应该停止当前任务
         self.web_search_count = 0  # 网络搜索计数
-        self.max_web_searches = 3  # 最多搜索 3 次
+        self.max_web_searches = MAX_WEB_SEARCHES  # 从环境变量读取
+        self.max_steps = MAX_STEPS  # 从环境变量读取
         self.task_compression_summary = ""  # 当前任务的压缩摘要
         # 从记忆文件加载累积的压缩摘要
-        self.accumulated_compression = self.memory_manager.load_accumulated_compression()
+        self.accumulated_compression = (
+            self.memory_manager.load_accumulated_compression()
+        )
         self.current_task_start_step = 0  # 当前任务的起始步骤
         self.event_loop = None  # 事件循环（仅在网关模式下设置）
 
@@ -77,10 +94,12 @@ class NaturalTaskExecutor:
         import re
 
         # 分离中文字符、英文单词和其他字符
-        chinese_chars = re.findall(r'[\u4e00-\u9fff]', text)
-        text_without_chinese = re.sub(r'[\u4e00-\u9fff]', '', text)
-        english_words = re.findall(r'\b[a-zA-Z]+\b', text_without_chinese)
-        other_chars = len(text) - len(chinese_chars) - sum(len(w) for w in english_words)
+        chinese_chars = re.findall(r"[\u4e00-\u9fff]", text)
+        text_without_chinese = re.sub(r"[\u4e00-\u9fff]", "", text)
+        english_words = re.findall(r"\b[a-zA-Z]+\b", text_without_chinese)
+        other_chars = (
+            len(text) - len(chinese_chars) - sum(len(w) for w in english_words)
+        )
 
         # 基于实际反馈优化的token估算
         # 中文：1汉字 ≈ 1.7 token
@@ -109,7 +128,13 @@ class NaturalTaskExecutor:
             print(f"✅ 任务历史已自动压缩 (清除了 {tokens_before} tokens)")
 
             # 在网关模式下向飞书发送通知
-            if event_loop and self.is_gateway_mode and self.bus and self.current_channel and self.current_chat_id:
+            if (
+                event_loop
+                and self.is_gateway_mode
+                and self.bus
+                and self.current_channel
+                and self.current_chat_id
+            ):
                 try:
                     msg = f"✅ 任务历史已自动压缩 (清除了 {tokens_before} tokens)"
                     coro = self._send_to_channel(msg)
@@ -126,7 +151,12 @@ class NaturalTaskExecutor:
         except Exception as e:
             print(f"压缩失败: {e}")
             # 在网关模式下发送错误消息
-            if self.is_gateway_mode and self.bus and self.current_channel and self.current_chat_id:
+            if (
+                self.is_gateway_mode
+                and self.bus
+                and self.current_channel
+                and self.current_chat_id
+            ):
                 asyncio.ensure_future(self._send_to_channel(f"⚠️ 压缩失败: {str(e)}"))
 
     def execute_task(self, user_request: str):
@@ -168,6 +198,7 @@ class NaturalTaskExecutor:
 
         # Get current time
         from agent.tools.time_tool import TimeTool
+
         current_time = TimeTool.get_current_time()
 
         # Build skills context (two-layer strategy like nanobot)
@@ -191,7 +222,7 @@ class NaturalTaskExecutor:
         agent_md_path = Path(__file__).parent / "Agent.md"
 
         # 读取 Agent.md 模板
-        with open(agent_md_path, 'r', encoding='utf-8') as f:
+        with open(agent_md_path, "r", encoding="utf-8") as f:
             agent_template = f.read()
 
         # 分离系统提示词和用户消息部分
@@ -210,34 +241,57 @@ class NaturalTaskExecutor:
 
         # 替换系统提示词中的变量
         system_prompt = system_prompt_template
-        system_prompt = system_prompt.replace('{step_count}', str(self.step_count))
-        system_prompt = system_prompt.replace('{max_steps}', str(self.max_steps))
-        system_prompt = system_prompt.replace('{step_count_minus_1}', str(self.step_count - 1))
-        system_prompt = system_prompt.replace('{steps_remaining}', str(self.max_steps - self.step_count + 1))
-        system_prompt = system_prompt.replace('{accumulated_compression}', self.accumulated_compression if self.accumulated_compression else "这是第一个任务")
+        system_prompt = system_prompt.replace("{step_count}", str(self.step_count))
+        system_prompt = system_prompt.replace("{max_steps}", str(self.max_steps))
+        system_prompt = system_prompt.replace(
+            "{step_count_minus_1}", str(self.step_count - 1)
+        )
+        system_prompt = system_prompt.replace(
+            "{steps_remaining}", str(self.max_steps - self.step_count + 1)
+        )
+        system_prompt = system_prompt.replace(
+            "{accumulated_compression}",
+            self.accumulated_compression
+            if self.accumulated_compression
+            else "这是第一个任务",
+        )
 
         # 加载execution_history文件内容
         execution_history_content = self.memory_manager.load_execution_history()
-        execution_history_text = "\n".join(execution_history_content) if execution_history_content else "还没有执行任何步骤"
-        system_prompt = system_prompt.replace('{execution_history}', execution_history_text)
+        execution_history_text = (
+            "\n".join(execution_history_content)
+            if execution_history_content
+            else "还没有执行任何步骤"
+        )
+        system_prompt = system_prompt.replace(
+            "{execution_history}", execution_history_text
+        )
 
-        system_prompt = system_prompt.replace('{current_time}', current_time)
-        system_prompt = system_prompt.replace('{web_search_count}', str(self.web_search_count))
-        system_prompt = system_prompt.replace('{max_web_searches}', str(self.max_web_searches))
-        system_prompt = system_prompt.replace('{project_root}', str(project_root))
-        system_prompt = system_prompt.replace('{workspace_path}', str(workspace_path))
-        system_prompt = system_prompt.replace('{builtin_skills_path}', str(builtin_skills_path))
-        system_prompt = system_prompt.replace('{workspace_skills_path}', str(workspace_skills_path))
-        system_prompt = system_prompt.replace('{desktop_path}', str(desktop_path))
-        system_prompt = system_prompt.replace('{output_path}', str(output_path))
-        system_prompt = system_prompt.replace('{temp_path}', str(temp_path))
-        system_prompt = system_prompt.replace('{cache_path}', str(cache_path))
-        system_prompt = system_prompt.replace('{skills_summary}', skills_summary)
+        system_prompt = system_prompt.replace("{current_time}", current_time)
+        system_prompt = system_prompt.replace(
+            "{web_search_count}", str(self.web_search_count)
+        )
+        system_prompt = system_prompt.replace(
+            "{max_web_searches}", str(self.max_web_searches)
+        )
+        system_prompt = system_prompt.replace("{project_root}", str(project_root))
+        system_prompt = system_prompt.replace("{workspace_path}", str(workspace_path))
+        system_prompt = system_prompt.replace(
+            "{builtin_skills_path}", str(builtin_skills_path)
+        )
+        system_prompt = system_prompt.replace(
+            "{workspace_skills_path}", str(workspace_skills_path)
+        )
+        system_prompt = system_prompt.replace("{desktop_path}", str(desktop_path))
+        system_prompt = system_prompt.replace("{output_path}", str(output_path))
+        system_prompt = system_prompt.replace("{temp_path}", str(temp_path))
+        system_prompt = system_prompt.replace("{cache_path}", str(cache_path))
+        system_prompt = system_prompt.replace("{skills_summary}", skills_summary)
 
         # 替换用户消息中的变量
         user_message = user_message_template
-        user_message = user_message.replace('{user_request}', user_request)
-        user_message = user_message.replace('{context}', context)
+        user_message = user_message.replace("{user_request}", user_request)
+        user_message = user_message.replace("{context}", context)
 
         # 调用 API 时分离传递系统提示词和用户消息
         response = self.ai_engine.call_api(user_message, system_prompt=system_prompt)
@@ -370,10 +424,12 @@ AI 想要执行以下操作：
                     history_text = "\n".join(self.execution_history)
                     current_tokens = self._estimate_tokens(history_text)
 
-                # 只有当超过30000 token时才压缩
-                if current_tokens > 30000:
+                # 只有当超过阈值时才压缩
+                if current_tokens > COMPRESS_AT:
                     # 发送压缩提示
-                    compact_msg = f"⏳ 近期记忆已达 {current_tokens} tokens，正在压缩任务历史..."
+                    compact_msg = (
+                        f"⏳ 近期记忆已达 {current_tokens} tokens，正在压缩任务历史..."
+                    )
                     print(f"{compact_msg}")
                     if self.bus and self.current_channel and self.current_chat_id:
                         asyncio.ensure_future(self._send_to_channel(compact_msg))
@@ -382,7 +438,7 @@ AI 想要执行以下操作：
                     import threading
 
                     # 获取事件循环（可能来自网关模式保存的 executor.event_loop）
-                    event_loop = getattr(self, 'event_loop', None)
+                    event_loop = getattr(self, "event_loop", None)
                     if not event_loop:
                         try:
                             event_loop = asyncio.get_running_loop()
@@ -392,12 +448,12 @@ AI 想要执行以下操作：
                     compression_thread = threading.Thread(
                         target=self._compress_and_notify,
                         args=(event_loop,),
-                        daemon=True
+                        daemon=True,
                     )
                     compression_thread.start()
                 else:
                     # 近期记忆未超过限制，显示当前token数
-                    print(f"📊 近期记忆: {current_tokens}/30000 tokens")
+                    print(f"📊 近期记忆: {current_tokens}/{COMPRESS_AT} tokens")
 
         else:
             print(f"\n⚠️  未知操作: {action}，继续下一步...\n")
@@ -477,7 +533,9 @@ AI 想要执行以下操作：
             # 新的压缩摘要添加到前面，包含存档路径和简短摘要（不显示编号）
             self.accumulated_compression = f"{task_summary}\n📁 详细内容: {full_archive_path}\n\n{self.accumulated_compression}"
         else:
-            self.accumulated_compression = f"{task_summary}\n📁 详细内容: {full_archive_path}"
+            self.accumulated_compression = (
+                f"{task_summary}\n📁 详细内容: {full_archive_path}"
+            )
 
         # 保存到记忆文件
         self.memory_manager.save_accumulated_compression(self.accumulated_compression)
@@ -532,7 +590,7 @@ AI 想要执行以下操作：
                 natural_part = response[:start_idx].strip()
                 # 移除 "接下来我要: " 前缀
                 if natural_part.startswith("接下来我要:"):
-                    natural_part = natural_part[len("接下来我要:"):].strip()
+                    natural_part = natural_part[len("接下来我要:") :].strip()
                 return natural_part
             else:
                 # 如果没有 JSON 标记，返回整个响应
@@ -555,11 +613,11 @@ AI 想要执行以下操作：
 
                 if start_idx >= 0 and end_idx > start_idx:
                     # 使用分隔符提取JSON
-                    json_str = response[start_idx + len(start_marker):end_idx].strip()
+                    json_str = response[start_idx + len(start_marker) : end_idx].strip()
                 else:
                     # 备选方案：查找 { 和 }
-                    start_idx = response.find('{')
-                    end_idx = response.rfind('}') + 1
+                    start_idx = response.find("{")
+                    end_idx = response.rfind("}") + 1
 
                     if start_idx < 0 or end_idx <= start_idx:
                         if attempt == max_retries - 1:
@@ -569,13 +627,13 @@ AI 想要执行以下操作：
                     json_str = response[start_idx:end_idx]
 
                 # 尝试修复常见的JSON问题
-                json_str = json_str.replace('\n', ' ')  # 移除换行符
-                json_str = json_str.replace('\r', '')   # 移除回车符
+                json_str = json_str.replace("\n", " ")  # 移除换行符
+                json_str = json_str.replace("\r", "")  # 移除回车符
 
                 # 移除可能的代码块标记
-                if json_str.startswith('```'):
+                if json_str.startswith("```"):
                     json_str = json_str[3:]
-                if json_str.endswith('```'):
+                if json_str.endswith("```"):
                     json_str = json_str[:-3]
                 json_str = json_str.strip()
 
@@ -592,21 +650,23 @@ AI 想要执行以下操作：
                             decision = {
                                 "action": "execute_tool",
                                 "tool": possible_tool,
-                                "params": decision.get("params", {})
+                                "params": decision.get("params", {}),
                             }
 
                     return decision
                 except json.JSONDecodeError as e:
                     # 如果失败，尝试修复常见问题
-                    error_pos = e.pos if hasattr(e, 'pos') else 0
+                    error_pos = e.pos if hasattr(e, "pos") else 0
 
                     # 修复策略1：处理content字段中的未转义引号
                     # 对于content字段中的HTML/长文本，需要特殊处理
                     json_str = re.sub(
                         r'("content"\s*:\s*")((?:[^"\\]|\\.)*?)(")',
-                        lambda m: m.group(1) + m.group(2).replace('"', '\\"') + m.group(3),
+                        lambda m: m.group(1)
+                        + m.group(2).replace('"', '\\"')
+                        + m.group(3),
                         json_str,
-                        flags=re.DOTALL
+                        flags=re.DOTALL,
                     )
 
                     try:
@@ -619,25 +679,30 @@ AI 想要执行以下操作：
                                 decision = {
                                     "action": "execute_tool",
                                     "tool": possible_tool,
-                                    "params": decision.get("params", {})
+                                    "params": decision.get("params", {}),
                                 }
 
                         return decision
                     except json.JSONDecodeError:
                         # 修复策略2：处理 HTML 内容中的引号
-                        json_str = re.sub(r'(?<=[a-zA-Z0-9])"(?=[a-zA-Z0-9=])', '\\"', json_str)
+                        json_str = re.sub(
+                            r'(?<=[a-zA-Z0-9])"(?=[a-zA-Z0-9=])', '\\"', json_str
+                        )
 
                         try:
                             decision = json.loads(json_str)
 
                             # 自动修复：如果action不是execute_tool或respond，尝试修复
-                            if decision.get("action") not in ["execute_tool", "respond"]:
+                            if decision.get("action") not in [
+                                "execute_tool",
+                                "respond",
+                            ]:
                                 possible_tool = decision.get("action")
                                 if "params" in decision:
                                     decision = {
                                         "action": "execute_tool",
                                         "tool": possible_tool,
-                                        "params": decision.get("params", {})
+                                        "params": decision.get("params", {}),
                                     }
 
                             return decision
@@ -645,18 +710,23 @@ AI 想要执行以下操作：
                             # 修复策略3：尝试找到最后一个完整的JSON对象
                             # 从后往前找，确保JSON是完整的
                             for i in range(len(json_str) - 1, 0, -1):
-                                if json_str[i] == '}':
+                                if json_str[i] == "}":
                                     try:
-                                        decision = json.loads(json_str[:i+1])
+                                        decision = json.loads(json_str[: i + 1])
 
                                         # 自动修复：如果action不是execute_tool或respond，尝试修复
-                                        if decision.get("action") not in ["execute_tool", "respond"]:
+                                        if decision.get("action") not in [
+                                            "execute_tool",
+                                            "respond",
+                                        ]:
                                             possible_tool = decision.get("action")
                                             if "params" in decision:
                                                 decision = {
                                                     "action": "execute_tool",
                                                     "tool": possible_tool,
-                                                    "params": decision.get("params", {})
+                                                    "params": decision.get(
+                                                        "params", {}
+                                                    ),
                                                 }
 
                                         return decision
@@ -685,7 +755,12 @@ AI 想要执行以下操作：
             if self.web_search_count >= self.max_web_searches:
                 result = f"⚠️ 已达到网络搜索限制({self.max_web_searches}次)，请基于已有信息给出结论"
                 print(f"\n执行结果:\n{result}\n")
-                history_entry = f"执行 {tool_name}: {result}"
+                import json
+
+                tool_json = json.dumps(
+                    {"tool": tool_name, "params": params}, ensure_ascii=False
+                )
+                history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: {result}"
                 self.execution_history.append(history_entry)
                 # 保存到记忆文件
                 self.memory_manager.append_execution_step(history_entry)
@@ -700,13 +775,23 @@ AI 想要执行以下操作：
 
         # 如果是发送文件，在网关模式下处理
         if tool_name == "send_file":
-            if self.is_gateway_mode and self.bus and self.current_channel and self.current_chat_id:
-                file_path = params.get("path", "") or params.get("file_path", "")
+            file_path = params.get("path", "") or params.get("file_path", "")
+            if (
+                self.is_gateway_mode
+                and self.bus
+                and self.current_channel
+                and self.current_chat_id
+            ):
                 result = self._send_file_to_channel(file_path)
             else:
                 result = "❌ send_file 工具仅在网关模式下可用"
             print(f"\n执行结果:\n{result}\n")
-            history_entry = f"执行 {tool_name}: {result}"
+            import json
+
+            tool_json = json.dumps(
+                {"tool": tool_name, "params": params}, ensure_ascii=False
+            )
+            history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: {result}"
             self.execution_history.append(history_entry)
             # 保存到记忆文件
             self.memory_manager.append_execution_step(history_entry)
@@ -714,8 +799,12 @@ AI 想要执行以下操作：
 
         # 如果是生成PDF，处理参数映射（支持 input/input_path 和 output/output_path 两种方式）
         if tool_name == "generate_pdf":
-            params["input_path"] = params.get("input_path", "") or params.get("input", "")
-            params["output_path"] = params.get("output_path", "") or params.get("output", "")
+            params["input_path"] = params.get("input_path", "") or params.get(
+                "input", ""
+            )
+            params["output_path"] = params.get("output_path", "") or params.get(
+                "output", ""
+            )
             # 移除旧参数，避免混淆
             params.pop("input", None)
             params.pop("output", None)
@@ -727,8 +816,14 @@ AI 想要执行以下操作：
         # 显示执行结果
         print(f"\n执行结果:\n{result}\n")
 
-        # 完整保存到记忆（不截断）
-        history_entry = f"执行 {tool_name}: {result}"
+        # 完整保存到记忆（包含完整 JSON 请求）
+        import json
+
+        tool_json = json.dumps(
+            {"tool": tool_name, "params": params}, ensure_ascii=False
+        )
+        history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: {result}"
+
         self.execution_history.append(history_entry)
 
         # 同步保存到记忆文件（确保下一步能读到）
@@ -738,13 +833,14 @@ AI 想要执行以下操作：
         if tool_name == "set_timer" and self.waiting_for_timer:
             print("⏳ 等待定时器触发...\n")
             import time
+
             while self.waiting_for_timer and not self.timer_triggered:
                 time.sleep(0.5)
             print("✅ 定时器已触发，继续执行任务\n")
 
     def _ask_for_approval(self) -> str:
         """Ask user for approval to execute command with arrow keys"""
-        options = ['yes', 'all', 'no']
+        options = ["yes", "all", "no"]
         selected = 0  # 默认选中第一个选项
         first_display = True
 
@@ -771,17 +867,17 @@ AI 想要执行以下操作：
                 import platform
 
                 # Windows 和 Unix 的不同处理方式
-                if platform.system() == 'Windows':
+                if platform.system() == "Windows":
                     # Windows 上使用简单的输入方式
                     ch = input().strip()
-                    if ch.lower() == 'y':
-                        return 'yes'
-                    elif ch.lower() == 'a':
-                        return 'all'
-                    elif ch.lower() == 'n':
-                        return 'no'
-                    elif ch.lower() == 'q':
-                        return 'no'
+                    if ch.lower() == "y":
+                        return "yes"
+                    elif ch.lower() == "a":
+                        return "all"
+                    elif ch.lower() == "n":
+                        return "no"
+                    elif ch.lower() == "q":
+                        return "no"
                     else:
                         return options[selected]
                 else:
@@ -797,33 +893,33 @@ AI 想要执行以下操作：
                         tty.setraw(fd)
                         ch = sys.stdin.read(1)
 
-                        if ch == '\x1b':  # ESC序列
+                        if ch == "\x1b":  # ESC序列
                             next1 = sys.stdin.read(1)
-                            if next1 == '[':
+                            if next1 == "[":
                                 next2 = sys.stdin.read(1)
-                                if next2 == 'C':  # 右箭头
+                                if next2 == "C":  # 右箭头
                                     selected = (selected + 1) % len(options)
-                                elif next2 == 'D':  # 左箭头
+                                elif next2 == "D":  # 左箭头
                                     selected = (selected - 1) % len(options)
-                                elif next2 == 'A':  # 上箭头
+                                elif next2 == "A":  # 上箭头
                                     selected = (selected - 1) % len(options)
-                                elif next2 == 'B':  # 下箭头
+                                elif next2 == "B":  # 下箭头
                                     selected = (selected + 1) % len(options)
-                        elif ch == '\r' or ch == '\n':  # 回车
+                        elif ch == "\r" or ch == "\n":  # 回车
                             print()  # 换行
                             return options[selected]
-                        elif ch.lower() == 'y':  # 快捷键 y
+                        elif ch.lower() == "y":  # 快捷键 y
                             print()
-                            return 'yes'
-                        elif ch.lower() == 'a':  # 快捷键 a
+                            return "yes"
+                        elif ch.lower() == "a":  # 快捷键 a
                             print()
-                            return 'all'
-                        elif ch.lower() == 'n':  # 快捷键 n
+                            return "all"
+                        elif ch.lower() == "n":  # 快捷键 n
                             print()
-                            return 'no'
-                        elif ch == 'q' or ch == '\x03':  # q 或 Ctrl+C
+                            return "no"
+                        elif ch == "q" or ch == "\x03":  # q 或 Ctrl+C
                             print()
-                            return 'no'
+                            return "no"
 
                     finally:
                         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -839,17 +935,17 @@ AI 想要执行以下操作：
         """Check if a tool requires user approval before execution"""
         # 只读和安全操作不需要确认
         safe_tools = {
-            "load_skill",      # 加载skill内容
-            "read_pdf",        # 读取PDF
-            "read_markdown",   # 读取Markdown
-            "read_json",       # 读取JSON
-            "file_read",       # 读取文件
-            "file_list",       # 列出文件
-            "search_files",    # 搜索文件
-            "get_file_info",   # 获取文件信息
-            "web_search",      # 网络搜索
-            "read_url",        # 读取URL
-            "set_timer",       # 设置定时器
+            "load_skill",  # 加载skill内容
+            "read_pdf",  # 读取PDF
+            "read_markdown",  # 读取Markdown
+            "read_json",  # 读取JSON
+            "file_read",  # 读取文件
+            "file_list",  # 列出文件
+            "search_files",  # 搜索文件
+            "get_file_info",  # 获取文件信息
+            "web_search",  # 网络搜索
+            "read_url",  # 读取URL
+            "set_timer",  # 设置定时器
         }
         return tool_name not in safe_tools
 
@@ -886,7 +982,12 @@ AI 想要执行以下操作：
 
         if "Error" in result or "错误" in result:
             return f"出现错误: {result_preview}"
-        elif "Success" in result or "成功" in result or "created" in result or "已创建" in result:
+        elif (
+            "Success" in result
+            or "成功" in result
+            or "created" in result
+            or "已创建" in result
+        ):
             return f"成功完成。{result_preview}"
         else:
             return f"得到结果: {result_preview}"
@@ -1023,6 +1124,7 @@ AI 想要执行以下操作：
             return f"✅ 文件已发送: {file_name} ({file_size} bytes)"
         except Exception as e:
             import traceback
+
             error_trace = traceback.format_exc()
             return f"❌ 发送文件出错:\n{error_trace}"
 
@@ -1047,13 +1149,14 @@ def get_user_input(prompt: str = "你: ") -> str:
     try:
         # 对于macOS，使用更简单的方法
         import sys
+
         sys.stdout.write(prompt)
         sys.stdout.flush()
 
         # 直接读取，不使用readline
         line = sys.stdin.readline()
         if line:
-            return line.rstrip('\n\r')
+            return line.rstrip("\n\r")
         return ""
     except KeyboardInterrupt:
         return "exit"
@@ -1066,6 +1169,7 @@ async def gateway_mode():
     # Fix event loop issue for lark-oapi WebSocket client
     try:
         import nest_asyncio
+
         nest_asyncio.apply()
     except ImportError:
         print("⚠️  nest_asyncio not installed, some asyncio warnings may appear")
@@ -1073,8 +1177,9 @@ async def gateway_mode():
 
     # Suppress asyncio warnings
     import warnings
-    warnings.filterwarnings('ignore', category=RuntimeWarning)
-    warnings.filterwarnings('ignore', message='.*cannot enter context.*')
+
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", message=".*cannot enter context.*")
 
     print("\n🚀 启动 Minibot 网关模式...\n")
 
@@ -1107,18 +1212,18 @@ async def gateway_mode():
                 # Wait for inbound message with timeout
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
 
-                print(f"\n{'='*60}")
+                print(f"\n{'=' * 60}")
                 print(f"📨 【收到飞书消息】")
                 print(f"发送者: {msg.sender_id}")
                 print(f"内容: {msg.content}")
-                print(f"{'='*60}\n")
+                print(f"{'=' * 60}\n")
 
                 # 检查是否在等待用户确认
                 if executor.waiting_for_approval:
                     print(f"✅ 【收到用户确认】\n")
                     response = msg.content.lower().strip()
 
-                    if response in ['yes', 'y']:
+                    if response in ["yes", "y"]:
                         print(f"✅ 用户同意执行命令\n")
                         executor.waiting_for_approval = False
                         executor.approval_response = "yes"
@@ -1134,14 +1239,18 @@ async def gateway_mode():
                             # 继续下一步 - 使用ensure_future避免嵌套asyncio问题
                             executor.step_count += 1
                             context = executor._build_context()
-                            asyncio.ensure_future(executor._execute_step_async(executor.pending_user_request, context))
+                            asyncio.ensure_future(
+                                executor._execute_step_async(
+                                    executor.pending_user_request, context
+                                )
+                            )
 
                             executor.pending_decision = None
                             executor.pending_user_request = None
                             executor.pending_context = None
                         continue
 
-                    elif response in ['all', 'a']:
+                    elif response in ["all", "a"]:
                         print(f"✅ 用户允许所有命令\n")
                         executor.allow_all_commands = True
                         executor.waiting_for_approval = False
@@ -1154,14 +1263,18 @@ async def gateway_mode():
                             executor._handle_tool_execution(decision)
                             executor.step_count += 1
                             context = executor._build_context()
-                            asyncio.ensure_future(executor._execute_step_async(executor.pending_user_request, context))
+                            asyncio.ensure_future(
+                                executor._execute_step_async(
+                                    executor.pending_user_request, context
+                                )
+                            )
 
                             executor.pending_decision = None
                             executor.pending_user_request = None
                             executor.pending_context = None
                         continue
 
-                    elif response in ['no', 'n']:
+                    elif response in ["no", "n"]:
                         print(f"❌ 用户拒绝执行命令\n")
                         executor.waiting_for_approval = False
                         executor.approval_response = "no"
@@ -1214,25 +1327,30 @@ async def gateway_mode():
                     if all_history:
                         history_text = "\n".join(all_history)
                         current_tokens = executor._estimate_tokens(history_text)
-                        compact_msg = f"📊 近期记忆: {current_tokens} tokens，正在压缩..."
+                        compact_msg = (
+                            f"📊 近期记忆: {current_tokens} tokens，正在压缩..."
+                        )
                     else:
                         compact_msg = "⏳ 正在压缩任务历史记录..."
 
                     await executor._send_to_channel(compact_msg)
                     # 在后台线程中执行压缩（不等待）
                     import threading
+
                     event_loop = asyncio.get_running_loop()
                     compression_thread = threading.Thread(
                         target=executor._compress_and_notify,
                         args=(event_loop,),
-                        daemon=True
+                        daemon=True,
                     )
                     compression_thread.start()
                     continue
 
                 # Reset execution state for new message
                 executor._cleanup_large_results()  # 清理上一个任务的大型网页结果
-                executor.ai_engine.truncate_web_results(max_length=300)  # 截断AI引擎对话历史中的网页结果
+                executor.ai_engine.truncate_web_results(
+                    max_length=300
+                )  # 截断AI引擎对话历史中的网页结果
                 executor.ai_engine.clear_history()  # 清空AI引擎的对话历史
                 # 不清空 execution_history，让它积累所有任务的执行历史
                 # 直到用户输入 /compact 时才压缩
@@ -1256,9 +1374,7 @@ async def gateway_mode():
     # Run channels and message processor concurrently
     try:
         await asyncio.gather(
-            channel_manager.start_all(),
-            process_messages(),
-            return_exceptions=True
+            channel_manager.start_all(), process_messages(), return_exceptions=True
         )
     except KeyboardInterrupt:
         print("\n\n🛑 正在关闭...\n")
@@ -1291,7 +1407,7 @@ def main():
             if not user_input:
                 continue
 
-            if user_input.lower() in ['exit', 'quit']:
+            if user_input.lower() in ["exit", "quit"]:
                 print("\n👋 再见！\n")
                 break
 
@@ -1317,7 +1433,9 @@ def main():
 
             # 清理上一个任务的大型网页结果
             executor._cleanup_large_results()
-            executor.ai_engine.truncate_web_results(max_length=300)  # 截断AI引擎对话历史中的网页结果
+            executor.ai_engine.truncate_web_results(
+                max_length=300
+            )  # 截断AI引擎对话历史中的网页结果
 
             # 清空AI引擎的对话历史，为新任务开始做准备
             executor.ai_engine.clear_history()
@@ -1344,8 +1462,16 @@ def main():
 if __name__ == "__main__":
     import sys
 
-    # Check for gateway mode
-    if len(sys.argv) > 1 and sys.argv[1] == "gateway":
-        asyncio.run(gateway_mode())
+    # Check for gateway mode or desktop mode
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "gateway":
+            asyncio.run(gateway_mode())
+        elif sys.argv[1] == "desktop":
+            from agent.ui.desktop import main as desktop_main
+
+            desktop_main.main()
+        else:
+            print(f"Unknown command: {sys.argv[1]}")
+            print("Usage: python chat.py [gateway|desktop]")
     else:
         main()

@@ -26,16 +26,22 @@ class SkillTool:
         try:
             # Check if skill exists
             available_skills = self.skills_loader.list_skills(filter_unavailable=False)
-            skill_names = [s['name'] for s in available_skills]
+            skill_names = [s["name"] for s in available_skills]
 
             if skill_name not in skill_names:
-                return False, f"❌ Skill '{skill_name}' not found. Available skills: {', '.join(skill_names)}"
+                return (
+                    False,
+                    f"❌ Skill '{skill_name}' not found. Available skills: {', '.join(skill_names)}",
+                )
 
             # Check if skill is available (dependencies met)
-            skill = next((s for s in available_skills if s['name'] == skill_name), None)
+            skill = next((s for s in available_skills if s["name"] == skill_name), None)
             if not self.skills_loader._check_skill_available(skill):
                 missing = self.skills_loader._get_missing_requirements(skill)
-                return False, f"❌ Skill '{skill_name}' is unavailable. Missing: {', '.join(missing)}"
+                return (
+                    False,
+                    f"❌ Skill '{skill_name}' is unavailable. Missing: {', '.join(missing)}",
+                )
 
             # Load skill content
             content = self.skills_loader.load_skill(skill_name)
@@ -46,7 +52,9 @@ class SkillTool:
             skill_dir = self.skills_loader._find_skill_dir(skill_name)
             file_structure = self._get_file_structure(skill_dir)
 
-            return True, f"""✅ Loaded skill: {skill_name}
+            return (
+                True,
+                f"""✅ Loaded skill: {skill_name}
 
 ## 📁 Skill 目录结构
 
@@ -54,7 +62,8 @@ class SkillTool:
 
 ## 📖 Skill 内容
 
-{content}"""
+{content}""",
+            )
 
         except Exception as e:
             return False, f"❌ Error loading skill: {str(e)}"
@@ -75,9 +84,14 @@ class SkillTool:
             if not skill_dir or not skill_dir.exists():
                 return "无法获取文件结构"
 
+            # Get parent directory (workspace/skills)
+            parent_dir = skill_dir.parent
+            parent_name = parent_dir.name  # "skills"
+            grandparent_name = parent_dir.parent.name  # "workspace"
+
             lines = []
             lines.append(f"```")
-            lines.append(f"{skill_dir.name}/")
+            lines.append(f"{grandparent_name}/{parent_name}/{skill_dir.name}/")
 
             # List all items in the skill directory
             items = sorted(skill_dir.iterdir())
