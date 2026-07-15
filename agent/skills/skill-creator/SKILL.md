@@ -8,7 +8,7 @@ requires_env:
 
 # Skill Creator Guide
 
-Learn how to create custom skills for Minibot.
+Learn how to create custom skills for 麒麟OS-Agent.
 
 ## What is a Skill?
 
@@ -131,9 +131,9 @@ Best practices for Python development...
 
 Skills can be stored in two locations:
 
-1. **Builtin Skills** (included with Minibot)
+1. **Builtin Skills** (included with 麒麟OS-Agent)
    - Location: `agent/skills/`
-   - Managed by Minibot team
+   - Managed by 麒麟OS-Agent team
 
 2. **Workspace Skills** (your custom skills)
    - Location: `workspace/skills/`
@@ -210,7 +210,7 @@ Always list what's needed:
 ## Testing Your Skill
 
 1. Place your skill in `workspace/skills/my-skill/`
-2. Run Minibot
+2. Run 麒麟OS-Agent
 3. The skill will be automatically loaded
 4. Ask the AI to use your skill
 
