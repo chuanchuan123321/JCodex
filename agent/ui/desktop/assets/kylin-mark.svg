@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="Kylin Agent mark">
+  <defs>
+    <linearGradient id="b" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f62fe"/>
+      <stop offset="1" stop-color="#00a6d6"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd36a"/>
+      <stop offset="1" stop-color="#f29b2e"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="84" height="84" rx="22" fill="#ffffff"/>
+  <path d="M49 13c11 12 20 25 22 39 2 19-9 33-26 42 5-12 4-21-3-30-8-10-21-17-35-30 14 2 26-2 42-21z" fill="url(#b)"/>
+  <path d="M44 91c-5-18 1-32 15-43 10-8 25-13 35-26-1 20-8 35-20 47-10 10-21 16-30 22z" fill="url(#g)"/>
+  <circle cx="49" cy="50" r="15" fill="#fff" opacity="0.94"/>
+  <path d="M40 50h18M49 41v18" stroke="#0f62fe" stroke-width="5" stroke-linecap="round"/>
+</svg>

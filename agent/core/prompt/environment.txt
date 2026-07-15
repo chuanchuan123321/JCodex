@@ -1,0 +1,32 @@
+# Environment Information
+
+Here is some useful information about the environment you are running in:
+
+<env>
+  Working directory: {working_directory}
+  Is directory a git repo: {is_git_repo}
+  Platform: {platform}
+  Today's date: {today_date}
+</env>
+
+<directories>
+{directories}
+</directories>
+
+# Project Paths
+
+- Project root: {project_root}
+- Workspace: {workspace_path}
+- Built-in Skills: {builtin_skills_path}
+- Workspace Skills: {workspace_skills_path}
+- Desktop: {desktop_path}
+- Output: {output_path}
+- Temp: {temp_path}
+- Cache: {cache_path}
+
+# File Creation Rules
+
+- User-specified locations take priority
+- Final output files → {output_path}
+- Temporary files → {temp_path}
+- Cache data → {cache_path}

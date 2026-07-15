@@ -1,12 +1,12 @@
-# 🤖 Minibot
+# 🤖 麒麟OS-Agent
 
 <div align="center">
 
-<img src="images/logo.png" alt="Minibot Logo" width="1200">
+<img src="images/logo.png" alt="麒麟OS-Agent Logo" width="1200">
 
 **[English](README.md) | [中文](README.zh.md)**
 
-![Python Version](https://img.shields.io/badge/python-3.8-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
+![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 
 基于原创 SuperAgent 架构的超轻量级 AI 自动化工具，通过自然语言交互执行任务。
 
@@ -18,9 +18,14 @@
 
 ## ✨ 概述
 
-Minibot 是基于原创 SuperAgent 架构的超轻量级 AI 自动化工具，通过自然语言交互在终端中执行各种任务。
+麒麟OS-Agent 是基于原创 SuperAgent 架构的超轻量级 AI 自动化工具，通过自然语言交互在终端中执行各种任务。
 
 ## 🏗️ 架构设计
+
+终端、桌面和网关模式现在共用一套 LangGraph 任务状态机。LangChain 负责标准
+模型与消息抽象，现有 Provider 请求适配、工具、安全审批、记忆与 UI 事件协议
+继续由项目自身维护。SQLite 检查点会保留 question/审批中断，但不会保存私有
+思考内容。
 
 ```mermaid
 graph TB
@@ -33,7 +38,7 @@ graph TB
     Desktop --> Executor
     Gateway --> Executor
 
-    Executor --> Loop[🔄 思维链<br/>循环决策]
+    Executor --> Loop[LangGraph 任务状态机]
 
     Loop --> AI[AI 引擎]
     Loop --> Tools[工具执行器]
@@ -67,7 +72,7 @@ graph TB
 
 **🔥 核心创新：**
 
-- **🔄 思维链循环决策**：AI 引擎持续推理、规划和执行，直到任务完成
+- **LangGraph 任务状态机**：运行时通过显式状态完成规划、执行、中断、恢复与结束
   - 分析当前状态 → 规划下一步 → 执行工具 → 验证结果 → 继续或结束
 
 - **♾️ 无限记忆模块**：革命性压缩系统实现无限上下文
@@ -111,9 +116,9 @@ graph TB
 
 </details>
 
-## 💡 为什么选择 Minibot？
+## 💡 为什么选择 麒麟OS-Agent？
 
-| 特性 | 传统 AI | Minibot |
+| 特性 | 传统 AI | 麒麟OS-Agent |
 |------|---------|---------|
 | **能力** | 只能聊天 | 执行真实任务 |
 | **控制** | 对话交流 | 控制服务器并执行命令 |
@@ -121,15 +126,24 @@ graph TB
 | **规划** | 单次响应 | AI 自动多步骤规划 |
 | **界面** | 仅网页/App | CLI / 桌面 / 网关 |
 
-**Minibot 填补了空白** - 不仅仅是聊天，而是真正**控制你的服务器**并自主执行任务。
+**麒麟OS-Agent 填补了空白** - 不仅仅是聊天，而是真正**控制你的服务器**并自主执行任务。
 
 ## 安装
+
+### 环境要求
+
+- Python 3.11 或更高版本
+- 使用 LangChain 1.2.7 和 LangGraph 1.0.7 作为共享 Agent 运行时
+- 使用 LangGraph SQLite Checkpointer 3.1.0 持久化任务状态
+
+支持的框架版本已固定在 `requirements.txt` 和 `setup.py` 中，确保终端、
+桌面端和网关模式使用一致的运行环境。
 
 ### 从源代码安装
 
 ```bash
-git clone https://github.com/chuanchuan123321/Minibot.git
-cd Minibot
+git clone https://github.com/chuanchuan123321/麒麟OS-Agent.git
+cd 麒麟OS-Agent
 pip install -e .
 ```
 
@@ -189,7 +203,7 @@ TEMPERATURE=0.7
 - ✅ 国内 API 服务 (如 yunwu.ai 等)
 - ✅ 其他兼容 OpenAI 格式的 API
 
-### 2️⃣ 运行 Minibot
+### 2️⃣ 运行 麒麟OS-Agent
 
 选择你喜欢的模式：
 
@@ -239,6 +253,8 @@ python chat.py desktop
 
 **桌面模式功能：**
 - 🖥️ 现代化轻量级 UI，带侧边栏导航
+- 🌓 明暗主题、响应式布局与键盘无障碍操作
+- ⏹️ 可靠停止、前端等待队列与任务状态反馈
 - 📊 实时 token 使用量监控，可视化指示器
 - 📁 工作区文件浏览器（output/temp 文件夹）
 - 🧠 记忆文件查看器（execution_history.md、accumulated_compression.md）
@@ -246,6 +262,12 @@ python chat.py desktop
 - ⚙️ 应用内设置编辑器（修改 API 密钥、模型、参数等）
 - ✅ 可视化命令审批对话框
 - 💬 聊天界面，显示思考步骤和工具执行结果
+
+桌面端默认使用 Chrome 应用窗口；如需在系统浏览器中打开，可执行：
+
+```bash
+MINIBOT_DESKTOP_MODE=browser python chat.py desktop
+```
 
 **桌面 UI 组件：**
 - **聊天区域**：主对话界面，消息气泡形式
@@ -363,7 +385,7 @@ python chat.py desktop
 ## 📁 项目结构
 
 ```
-Minibot/
+麒麟OS-Agent/
 ├── agent/
 │   ├── core/
 │   │   ├── ai_engine.py              # AI 引擎
@@ -424,7 +446,7 @@ Minibot/
 
 ## 🧠 记忆系统架构
 
-Minibot 拥有一个智能的多层级记忆系统，专为长时间运行的任务设计，能够高效管理上下文：
+麒麟OS-Agent 拥有一个智能的多层级记忆系统，专为长时间运行的任务设计，能够高效管理上下文：
 
 ### 记忆结构
 
@@ -477,7 +499,7 @@ Minibot 拥有一个智能的多层级记忆系统，专为长时间运行的任
 
 ## 无限上下文与智能压缩
 
-Minibot 通过智能压缩机制实现**无限上下文容量**：
+麒麟OS-Agent 通过智能压缩机制实现**无限上下文容量**：
 
 **工作原理：**
 
@@ -523,7 +545,7 @@ Minibot 通过智能压缩机制实现**无限上下文容量**：
 
 ## 🎓 Skill 系统
 
-Minibot 包含强大的 Skill 系统，用于模块化知识管理：
+麒麟OS-Agent 包含强大的 Skill 系统，用于模块化知识管理：
 
 ### 什么是 Skill？
 
@@ -569,7 +591,7 @@ EOF
 
 ### 文件管理
 
-Minibot 自动在有组织的目录中管理文件：
+麒麟OS-Agent 自动在有组织的目录中管理文件：
 
 ```
 workspace/

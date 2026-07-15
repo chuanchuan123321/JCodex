@@ -1,0 +1,43 @@
+# Tool Usage Guidelines
+
+## Available Tools
+
+The following tools are available for you to use. Each tool has a specific purpose and parameters.
+
+### File Operations
+
+- **Read**: Read a file or directory from the local filesystem. Returns up to 2000 lines by default with line numbers. Use offset parameter to read specific sections.
+- **Glob**: Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts". Returns matching file paths sorted by modification time.
+- **Grep**: Fast content search using regular expressions. Supports full regex syntax. Returns file paths and line numbers with at least one match.
+
+- **Edit**: Perfrom exact string replacements in files. You MUST use your Read tool at least once in the conversation before editing. When editing text from Read tool output, ensure you preserve the exact indentation. ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+
+- **Write**: Writes a file to the local filesystem. This tool will overwrite existing files. If this is an existing file, you MUST use the Read tool first to read the file's contents.
+
+### Shell
+
+- **Bash**: Executes a given bash command in a persistent shell session with optional timeout. AVOID using cd - use the workdir parameter instead. Use for terminal operations like git, npm, docker, etc.
+
+### Web
+
+- **WebSearch**: Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs.
+- **WebFetch**: Fetches content from a specified URL. Takes a URL and optional format as input.
+
+### Subagents
+
+- **Task**: Launch a new agent to handle complex, multistep tasks autonomously. Available subagents:
+  - **explore**: Fast agent specialized for exploring codebases. Use when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase.
+  - **general**: General-purpose agent for researching complex questions and executing multi-step tasks.
+
+### Other
+
+- **Question**: Ask the user questions during execution. Use to gather requirements, clarify instructions, or offer choices.
+- **Skill**: Load a specialized skill that provides domain-specific instructions and workflows.
+
+## Tool Usage Best Practices
+
+1. **Read first**: Always read a file before editing it
+2. **Use right tool**: Use specialized tools (Read/Edit/Write) instead of shell commands for file operations
+3. **Parallel calls**: Call multiple independent tools in parallel when possible
+4. **Context aware**: Use Glob/Grep for exploration instead of Bash find/grep
+5. **Be specific**: Include file paths and line numbers in code references

@@ -1,4 +1,4 @@
-"""Skills system for Minibot - modular capability extensions"""
+"""Skills system for 麒麟OS-Agent - modular capability extensions"""
 
 import os
 import json

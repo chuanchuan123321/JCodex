@@ -6,17 +6,19 @@ from pathlib import Path
 
 from agent.config.schema import Config
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
 except ImportError:
     pass
 
 
 def get_config_path() -> Path:
     """Get the configuration file path."""
-    config_dir = Path.home() / ".minibot"
+    config_dir = Path.home() / ".os-agent"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "config.json"
 

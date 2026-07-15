@@ -1,28 +1,56 @@
 """Extended tool executor with document reading capabilities"""
 
 import json
-from typing import Dict, Any, Callable, Optional
+import os
+import threading
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+import requests
+
 from agent.tools.shell import ShellTool
 from agent.tools.file import FileTool
 from agent.tools.time_tool import TimeTool
 from agent.tools.pdf_tool import PDFTool
 from agent.tools.skill_tool import SkillTool
-import os
-import requests
+from agent.tools.glob import execute_glob, get_glob_tool_definition
+from agent.tools.grep import execute_grep, get_grep_tool_definition
+from agent.tools.edit import execute_edit, get_edit_tool_definition
+from agent.tools.websearch import execute_websearch, get_websearch_tool_definition
+from agent.tools.codesearch import execute_codesearch, get_codesearch_tool_definition
+from agent.tools.preview import PreviewManager
+from agent.tools.plan import PlanTool, get_plan_tool_definition
 
 
 class ExtendedToolExecutor:
     """Execute tools with extended capabilities including document reading"""
 
-    def __init__(self, skills_loader=None):
+    def __init__(
+        self,
+        skills_loader=None,
+        preview_manager: Optional[PreviewManager] = None,
+        conversation_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        project_root: Optional[str] = None,
+    ):
         self.shell_tool = ShellTool()
         self.file_tool = FileTool()
         self.pdf_tool = PDFTool()
         self.skill_tool = SkillTool(skills_loader) if skills_loader else None
+        self.preview_manager = preview_manager or PreviewManager(
+            project_root or Path(__file__).resolve().parents[2]
+        )
+        self.conversation_id = conversation_id
+        self.message_id = message_id
+        self._plan_tools: Dict[str, PlanTool] = {}
+        self._plan_tools_lock = threading.RLock()
         self.tools: Dict[str, Callable] = {
-            "shell": self.execute_shell,
-            "file_read": self.execute_file_read,
-            "file_write": self.execute_file_write,
+            "bash": self.execute_shell,
+            "read": self.execute_file_read,
+            "glob": execute_glob,
+            "grep": execute_grep,
+            "edit": execute_edit,
+            "write": self.execute_file_write,
             "file_list": self.execute_file_list,
             "file_delete": self.execute_file_delete,
             "dir_create": self.execute_dir_create,
@@ -35,125 +63,449 @@ class ExtendedToolExecutor:
             "copy_file": self.execute_copy_file,
             "move_file": self.execute_move_file,
             "create_file": self.execute_create_file,
-            "web_search": self.execute_web_search,
+            "websearch": execute_websearch,
+            "codesearch": execute_codesearch,
             "read_url": self.execute_read_url,
             "set_timer": self.execute_set_timer,
             "send_file": self.execute_send_file,
             "generate_pdf": self.execute_generate_pdf,
             "load_skill": self.execute_load_skill,
+            "question": self.execute_question,
+            "update_plan": self.execute_update_plan,
+            "project_preview": self.execute_project_preview,
+            # Legacy aliases
+            "shell": self.execute_shell,
+            "file_read": self.execute_file_read,
+            "file_write": self.execute_file_write,
+            "web_search": execute_websearch,
         }
 
-    def get_available_tools(self) -> list:
-        """Get list of available tools"""
-        return [
+    def get_available_tools(self) -> List[Dict[str, Any]]:
+        """Get list of available tools in OpenAI function calling format - aligned with OpenCode"""
+        tools = [
+            get_plan_tool_definition(),
             {
-                "name": "shell",
-                "description": "Execute shell commands on the system",
-                "params": "command (string): The shell command to execute",
+                "type": "function",
+                "function": {
+                    "name": "project_preview",
+                    "description": "Start, inspect, or stop a persistent loopback-only Web project preview. Use this instead of bash for long-running development servers. For Python static sites, `python3 -m http.server` is enough: the preview manager injects the managed port and 127.0.0.1 binding automatically.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["start", "status", "stop"],
+                                "description": "Preview lifecycle action",
+                            },
+                            "command": {
+                                "type": "string",
+                                "description": "Start command. Prefer injected $HOST/$PORT for dev servers, e.g. npm run dev -- --host $HOST --port $PORT. Python `-m http.server` commands are normalized automatically. Required for start.",
+                            },
+                            "workdir": {
+                                "type": "string",
+                                "description": "Project-relative or absolute working directory inside the project root",
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Short project name displayed in the preview card",
+                            },
+                            "port": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 65535,
+                                "description": "Loopback port; use 0 or omit to allocate one automatically",
+                            },
+                            "health_path": {
+                                "type": "string",
+                                "description": "Local HTTP path used for readiness checks (default: /)",
+                            },
+                            "startup_timeout": {
+                                "type": "number",
+                                "minimum": 1,
+                                "maximum": 120,
+                                "description": "Maximum seconds to wait for the server to become reachable",
+                            },
+                            "preview_id": {
+                                "type": "string",
+                                "description": "Preview identifier returned by start; required for stop and optional for status",
+                            },
+                        },
+                        "required": ["action"],
+                    },
+                },
             },
             {
-                "name": "file_read",
-                "description": "Read the contents of a text file",
-                "params": "path (string): Path to the file to read",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures. AVOID using cd - use the workdir parameter instead.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "The command to execute",
+                            },
+                            "timeout": {
+                                "type": "number",
+                                "description": "Optional timeout in milliseconds",
+                            },
+                            "workdir": {
+                                "type": "string",
+                                "description": "The working directory to run the command in",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Clear, concise description of what this command does",
+                            },
+                        },
+                        "required": ["command"],
+                    },
+                },
             },
             {
-                "name": "file_write",
-                "description": "Write content to a file",
-                "params": "path (string): File path, content (string): Content to write",
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file or directory from the local filesystem. By default returns up to 2000 lines from the start. Use offset parameter to read specific sections.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filePath": {
+                                "type": "string",
+                                "description": "The absolute path to the file or directory to read",
+                            },
+                            "offset": {
+                                "type": "number",
+                                "description": "The line number to start reading from (1-indexed)",
+                            },
+                            "limit": {
+                                "type": "number",
+                                "description": "The maximum number of lines to read (defaults to 2000)",
+                            },
+                        },
+                        "required": ["filePath"],
+                    },
+                },
+            },
+            get_glob_tool_definition(),
+            get_grep_tool_definition(),
+            get_edit_tool_definition(),
+            {
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "description": "Writes a file to the local filesystem. This tool will overwrite existing files.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "The content to write to the file",
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "The absolute path to the file to write",
+                            },
+                        },
+                        "required": ["content", "path"],
+                    },
+                },
             },
             {
-                "name": "file_list",
-                "description": "List files in a directory",
-                "params": "path (string): Directory path (default: current directory)",
+                "type": "function",
+                "function": {
+                    "name": "file_list",
+                    "description": "List files in a directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Directory path (default: current directory)",
+                            },
+                        },
+                    },
+                },
             },
             {
-                "name": "file_delete",
-                "description": "Delete a file or folder (supports both files and directories)",
-                "params": "path (string): Path to the file or folder to delete",
+                "type": "function",
+                "function": {
+                    "name": "file_delete",
+                    "description": "Delete a file or folder (supports both files and directories)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the file or folder to delete",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
             },
             {
-                "name": "dir_create",
-                "description": "Create a directory",
-                "params": "path (string): Path to the directory to create",
+                "type": "function",
+                "function": {
+                    "name": "dir_create",
+                    "description": "Create a directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the directory to create",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
             },
             {
-                "name": "dir_change",
-                "description": "Change the current working directory",
-                "params": "path (string): Path to change to",
+                "type": "function",
+                "function": {
+                    "name": "copy_file",
+                    "description": "Copy a file or directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "description": "Source file path",
+                            },
+                            "destination": {
+                                "type": "string",
+                                "description": "Destination path",
+                            },
+                        },
+                        "required": ["source", "destination"],
+                    },
+                },
             },
             {
-                "name": "read_pdf",
-                "description": "Read and extract text from PDF files",
-                "params": "path (string): Path to the PDF file",
+                "type": "function",
+                "function": {
+                    "name": "move_file",
+                    "description": "Move or rename a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "description": "Source file path",
+                            },
+                            "destination": {
+                                "type": "string",
+                                "description": "Destination path",
+                            },
+                        },
+                        "required": ["source", "destination"],
+                    },
+                },
+            },
+            get_websearch_tool_definition(),
+            get_codesearch_tool_definition(),
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_url",
+                    "description": "Fetches content from a specified URL. Takes a URL and optional format as input.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The URL to fetch content from",
+                            },
+                            "format": {
+                                "type": "string",
+                                "description": "The format to return (text, markdown, html)",
+                            },
+                        },
+                        "required": ["url"],
+                    },
+                },
             },
             {
-                "name": "read_markdown",
-                "description": "Read and parse markdown files",
-                "params": "path (string): Path to the markdown file",
+                "type": "function",
+                "function": {
+                    "name": "read_pdf",
+                    "description": "Read PDF/Word documents (supports .pdf, .docx, .doc formats)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the PDF or document file",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
             },
             {
-                "name": "read_json",
-                "description": "Read and parse JSON files",
-                "params": "path (string): Path to the JSON file",
+                "type": "function",
+                "function": {
+                    "name": "set_timer",
+                    "description": "Set a timer that will trigger after specified minutes",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "minutes": {
+                                "type": "number",
+                                "description": "Minutes to wait",
+                            },
+                            "message": {
+                                "type": "string",
+                                "description": "Message to display when timer ends",
+                            },
+                        },
+                        "required": ["minutes"],
+                    },
+                },
             },
             {
-                "name": "search_files",
-                "description": "Search for files by name or pattern",
-                "params": "pattern (string): File name pattern to search for, path (string): Directory to search in",
+                "type": "function",
+                "function": {
+                    "name": "send_file",
+                    "description": "Send a file to the user via Feishu (Gateway Mode only)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the file to send",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
             },
             {
-                "name": "get_file_info",
-                "description": "Get detailed information about a file",
-                "params": "path (string): Path to the file",
+                "type": "function",
+                "function": {
+                    "name": "generate_pdf",
+                    "description": "Generate PDF from Markdown, text, HTML, or Word documents",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input_path": {
+                                "type": "string",
+                                "description": "Input file path",
+                            },
+                            "output_path": {
+                                "type": "string",
+                                "description": "Output PDF file path",
+                            },
+                            "format": {
+                                "type": "string",
+                                "description": "Input format (markdown/text/html/docx)",
+                            },
+                        },
+                        "required": ["input_path", "output_path"],
+                    },
+                },
             },
             {
-                "name": "copy_file",
-                "description": "Copy a file to a new location",
-                "params": "source (string): Source file path, destination (string): Destination path",
+                "type": "function",
+                "function": {
+                    "name": "load_skill",
+                    "description": "Load a skill's complete content to get detailed guidance and instructions",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "skill_name": {
+                                "type": "string",
+                                "description": "Name of the skill to load",
+                            },
+                        },
+                        "required": ["skill_name"],
+                    },
+                },
             },
             {
-                "name": "move_file",
-                "description": "Move or rename a file",
-                "params": "source (string): Source file path, destination (string): Destination path",
-            },
-            {
-                "name": "create_file",
-                "description": "Create a new file with content",
-                "params": "path (string): File path, content (string): File content",
-            },
-            {
-                "name": "web_search",
-                "description": "Search the web for information",
-                "params": "query (string): Search query",
-            },
-            {
-                "name": "read_url",
-                "description": "Read and extract content from a URL",
-                "params": "url (string): The URL to read",
-            },
-            {
-                "name": "set_timer",
-                "description": "Set a timer that will trigger after specified minutes",
-                "params": "minutes (number): Minutes to wait, message (string): Message to display when timer ends",
-            },
-            {
-                "name": "send_file",
-                "description": "Send a file to the user via Feishu",
-                "params": "path (string): Path to the file to send",
-            },
-            {
-                "name": "generate_pdf",
-                "description": "Generate PDF from Markdown, text, HTML, or Word documents",
-                "params": "input_path (string): Input file path, output_path (string): Output PDF file path, format (string): Input format (markdown/text/html/docx)",
-            },
-            {
-                "name": "load_skill",
-                "description": "Load a skill's complete content to get detailed guidance and instructions",
-                "params": "skill_name (string): Name of the skill to load (e.g., 'web', 'github', 'python')",
+                "type": "function",
+                "function": {
+                    "name": "question",
+                    "description": "Pause execution and ask the user one or more selectable questions. Do not continue until the user submits answers. Set multiple=true for every multi-select question. Set allow_free_text=true when the user may add text; never describe a capability in the question text without setting its matching field.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "questions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "header": {
+                                            "type": "string",
+                                            "description": "Very short label (max 30 chars)",
+                                        },
+                                        "multiple": {
+                                            "type": "boolean",
+                                            "description": "Required. True only when the user may select more than one option; false for exactly one choice.",
+                                        },
+                                        "selection_required": {
+                                            "type": "boolean",
+                                            "description": "Whether a listed option must be selected. Defaults to true; when allow_free_text is true, typed text can also satisfy the question.",
+                                        },
+                                        "allow_free_text": {
+                                            "type": "boolean",
+                                            "description": "Show a text supplement field below this question.",
+                                        },
+                                        "free_text_label": {
+                                            "type": "string",
+                                            "description": "Short label for the optional text supplement field.",
+                                        },
+                                        "free_text_placeholder": {
+                                            "type": "string",
+                                            "description": "Helpful example or placeholder for the text supplement field.",
+                                        },
+                                        "free_text_required": {
+                                            "type": "boolean",
+                                            "description": "Require text in the supplement field before submission.",
+                                        },
+                                        "options": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "description": {
+                                                        "type": "string",
+                                                        "description": "Explanation of choice",
+                                                    },
+                                                    "label": {
+                                                        "type": "string",
+                                                        "description": "Display text",
+                                                    },
+                                                },
+                                                "required": ["label", "description"],
+                                            },
+                                        },
+                                        "question": {
+                                            "type": "string",
+                                            "description": "Complete question",
+                                        },
+                                    },
+                                    "required": ["question", "header", "multiple", "options"],
+                                },
+                            },
+                        },
+                        "required": ["questions"],
+                    },
+                },
             },
         ]
 
-    def execute(self, tool_call: Dict[str, Any]) -> str:
+        return tools
+
+    def execute(
+        self,
+        tool_call: Dict[str, Any],
+        conversation_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        runtime: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Execute a tool call"""
         tool_name = tool_call.get("tool")
         params = tool_call.get("params", {})
@@ -162,30 +514,174 @@ class ExtendedToolExecutor:
             return f"Error: Unknown tool '{tool_name}'"
 
         try:
+            if tool_name == "update_plan":
+                return self.execute_update_plan(
+                    params,
+                    conversation_id=(
+                        conversation_id
+                        if conversation_id is not None
+                        else tool_call.get("conversation_id", self.conversation_id)
+                    ),
+                    message_id=(
+                        message_id
+                        if message_id is not None
+                        else tool_call.get("message_id", self.message_id)
+                    ),
+                )
+            if tool_name == "project_preview":
+                return self.execute_project_preview(
+                    params,
+                    conversation_id=(
+                        conversation_id
+                        if conversation_id is not None
+                        else tool_call.get("conversation_id", self.conversation_id)
+                    ),
+                    message_id=(
+                        message_id
+                        if message_id is not None
+                        else tool_call.get("message_id", self.message_id)
+                    ),
+                )
+            if tool_name in {"bash", "shell"}:
+                return self.execute_shell(params, runtime=runtime)
             result = self.tools[tool_name](params)
             return result
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
 
-    def execute_shell(self, params: Dict[str, Any]) -> str:
+    @staticmethod
+    def _plan_key(
+        conversation_id: Optional[str], message_id: Optional[str]
+    ) -> str:
+        conversation = str(conversation_id or "").strip()
+        message = str(message_id or "").strip()
+        return f"{conversation}:{message}" if conversation or message else "default"
+
+    def _plan_tool_for(
+        self, conversation_id: Optional[str], message_id: Optional[str]
+    ) -> PlanTool:
+        key = self._plan_key(conversation_id, message_id)
+        with self._plan_tools_lock:
+            return self._plan_tools.setdefault(key, PlanTool())
+
+    def execute_update_plan(
+        self,
+        params: Dict[str, Any],
+        conversation_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> str:
+        """Replace the plan isolated to the active task message."""
+        return self._plan_tool_for(conversation_id, message_id).update(params)
+
+    def get_plan_snapshot(
+        self,
+        conversation_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the latest snapshot for one task without creating it."""
+        key = self._plan_key(conversation_id, message_id)
+        with self._plan_tools_lock:
+            tool = self._plan_tools.get(key)
+        return tool.snapshot() if tool else None
+
+    def discard_plan_snapshot(
+        self,
+        conversation_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> None:
+        """Release one completed task's in-memory plan state."""
+        key = self._plan_key(conversation_id, message_id)
+        with self._plan_tools_lock:
+            self._plan_tools.pop(key, None)
+
+    def clear_plan_snapshots(self, conversation_id: Optional[str] = None) -> None:
+        """Release plan state for one conversation or the whole executor."""
+        conversation = str(conversation_id or "").strip()
+        with self._plan_tools_lock:
+            if not conversation:
+                self._plan_tools.clear()
+                return
+            prefix = f"{conversation}:"
+            for key in tuple(self._plan_tools):
+                if key == conversation or key.startswith(prefix):
+                    self._plan_tools.pop(key, None)
+
+    def execute_shell(
+        self,
+        params: Dict[str, Any],
+        runtime: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Execute shell command"""
         command = params.get("command", "")
         if not command:
             return "Error: command parameter required"
 
-        result = self.shell_tool.execute(command)
+        timeout = params.get("timeout")
+        if timeout is not None:
+            try:
+                timeout = max(float(timeout) / 1000, 0.1)
+            except (TypeError, ValueError):
+                return "Error: timeout must be a number of milliseconds"
+
+        result = self.shell_tool.execute(
+            command,
+            cwd=params.get("workdir"),
+            timeout=timeout,
+            cancel_event=(runtime or {}).get("cancel_event"),
+            cancelled=(runtime or {}).get("cancelled"),
+        )
         return self.shell_tool.format_result(result)
 
     def execute_file_read(self, params: Dict[str, Any]) -> str:
-        """Read file"""
-        path = params.get("path", "")
+        """Read file with pagination support - aligned with OpenCode"""
+        file_path = params.get("filePath", "") or params.get("path", "")
+        if not file_path:
+            return "Error: filePath parameter required"
+
+        suffix = os.path.splitext(str(file_path))[1].lower()
+        if suffix in {".pdf", ".doc", ".docx"}:
+            return self.execute_read_pdf({"path": file_path})
+        if suffix in {".xlsx", ".xlsm"}:
+            return self.execute_read_excel({"path": file_path})
+
+        offset = params.get("offset")
+        limit = params.get("limit")
+
+        success, content = self.file_tool.read_file(file_path, offset, limit)
+
+        if success:
+            return content
+        return f"Error: {content}"
+
+    def execute_read_excel(self, params: Dict[str, Any]) -> str:
+        """Read an Excel workbook as tab-separated sheet content."""
+        path = params.get("path", "") or params.get("filePath", "")
         if not path:
             return "Error: path parameter required"
+        try:
+            import openpyxl
 
-        success, content = self.file_tool.read_file(path)
-        if success:
-            return f"File contents:\n{content}"
-        return f"Error: {content}"
+            workbook = openpyxl.load_workbook(
+                FileTool.expand_path(path), read_only=True, data_only=True
+            )
+            lines = []
+            for sheet in workbook.worksheets:
+                lines.append(f"## Sheet: {sheet.title}")
+                for row in sheet.iter_rows(values_only=True):
+                    values = ["" if value is None else str(value) for value in row]
+                    if any(values):
+                        lines.append("\t".join(values))
+                    if sum(len(line) + 1 for line in lines) >= 50000:
+                        lines.append("[Workbook content truncated]")
+                        break
+                if lines and lines[-1] == "[Workbook content truncated]":
+                    break
+            workbook.close()
+            return "Excel contents:\n" + "\n".join(lines)
+        except ImportError:
+            return "Error: openpyxl not installed. Try: pip install openpyxl"
+        except Exception as exc:
+            return f"Error reading Excel workbook: {str(exc)}"
 
     def execute_file_write(self, params: Dict[str, Any]) -> str:
         """Write file"""
@@ -682,3 +1178,63 @@ class ExtendedToolExecutor:
 
         success, content = self.skill_tool.load_skill(skill_name)
         return content
+
+    def execute_question(self, params: Dict[str, Any]) -> str:
+        """Execute question - ask user for input"""
+        questions = params.get("questions", [])
+        if not questions:
+            return "Error: questions parameter required"
+
+        # Format question for user
+        formatted = []
+        for q in questions:
+            header = q.get("header", "Question")
+            question_text = q.get("question", "")
+            options = q.get("options", [])
+
+            formatted.append(f"【{header}】")
+            formatted.append(question_text)
+            if options:
+                formatted.append("选项:")
+                for opt in options:
+                    formatted.append(
+                        f"  - {opt.get('label', '')}: {opt.get('description', '')}"
+                    )
+            formatted.append("")
+
+        return "请回复你的选择:\n" + "\n".join(formatted)
+
+    def execute_project_preview(
+        self,
+        params: Dict[str, Any],
+        conversation_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> str:
+        """Execute a persistent project preview lifecycle action."""
+        action = str(params.get("action", "")).strip().lower()
+        preview_id = str(params.get("preview_id", "")).strip()
+
+        if action == "start":
+            result = self.preview_manager.start(
+                command=params.get("command", ""),
+                workdir=params.get("workdir", "."),
+                name=params.get("name"),
+                port=params.get("port", 0),
+                health_path=params.get("health_path", "/"),
+                startup_timeout=params.get("startup_timeout", 20),
+                conversation_id=conversation_id,
+                message_id=message_id,
+            )
+        elif action == "status":
+            result = self.preview_manager.status(
+                preview_id=preview_id or None,
+                conversation_id=conversation_id,
+            )
+        elif action == "stop":
+            if not preview_id:
+                return "Error: preview_id parameter required for stop"
+            result = self.preview_manager.stop(preview_id)
+        else:
+            return "Error: action must be start, status, or stop"
+
+        return json.dumps(result, ensure_ascii=False)

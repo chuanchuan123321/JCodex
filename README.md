@@ -1,12 +1,12 @@
-# 🤖 Minibot
+# 🤖 麒麟OS-Agent
 
 <div align="center">
 
-<img src="images/logo.png" alt="Minibot Logo" width="1200">
+<img src="images/logo.png" alt="麒麟OS-Agent Logo" width="1200">
 
 **[English](README.md) | [中文](README.zh.md)**
 
-![Python Version](https://img.shields.io/badge/python-3.8-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
+![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 
 An ultra-lightweight AI automation tool with original SuperAgent architecture that executes tasks through natural language interaction.
 
@@ -18,9 +18,15 @@ An ultra-lightweight AI automation tool with original SuperAgent architecture th
 
 ## ✨ Overview
 
-Minibot is an ultra-lightweight AI automation tool with original SuperAgent architecture that executes tasks through natural language interaction in the terminal.
+麒麟OS-Agent is an ultra-lightweight AI automation tool with original SuperAgent architecture that executes tasks through natural language interaction in the terminal.
 
 ## 🏗️ Architecture
+
+CLI, desktop, and gateway modes now share one LangGraph task state machine.
+LangChain supplies standard model/message abstractions, while the existing
+provider transport, tools, approvals, memory, and UI event protocol remain
+project-owned. SQLite checkpoints preserve question/approval interrupts
+without storing private reasoning.
 
 ```mermaid
 graph TB
@@ -33,7 +39,7 @@ graph TB
     Desktop --> Executor
     Gateway --> Executor
 
-    Executor --> Loop[🔄 Chain of Thought<br/>Loop Decision]
+    Executor --> Loop[LangGraph Task State Machine]
 
     Loop --> AI[AI Engine]
     Loop --> Tools[Tool Executor]
@@ -67,7 +73,7 @@ graph TB
 
 **🔥 Core Innovations:**
 
-- **🔄 Chain of Thought Loop Decision**: The AI engine continuously reasons, plans, and executes in a loop until task completion
+- **LangGraph Task State Machine**: The runtime plans, executes, interrupts, resumes, and finishes through explicit graph states
   - Analyze current state → Plan next step → Execute tool → Verify result → Continue or finish
 
 - **♾️ Infinite Memory Module**: Revolutionary compression system for unlimited context
@@ -111,9 +117,9 @@ graph TB
 
 </details>
 
-## 💡 Why Minibot?
+## 💡 Why 麒麟OS-Agent?
 
-| Feature | Traditional AI | Minibot |
+| Feature | Traditional AI | 麒麟OS-Agent |
 |---------|----------------|---------|
 | **Capability** | Chat only | Execute real tasks |
 | **Control** | Conversation | Control server & execute commands |
@@ -121,15 +127,24 @@ graph TB
 | **Planning** | Single response | AI automated multi-step planning |
 | **Interface** | Web / App only | CLI / Desktop / Gateway |
 
-**Minibot bridges the gap** - Not just chatting, but actually **controlling your server** and executing tasks autonomously.
+**麒麟OS-Agent bridges the gap** - Not just chatting, but actually **controlling your server** and executing tasks autonomously.
 
 ## Installation
+
+### Requirements
+
+- Python 3.11 or newer
+- LangChain 1.2.7 and LangGraph 1.0.7 for the shared agent runtime
+- LangGraph SQLite checkpointer 3.1.0 for persistent task state
+
+The supported framework versions are pinned in `requirements.txt` and
+`setup.py` so CLI, desktop, and gateway installations use the same runtime.
 
 ### Install from Source
 
 ```bash
-git clone https://github.com/chuanchuan123321/Minibot.git
-cd Minibot
+git clone https://github.com/chuanchuan123321/麒麟OS-Agent.git
+cd 麒麟OS-Agent
 pip install -e .
 ```
 
@@ -189,7 +204,7 @@ TEMPERATURE=0.7
 - ✅ Domestic API Services (e.g., yunwu.ai)
 - ✅ Other OpenAI-compatible APIs
 
-### 2️⃣ Run Minibot
+### 2️⃣ Run 麒麟OS-Agent
 
 Choose your preferred mode:
 
@@ -239,6 +254,8 @@ python chat.py desktop
 
 **Desktop Mode Features:**
 - 🖥️ Modern, lightweight UI with sidebar navigation
+- 🌓 Light/dark themes, responsive layout, and keyboard accessibility
+- ⏹️ Reliable stop handling, a client-side task queue, and clear status feedback
 - 📊 Real-time token usage monitoring with visual indicator
 - 📁 Workspace file browser (output/temp folders)
 - 🧠 Memory file viewer (execution_history.md, accumulated_compression.md)
@@ -246,6 +263,13 @@ python chat.py desktop
 - ⚙️ In-app settings editor (modify API keys, model, parameters)
 - ✅ Visual command approval dialog
 - 💬 Chat interface with thinking steps and tool execution results
+
+The desktop app uses a Chrome application window by default. To open it in the
+system browser instead:
+
+```bash
+MINIBOT_DESKTOP_MODE=browser python chat.py desktop
+```
 
 **Desktop UI Components:**
 - **Chat Area**: Main conversation interface with message bubbles
@@ -363,7 +387,7 @@ Next I will: Create project directories and main.py file
 ## 📁 Project Structure
 
 ```
-Minibot/
+麒麟OS-Agent/
 ├── agent/
 │   ├── core/
 │   │   ├── ai_engine.py              # AI Engine
@@ -424,7 +448,7 @@ Minibot/
 
 ## 🧠 Memory System Architecture
 
-Minibot features an intelligent multi-level memory system designed for efficient context management across long-running tasks:
+麒麟OS-Agent features an intelligent multi-level memory system designed for efficient context management across long-running tasks:
 
 ### Memory Structure
 
@@ -477,7 +501,7 @@ Next Task:
 
 ### Unlimited Context with Smart Compression
 
-Minibot achieves **unlimited context capacity** through an intelligent compression mechanism:
+麒麟OS-Agent achieves **unlimited context capacity** through an intelligent compression mechanism:
 
 **How It Works:**
 
@@ -523,7 +547,7 @@ Minibot achieves **unlimited context capacity** through an intelligent compressi
 
 ## 🎓 Skill System
 
-Minibot includes a powerful skill system for modular knowledge management:
+麒麟OS-Agent includes a powerful skill system for modular knowledge management:
 
 ### What are Skills?
 
@@ -569,7 +593,7 @@ EOF
 
 ### File Management
 
-Minibot automatically manages files in organized directories:
+麒麟OS-Agent automatically manages files in organized directories:
 
 ```
 workspace/

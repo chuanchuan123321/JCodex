@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="麒麟 OS-Agent 浅色主题图标">
+  <defs>
+    <linearGradient id="lightAccent" x1="22" y1="18" x2="76" y2="78" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4F7CFF"/>
+      <stop offset="1" stop-color="#6C52E8"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="5" width="86" height="86" rx="25" fill="#FFFFFF"/>
+  <rect x="5.75" y="5.75" width="84.5" height="84.5" rx="24.25" fill="none" stroke="#171717" stroke-opacity=".1" stroke-width="1.5"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="9">
+    <path d="M48 19c-13.8 0-25 7.6-25 17 0 5.9 4.4 11.1 11.1 14.1" stroke="#1D1D1B"/>
+    <path d="M77 48c0-13.8-7.6-25-17-25-5.9 0-11.1 4.4-14.1 11.1" stroke="#1D1D1B"/>
+    <path d="M48 77c13.8 0 25-7.6 25-17 0-5.9-4.4-11.1-11.1-14.1" stroke="url(#lightAccent)"/>
+    <path d="M19 48c0 13.8 7.6 25 17 25 5.9 0 11.1-4.4 14.1-11.1" stroke="#1D1D1B"/>
+  </g>
+  <circle cx="48" cy="48" r="8.5" fill="#F6F7F9" stroke="#1D1D1B" stroke-width="3"/>
+  <circle cx="48" cy="48" r="2.5" fill="#5B6FF2"/>
+</svg>

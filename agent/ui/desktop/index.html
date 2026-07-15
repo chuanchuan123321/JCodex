@@ -3,20 +3,37 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Minibot</title>
-    <link rel="stylesheet" href="styles.css">
+    <title>麒麟OS-Agent</title>
+    <link rel="icon" type="image/svg+xml" href="assets/kylin-agent-mark-light.svg" id="appFavicon">
+    <link rel="stylesheet" href="vendor/katex/katex.min.css">
+    <link rel="stylesheet" href="styles.css?v=20260713-32">
 </head>
-<body>
+<body class="theme-light">
+    <a class="skip-link" href="#messageInput">跳转到输入框</a>
     <div class="app-container">
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <span class="logo-icon">M</span>
-                    <span class="logo-text">Minibot</span>
+                    <img class="logo-icon theme-asset-logo" src="assets/kylin-agent-mark-light.svg" alt="">
+                    <span class="logo-text">麒麟OS-Agent</span>
                 </div>
             </div>
-            
+
             <div class="sidebar-content">
+                <button class="new-task-button" id="newTaskButton" type="button">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <path d="M12 5v14M5 12h14"/>
+                    </svg>
+                    <span>新建任务</span>
+                </button>
+                <div class="task-history-section">
+                    <div class="section-title task-history-title">任务</div>
+                    <div class="task-history-list" id="taskHistoryList" aria-label="任务历史">
+                        <div class="sidebar-empty">正在加载任务...</div>
+                    </div>
+                </div>
+
+                <div class="sidebar-tools-section">
                 <div class="section-title">Workspace</div>
                 <div class="workspace-section">
                     <div class="workspace-folder" id="outputFolder">
@@ -50,7 +67,7 @@
                         <div class="file-list" id="tempFiles"></div>
                     </div>
                 </div>
-                
+
                 <div class="section-title" style="margin-top: 16px;">Memory</div>
                 <div class="workspace-section">
                     <div class="workspace-folder" id="memoryFolder">
@@ -88,7 +105,7 @@
                         </div>
                     </div>
                 </div>
-                
+
                 <div class="section-title" style="margin-top: 16px;">Skills</div>
                 <div class="workspace-section">
                     <div class="workspace-folder" id="skillsFolder">
@@ -113,8 +130,9 @@
                         </button>
                     </div>
                 </div>
+                </div>
             </div>
-            
+
             <div class="sidebar-footer">
                 <button class="btn-settings" id="settingsBtn" title="Settings">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -123,69 +141,277 @@
                     </svg>
                     <span>Settings</span>
                 </button>
-                <div class="status-indicator" id="statusIndicator">
+
+                <!-- 数据整合按钮 -->
+                <button class="btn-settings" id="dataBtn" title="数据整合" onclick="openDataIntegration()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    <span>数据</span>
+                </button>
+
+                <!-- 偏好记忆按钮 -->
+                <button class="btn-settings" id="prefBtn" title="偏好记忆" onclick="openPreferences()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                        <circle cx="12" cy="7" r="4"/>
+                    </svg>
+                    <span>偏好</span>
+                </button>
+
+                <!-- 知识库按钮 -->
+                <button class="btn-settings" id="knowledgeBtn" title="知识库" onclick="openKnowledgeBase()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                    </svg>
+                    <span>知识</span>
+                </button>
+                <div class="status-indicator" id="statusIndicator" role="status" aria-live="polite">
                     <span class="status-dot"></span>
-                    <span class="status-text">Ready</span>
+                    <span class="status-text">正在初始化</span>
                 </div>
             </div>
         </aside>
-        
+
         <main class="main-content">
             <header class="chat-header">
                 <div class="header-left">
-                    <h1 class="chat-title">Chat</h1>
+                    <button class="btn-icon sidebar-toggle" id="sidebarToggle" type="button" aria-label="打开工作台导航" aria-expanded="false">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 6h16M4 12h16M4 18h16"/>
+                        </svg>
+                    </button>
+                    <h1 class="chat-title" id="activeTaskTitle">新任务</h1>
+                    <span class="header-subtitle">OS-Agent</span>
                 </div>
                 <div class="header-right">
-                    <div class="token-indicator" id="tokenIndicator" title="Memory Token Usage">
+                    <button class="embedding-badge" id="embeddingBadge" type="button" title="向量引擎状态" aria-label="查看向量引擎状态">
+                        <span class="embedding-dot"></span>
+                        <span id="embeddingProviderText">向量引擎</span>
+                    </button>
+                    <button class="token-indicator" id="tokenIndicator" type="button" title="记忆用量" aria-label="查看记忆用量">
                         <div class="token-progress">
                             <div class="token-progress-bar" id="tokenProgressBar"></div>
                         </div>
                         <span class="token-text" id="tokenText">0/30k</span>
-                    </div>
-                    <button class="btn-icon" id="clearChat" title="Clear">
+                    </button>
+                    <button class="btn-icon" id="themeToggle" title="切换主题" aria-label="切换明暗主题">
+                        <svg class="theme-icon theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                        </svg>
+                        <svg class="theme-icon theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="4"/>
+                            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+                        </svg>
+                    </button>
+                    <button class="btn-icon" id="clearChat" title="清空会话" aria-label="清空会话">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
                         </svg>
                     </button>
                 </div>
             </header>
-            
-            <div class="chat-messages" id="chatMessages">
+
+            <div class="chat-messages is-welcome" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions">
                 <div class="welcome-message">
-                    <div class="welcome-icon">M</div>
-                    <h2>Welcome to Minibot</h2>
-                    <p>Your AI automation assistant</p>
+                    <div class="welcome-mark" aria-hidden="true">
+                        <img class="theme-asset-mark" src="assets/kylin-agent-mark-light.svg" alt="">
+                        <span class="welcome-mark-glow"></span>
+                    </div>
+                    <div class="welcome-kicker">Kylin Agent Workspace</div>
+                    <h2>今天想完成什么？</h2>
+                    <p>描述目标，麒麟 OS-Agent 会规划步骤、调用工具并持续汇报进度。</p>
                     <div class="quick-actions">
-                        <button class="quick-action" data-prompt="Help me write a Python script">Write Code</button>
-                        <button class="quick-action" data-prompt="Search for latest AI news">Web Search</button>
-                        <button class="quick-action" data-prompt="Create a new file">Create File</button>
+                        <button class="quick-action" data-prompt="扫描当前项目并给出最值得优先修复的问题">
+                            <span class="quick-action-copy"><strong>扫描当前项目</strong><small>发现风险与优化机会</small></span>
+                            <span class="quick-action-arrow">↗</span>
+                        </button>
+                        <button class="quick-action" data-prompt="整理工作区文件并生成一份结构说明">
+                            <span class="quick-action-copy"><strong>整理工作区</strong><small>归类文件并生成说明</small></span>
+                            <span class="quick-action-arrow">↗</span>
+                        </button>
+                        <button class="quick-action" data-prompt="查看当前偏好、知识库和向量引擎状态">
+                            <span class="quick-action-copy"><strong>查看记忆状态</strong><small>偏好、知识与向量引擎</small></span>
+                            <span class="quick-action-arrow">↗</span>
+                        </button>
                     </div>
                 </div>
             </div>
-            
+
+            <!-- Message Queue Display -->
+            <div class="message-queue" id="messageQueue" style="display: none;" aria-live="polite">
+                <div class="queue-header">
+                    <span>等待队列</span>
+                    <div class="queue-header-actions">
+                        <span class="queue-count" id="queueCount">0</span>
+                        <button class="queue-clear" id="clearQueueButton" type="button">清空</button>
+                    </div>
+                </div>
+                <div class="queue-list" id="queueList"></div>
+            </div>
+
             <div class="input-area">
-                <div class="input-container">
-                    <textarea 
-                        id="messageInput" 
-                        placeholder="Message Minibot..." 
-                        rows="1"
-                        autocomplete="off"
-                    ></textarea>
-                    <button class="btn-send" id="sendButton" disabled>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                <div class="plan-progress" id="planProgress" hidden>
+                    <div class="plan-progress-panel" id="planProgressPanel" role="region" aria-label="任务计划">
+                        <p class="plan-progress-explanation" id="planProgressExplanation"></p>
+                        <ol class="plan-progress-list" id="planProgressList"></ol>
+                    </div>
+                    <button
+                        class="plan-progress-trigger"
+                        id="planProgressTrigger"
+                        type="button"
+                        aria-expanded="false"
+                        aria-controls="planProgressPanel"
+                    >
+                        <span class="plan-progress-state" aria-hidden="true"></span>
+                        <span class="plan-progress-count" id="planProgressCount">第 1 / 1 步</span>
+                        <span class="plan-progress-current" id="planProgressCurrent"></span>
+                        <svg class="plan-progress-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M6 15l6-6 6 6"/>
                         </svg>
                     </button>
+                </div>
+                <div class="input-container">
+                    <div class="composer-drop-hint" aria-hidden="true">
+                        <span class="composer-drop-hint-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                <path d="M12 16V4M7 9l5-5 5 5"/>
+                                <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>
+                            </svg>
+                        </span>
+                        <span>松开即可添加文件或图片</span>
+                    </div>
+                    <div class="composer-attachments" id="composerAttachments" aria-live="polite"></div>
+                    <textarea
+                        id="messageInput"
+                        placeholder="描述你希望检查、编辑或执行的任务…"
+                        rows="1"
+                        autocomplete="off"
+                        aria-label="任务输入"
+                    ></textarea>
+                    <div class="input-toolbar">
+                        <div class="input-tools-left">
+                            <button class="btn-input-tool" id="inputAddButton" type="button" title="添加文件或图片" aria-label="添加文件或图片">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path d="M12 5v14M5 12h14"/>
+                                </svg>
+                            </button>
+                            <input
+                                id="attachmentInput"
+                                class="visually-hidden-file-input"
+                                type="file"
+                                multiple
+                                accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.xml,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.java,.c,.h,.cpp,.hpp,.go,.rs,.sh,.zsh,.yaml,.yml,.toml,.ini,.cfg,.log,.sql,.pdf,.docx,.xlsx,.xlsm"
+                            >
+                            <button class="access-toggle" id="accessToggle" type="button" aria-pressed="false" title="等同于工具确认里的 All">
+                                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path d="M12 3l7 3v5c0 4.4-2.8 8.4-7 10-4.2-1.6-7-5.6-7-10V6l7-3z"/>
+                                    <path d="M9 12l2 2 4-5"/>
+                                </svg>
+                                <span id="accessModeLabel">询问模式</span>
+                                <svg class="access-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M6 9l6 6 6-6"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="input-tools-right">
+                            <button class="model-badge" id="modelBadge" type="button" title="当前模型">
+                                <span id="modelName">模型</span>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M6 9l6 6 6-6"/>
+                                </svg>
+                            </button>
+                            <button class="btn-stop" id="stopButton" style="display: none;" title="停止执行" aria-label="停止执行">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                    <rect x="6" y="6" width="12" height="12"/>
+                                </svg>
+                            </button>
+                            <button class="btn-send" id="sendButton" disabled title="发送" aria-label="发送任务">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                                    <path d="M12 19V5M5 12l7-7 7 7"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </main>
     </div>
-    
-    <div class="file-modal" id="fileModal">
+    <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="关闭工作台导航"></button>
+
+    <div class="browser-preview-modal" id="browserPreviewModal" role="dialog" aria-modal="true" aria-labelledby="browserPreviewTitle" aria-hidden="true">
+        <div class="browser-preview-shell">
+            <header class="browser-preview-toolbar">
+                <div class="browser-preview-identity">
+                    <img class="browser-preview-app-icon theme-asset-mark" src="assets/kylin-agent-mark-light.svg" alt="">
+                    <div class="browser-preview-heading">
+                        <strong id="browserPreviewTitle">项目预览</strong>
+                        <span id="browserPreviewStatus">本地沙盒</span>
+                    </div>
+                </div>
+                <div class="browser-preview-address-wrap">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"/>
+                        <path d="M3 12h18M12 3c2.3 2.5 3.5 5.5 3.5 9S14.3 18.5 12 21c-2.3-2.5-3.5-5.5-3.5-9S9.7 5.5 12 3z"/>
+                    </svg>
+                    <input id="browserPreviewAddress" type="text" readonly aria-label="预览地址" value="">
+                </div>
+                <div class="browser-preview-actions">
+                    <button class="browser-preview-action" id="browserPreviewRefresh" type="button" title="刷新预览" aria-label="刷新预览">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="M20 6v5h-5M4 18v-5h5"/>
+                            <path d="M6.1 9a7 7 0 0 1 11.5-2.1L20 11M4 13l2.4 4.1A7 7 0 0 0 17.9 15"/>
+                        </svg>
+                    </button>
+                    <button class="browser-preview-action" id="browserPreviewCopy" type="button" title="复制地址" aria-label="复制预览地址">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <rect x="8" y="8" width="11" height="11" rx="2"/>
+                            <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
+                        </svg>
+                    </button>
+                    <button class="browser-preview-action" id="browserPreviewExternal" type="button" title="在外部浏览器打开" aria-label="在外部浏览器打开">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="M14 4h6v6M20 4l-9 9"/>
+                            <path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/>
+                        </svg>
+                    </button>
+                    <button class="browser-preview-action is-stop" id="browserPreviewStop" type="button" title="停止预览服务" aria-label="停止预览服务">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <rect x="7" y="7" width="10" height="10" rx="1.5"/>
+                        </svg>
+                    </button>
+                    <button class="browser-preview-action" id="browserPreviewClose" type="button" title="关闭预览" aria-label="关闭项目预览">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="M18 6L6 18M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+            <div class="browser-preview-viewport">
+                <iframe
+                    id="browserPreviewFrame"
+                    title="项目网站预览"
+                    src="about:blank"
+                    sandbox="allow-scripts allow-forms allow-modals allow-downloads allow-pointer-lock allow-presentation allow-same-origin"
+                    referrerpolicy="no-referrer"
+                ></iframe>
+                <div class="browser-preview-state" id="browserPreviewState" aria-live="polite">
+                    <span class="browser-preview-state-spinner" aria-hidden="true"></span>
+                    <strong id="browserPreviewStateTitle">正在连接本地预览</strong>
+                    <span id="browserPreviewStateDetail">项目启动后会自动显示在这里</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="file-modal" id="fileModal" role="dialog" aria-modal="true" aria-labelledby="fileModalTitle">
         <div class="file-modal-content">
             <div class="file-modal-header">
                 <span class="file-modal-title" id="fileModalTitle">file.txt</span>
-                <button class="btn-icon" onclick="closeFileModal()">
+                <button class="btn-icon" onclick="closeFileModal()" aria-label="关闭文件预览">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -196,12 +422,12 @@
             </div>
         </div>
     </div>
-    
-    <div class="settings-modal" id="settingsModal">
+
+    <div class="settings-modal" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
         <div class="settings-modal-content">
             <div class="settings-modal-header">
-                <span>Settings</span>
-                <button class="btn-icon" onclick="closeSettingsModal()">
+                <span id="settingsModalTitle">运行设置</span>
+                <button class="btn-icon" onclick="closeSettingsModal()" aria-label="关闭运行设置">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -209,47 +435,326 @@
             </div>
             <div class="settings-modal-body">
                 <div class="settings-group">
-                    <label class="settings-label">API Base URL</label>
+                    <label class="settings-label">API 配置</label>
+                    <div class="settings-inline-actions">
+                        <select class="settings-input" id="configSelect" onchange="loadConfig(this.value)" style="flex: 1;">
+                            <option value="">选择已保存配置…</option>
+                        </select>
+                        <button class="btn-small" onclick="saveCurrentConfig()" title="保存当前设置">另存配置</button>
+                        <button class="btn-small btn-danger" onclick="deleteCurrentConfig()" title="删除选中配置">删除</button>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label" for="settingApiBaseUrl">API Base URL</label>
                     <input type="text" class="settings-input" id="settingApiBaseUrl" placeholder="https://api.openai.com/v1">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label">API Key</label>
+                    <label class="settings-label" for="settingApiKey">API Key</label>
                     <input type="password" class="settings-input" id="settingApiKey" placeholder="sk-...">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label">API Model</label>
+                    <label class="settings-label" for="settingApiModel">模型</label>
                     <input type="text" class="settings-input" id="settingApiModel" placeholder="gpt-4">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label">Tavily API Key <span class="settings-optional">(Optional)</span></label>
+                    <label class="settings-label" for="settingTavilyKey">Tavily API Key <span class="settings-optional">（可选）</span></label>
                     <input type="password" class="settings-input" id="settingTavilyKey" placeholder="tvly-...">
                 </div>
                 <div class="settings-divider"></div>
                 <div class="settings-group">
-                    <label class="settings-label">Max Steps <span class="settings-optional">(default: 20)</span></label>
+                    <label class="settings-label" for="settingMaxSteps">最大步骤 <span class="settings-optional">（默认 20）</span></label>
                     <input type="number" class="settings-input" id="settingMaxSteps" placeholder="20" min="1" max="50">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label">Max Tokens <span class="settings-optional">(AI response, default: 30000)</span></label>
+                    <label class="settings-label" for="settingMaxTokens">单次回答最大 Token <span class="settings-optional">（默认 30000）</span></label>
                     <input type="number" class="settings-input" id="settingMaxTokens" placeholder="30000" min="1000">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label">Compress At <span class="settings-optional">(memory compression threshold, default: 25000)</span></label>
+                    <label class="settings-label" for="settingCompressAt">记忆压缩阈值 <span class="settings-optional">（默认 25000，可独立设置）</span></label>
                     <input type="number" class="settings-input" id="settingCompressAt" placeholder="25000" min="1000">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label">Max Web Searches <span class="settings-optional">(default: 3)</span></label>
+                    <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 3）</span></label>
                     <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="3" min="0" max="10">
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-section-label">回答显示</div>
+                <div class="settings-group settings-switch-row">
+                    <span class="settings-switch-copy">
+                        <strong>显示知识附录</strong>
+                        <small>在回答结尾显示本轮命中的知识库片段</small>
+                    </span>
+                    <label class="settings-switch" for="settingShowKnowledgeAppendix">
+                        <input type="checkbox" id="settingShowKnowledgeAppendix">
+                        <span class="settings-switch-track" aria-hidden="true"></span>
+                    </label>
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closeSettingsModal()">Cancel</button>
-                <button class="btn-save" onclick="saveSettings()">Save</button>
+                <button class="btn-cancel" onclick="closeSettingsModal()">取消</button>
+                <button class="btn-save" id="saveSettingsButton" onclick="saveSettings()">保存</button>
             </div>
         </div>
     </div>
-    
+
+    <!-- Custom Input Dialog -->
+    <div class="custom-dialog" id="inputDialog">
+        <div class="custom-dialog-content input-dialog-content">
+            <div class="custom-dialog-header">
+                <span id="inputDialogTitle">输入</span>
+                <button class="btn-icon" onclick="closeInputDialog()" aria-label="关闭输入对话框">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="custom-dialog-body input-dialog-body">
+                <input type="text" id="inputDialogInput" class="settings-input" placeholder="" autofocus>
+            </div>
+            <div class="custom-dialog-footer">
+                <button class="btn-cancel" onclick="closeInputDialog()">取消</button>
+                <button class="btn-save" onclick="confirmInputDialog()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 数据整合弹窗 -->
+    <div class="settings-modal" id="dataModal">
+        <div class="settings-modal-content" style="max-width: 700px;">
+            <div class="settings-modal-header">
+                <span>数据整合</span>
+                <button class="btn-icon" onclick="closeDataModal()" aria-label="关闭数据整合">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="settings-modal-body" style="max-height: 70vh;">
+                <div class="settings-group">
+                    <label class="settings-label">数据统计</label>
+                    <div class="stats-grid" id="dataStats">
+                        <div class="stat-card">
+                            <div class="stat-value" id="statTotal">0</div>
+                            <div class="stat-label">总条目</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="statTool">0</div>
+                            <div class="stat-label">工具结果</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="statUser">0</div>
+                            <div class="stat-label">用户行为</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="statConfig">0</div>
+                            <div class="stat-label">手动配置</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">最近数据条目</label>
+                    <div class="data-list" id="dataList">
+                        <div class="data-item">
+                            <span class="data-source">加载中...</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">手动注入配置</label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" class="settings-input" id="configTypeInput" placeholder="配置类型（如：system）" style="flex: 1;">
+                        <input type="text" class="settings-input" id="configDataInput" placeholder="配置数据 JSON" style="flex: 2;">
+                        <button class="btn-small" onclick="ingestConfig()">注入</button>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-modal-footer">
+                <button class="btn-cancel" onclick="closeDataModal()">关闭</button>
+                <button class="btn-cancel" onclick="clearAllData()">清空数据</button>
+                <button class="btn-save" id="extractPreferencesButton" onclick="extractPreferences(this)">AI 提取偏好</button>
+                <button class="btn-save" onclick="refreshDataStats()">刷新</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 偏好记忆弹窗 -->
+    <div class="settings-modal" id="prefModal">
+        <div class="settings-modal-content" style="max-width: 700px;">
+            <div class="settings-modal-header">
+                <span>偏好记忆</span>
+                <button class="btn-icon" onclick="closePrefModal()" aria-label="关闭偏好记忆">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="settings-modal-body" style="max-height: 70vh;">
+                <div class="settings-group">
+                    <label class="settings-label">偏好分类</label>
+                    <div class="pref-tabs">
+                        <button class="pref-tab active" onclick="showPrefCategory('operation_habit')">操作习惯</button>
+                        <button class="pref-tab" onclick="showPrefCategory('output_style')">输出风格</button>
+                        <button class="pref-tab" onclick="showPrefCategory('security_strategy')">安全策略</button>
+                        <button class="pref-tab" onclick="showPrefCategory('ai_behavior')">AI行为</button>
+                        <button class="pref-tab" onclick="showPrefCategory('workflow')">工作流</button>
+                        <button class="pref-tab" onclick="showPrefCategory('custom')">自定义</button>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">当前偏好</label>
+                    <div class="pref-list" id="prefList">
+                        <div class="pref-item">
+                            <span class="pref-key">加载中...</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">添加/更新偏好</label>
+                    <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                        <select class="settings-input" id="prefCategorySelect" style="width: 150px;">
+                            <option value="operation_habit">操作习惯</option>
+                            <option value="output_style">输出风格</option>
+                            <option value="security_strategy">安全策略</option>
+                            <option value="ai_behavior">AI行为</option>
+                            <option value="workflow">工作流</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                        <input type="text" class="settings-input" id="prefKeyInput" placeholder="偏好键" style="flex: 1;">
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" class="settings-input" id="prefValueInput" placeholder="偏好值" style="flex: 2;">
+                        <button class="btn-small" onclick="addPreference()">添加/更新</button>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">版本历史</label>
+                    <div class="pref-snapshots" id="prefSnapshots">
+                        <div class="pref-snapshot-item">暂无可用快照</div>
+                    </div>
+                    <div style="margin-top: 8px;">
+                        <button class="btn-small" onclick="createPrefSnapshot()">创建快照</button>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-modal-footer">
+                <button class="btn-cancel" onclick="closePrefModal()">关闭</button>
+                <button class="btn-cancel" onclick="clearAllPreferences()">清空偏好</button>
+                <button class="btn-save" onclick="refreshPreferences()">刷新</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 知识库弹窗 -->
+    <div class="settings-modal" id="knowledgeModal">
+        <div class="settings-modal-content" style="max-width: 800px;">
+            <div class="settings-modal-header">
+                <span>知识库</span>
+                <button class="btn-icon" onclick="closeKnowledgeModal()" aria-label="关闭知识库">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="settings-modal-body" style="max-height: 70vh;">
+                <div class="settings-group">
+                    <label class="settings-label">知识库统计</label>
+                    <div class="stats-grid" id="knowledgeStats">
+                        <div class="stat-card">
+                            <div class="stat-value" id="kbTotal">0</div>
+                            <div class="stat-label">总条目</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="kbWorkflows">0</div>
+                            <div class="stat-label">工作流</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="kbCases">0</div>
+                            <div class="stat-label">成功案例</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="kbConflicts">0</div>
+                            <div class="stat-label">冲突数</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">搜索知识</label>
+                    <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                        <input type="text" class="settings-input" id="kbSearchInput" placeholder="搜索知识..." style="flex: 1;">
+                        <select class="settings-input" id="kbTypeSelect" style="width: 150px;">
+                            <option value="">全部类型</option>
+                            <option value="workflow">工作流</option>
+                            <option value="success_case">成功案例</option>
+                            <option value="template">模板</option>
+                            <option value="fact">事实</option>
+                            <option value="rule">规则</option>
+                        </select>
+                        <button class="btn-small" onclick="searchKnowledge()">搜索</button>
+                    </div>
+                    <div class="kb-results" id="kbResults">
+                        <div class="kb-item">输入搜索词或浏览下方知识</div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">知识浏览器</label>
+                    <div class="kb-list" id="kbList" style="max-height: 200px; overflow-y: auto;">
+                        <div class="kb-item">加载知识条目中...</div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">从完整记忆提取知识</label>
+                    <button class="btn-save" id="extractKnowledgeButton" onclick="extractKnowledgeFromMemory(this)">AI提取记忆知识</button>
+                    <div class="kb-results" id="kbExtractResult" style="margin-top: 8px;">
+                        <div class="kb-item">点击按钮后，系统会自动从完整记忆中抽取可复用知识</div>
+                    </div>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label">未解决冲突</label>
+                    <div class="conflict-list" id="conflictList">
+                        <div class="conflict-item">暂无冲突</div>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-modal-footer">
+                <button class="btn-cancel" onclick="closeKnowledgeModal()">关闭</button>
+                <button class="btn-save" onclick="refreshKnowledgeBase()">刷新</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Confirm Dialog -->
+    <div class="custom-dialog" id="confirmDialog">
+        <div class="custom-dialog-content" style="max-width: 360px;">
+            <div class="custom-dialog-header">
+                <span>确认</span>
+                <button class="btn-icon" onclick="closeConfirmDialog()" aria-label="关闭确认对话框">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="custom-dialog-body">
+                <p id="confirmDialogMessage" style="color: var(--text-secondary); line-height: 1.5;"></p>
+            </div>
+            <div class="custom-dialog-footer">
+                <button class="btn-cancel" onclick="closeConfirmDialog()">取消</button>
+                <button class="btn-save" onclick="confirmConfirmDialog()">确定</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/eel.js"></script>
-    <script src="app.js"></script>
+    <script src="vendor/katex/katex.min.js"></script>
+    <script src="app.js?v=20260713-32"></script>
 </body>
 </html>

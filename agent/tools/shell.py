@@ -1,9 +1,12 @@
 """Shell execution tool"""
-import subprocess
+
 import os
 import platform
-from typing import Dict, Any, Tuple, Optional
+import signal
+import subprocess
+import time
 from dataclasses import dataclass
+from typing import Callable, Optional, Tuple
 
 
 @dataclass
@@ -22,8 +25,15 @@ class ShellTool:
         self.max_output_length = max_output_length
         self.last_result: Optional[CommandResult] = None
 
-    def execute(self, command: str, cwd: Optional[str] = None) -> CommandResult:
-        """Execute a shell command safely"""
+    def execute(
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        timeout: Optional[float] = None,
+        cancel_event: Optional[object] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> CommandResult:
+        """Execute a shell command and stop its process group on cancellation."""
         try:
             # Security: Prevent dangerous commands
             dangerous_patterns = [
@@ -42,49 +52,164 @@ class ShellTool:
 
             for pattern in dangerous_patterns:
                 if pattern in command:
-                    return CommandResult(
+                    return self._remember(CommandResult(
                         returncode=1,
                         stdout="",
                         stderr=f"Dangerous command blocked: {pattern}",
                         success=False
-                    )
+                    ))
 
-            result = subprocess.run(
+            if self._is_cancelled(cancel_event, cancelled):
+                return self._remember(CommandResult(
+                    returncode=130,
+                    stdout="",
+                    stderr="Command cancelled",
+                    success=False,
+                ))
+
+            popen_options = {}
+            if os.name == "posix":
+                popen_options["start_new_session"] = True
+            elif os.name == "nt":
+                popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            process = subprocess.Popen(
                 command,
                 shell=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=30,
-                cwd=cwd or os.getcwd()
+                cwd=cwd or os.getcwd(),
+                **popen_options,
             )
+            effective_timeout = float(timeout) if timeout else 30.0
+            deadline = time.monotonic() + effective_timeout
+            stdout = ""
+            stderr = ""
 
-            stdout = result.stdout[:self.max_output_length]
-            stderr = result.stderr[:self.max_output_length]
+            while True:
+                if self._is_cancelled(cancel_event, cancelled):
+                    self._terminate_process_group(process)
+                    stdout, stderr = self._collect_output(process)
+                    return self._remember(CommandResult(
+                        returncode=130,
+                        stdout=stdout[:self.max_output_length],
+                        stderr=self._with_reason(stderr, "Command cancelled"),
+                        success=False,
+                    ))
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._terminate_process_group(process)
+                    stdout, stderr = self._collect_output(process)
+                    return self._remember(CommandResult(
+                        returncode=124,
+                        stdout=stdout[:self.max_output_length],
+                        stderr=self._with_reason(
+                            stderr, f"Command timeout ({effective_timeout:g}s)"
+                        ),
+                        success=False,
+                    ))
+
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+
+            stdout = (stdout or "")[:self.max_output_length]
+            stderr = (stderr or "")[:self.max_output_length]
 
             cmd_result = CommandResult(
-                returncode=result.returncode,
+                returncode=process.returncode,
                 stdout=stdout,
                 stderr=stderr,
-                success=result.returncode == 0
+                success=process.returncode == 0
             )
 
-            self.last_result = cmd_result
-            return cmd_result
-
-        except subprocess.TimeoutExpired:
-            return CommandResult(
-                returncode=1,
-                stdout="",
-                stderr="Command timeout (30s)",
-                success=False
-            )
+            return self._remember(cmd_result)
         except Exception as e:
-            return CommandResult(
+            return self._remember(CommandResult(
                 returncode=1,
                 stdout="",
                 stderr=str(e),
                 success=False
+            ))
+
+    @staticmethod
+    def _is_cancelled(
+        cancel_event: Optional[object],
+        cancelled: Optional[Callable[[], bool]],
+    ) -> bool:
+        try:
+            if callable(cancelled) and cancelled():
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(
+                hasattr(cancel_event, "is_set") and cancel_event.is_set()
             )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen) -> None:
+        sent_group_signal = False
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+                sent_group_signal = True
+            elif os.name == "nt":
+                if process.poll() is not None:
+                    return
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                if process.poll() is not None:
+                    return
+                process.terminate()
+        except (OSError, ProcessLookupError):
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+
+        if process.poll() is None:
+            try:
+                process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                pass
+
+        try:
+            # The shell can exit before its children. Signal the original
+            # process group even after the group leader has been reaped.
+            if os.name == "posix" and sent_group_signal:
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.poll() is None:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+
+    @staticmethod
+    def _collect_output(process: subprocess.Popen) -> tuple[str, str]:
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            stdout, stderr = process.communicate()
+        return stdout or "", stderr or ""
+
+    def _with_reason(self, stderr: str, reason: str) -> str:
+        combined = "\n".join(part for part in ((stderr or "").strip(), reason) if part)
+        return combined[:self.max_output_length]
+
+    def _remember(self, result: CommandResult) -> CommandResult:
+        self.last_result = result
+        return result
 
     def get_current_dir(self) -> str:
         """Get current working directory"""
