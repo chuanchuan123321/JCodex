@@ -52,7 +52,7 @@ class ProvidersConfig(BaseModel):
 
 
 class Config(BaseModel):
-    """Root configuration for 麒麟OS-Agent."""
+    """Root configuration for JCodex."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)

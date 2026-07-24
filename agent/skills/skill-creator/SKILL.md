@@ -8,7 +8,7 @@ requires_env:
 
 # Skill Creator Guide
 
-Learn how to create custom skills for 麒麟OS-Agent.
+Learn how to create custom skills for JCodex.
 
 ## What is a Skill?
 
@@ -131,9 +131,9 @@ Best practices for Python development...
 
 Skills can be stored in two locations:
 
-1. **Builtin Skills** (included with 麒麟OS-Agent)
+1. **Builtin Skills** (included with JCodex)
    - Location: `agent/skills/`
-   - Managed by 麒麟OS-Agent team
+   - Managed by the JCodex team
 
 2. **Workspace Skills** (your custom skills)
    - Location: `workspace/skills/`
@@ -210,7 +210,7 @@ Always list what's needed:
 ## Testing Your Skill
 
 1. Place your skill in `workspace/skills/my-skill/`
-2. Run 麒麟OS-Agent
+2. Run JCodex
 3. The skill will be automatically loaded
 4. Ask the AI to use your skill
 

@@ -66,6 +66,16 @@ workspace/conversations/*
 workspace/data/langgraph_checkpoints.sqlite3
 workspace/data/langgraph_checkpoints.sqlite3-shm
 workspace/data/langgraph_checkpoints.sqlite3-wal
+workspace/data/*
+workspace/knowledge/*
+workspace/memory/*
+workspace/preferences/*
+workspace/projects/*
+!workspace/data/.gitkeep
+!workspace/knowledge/.gitkeep
+!workspace/memory/.gitkeep
+!workspace/preferences/.gitkeep
+!workspace/projects/.gitkeep
 !workspace/output/.gitkeep
 !workspace/temp/.gitkeep
 !workspace/cache/.gitkeep

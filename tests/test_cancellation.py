@@ -135,6 +135,18 @@ def test_extended_executor_passes_runtime_cancellation_to_shell() -> None:
     assert captured["cancelled"] is checker
 
 
+@pytest.mark.skipif(os.name == "nt", reason="rm behavior is POSIX-only")
+def test_shell_does_not_block_an_approved_rm_command(tmp_path) -> None:
+    target = tmp_path / "removable"
+    target.mkdir()
+    (target / "file.txt").write_text("remove me")
+
+    result = ShellTool().execute(f"rm -rf {shlex.quote(str(target))}")
+
+    assert result.success is True
+    assert not target.exists()
+
+
 def _process_is_running(pid: int) -> bool:
     result = subprocess.run(
         ["ps", "-o", "stat=", "-p", str(pid)],

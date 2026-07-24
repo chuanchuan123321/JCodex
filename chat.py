@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""麒麟OS-Agent - 智能操作系统助手"""
+"""JCodex - intelligent coding and system automation assistant."""
 
 import sys
 import uuid
@@ -24,6 +24,7 @@ from langchain_core.messages import HumanMessage
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from agent.core.ai_engine import AIEngine
+from agent.core.context_compactor import ContextCompactor
 from agent.core.extended_tool_executor import ExtendedToolExecutor
 from agent.core.langchain_model import AIEngineChatModel
 from agent.core.langgraph_runner import (
@@ -32,6 +33,7 @@ from agent.core.langgraph_runner import (
     create_checkpoint_saver,
 )
 from agent.core.skills import SkillsLoader
+from agent.core.memory_store import MemoryStore
 from agent.core.memory_manager import MemoryManager
 from agent.core.tool_loop_guard import ToolLoopGuard
 from agent.bus.queue import MessageBus
@@ -263,7 +265,6 @@ class Toast:
 
 # 从环境变量读取配置
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "30000"))
-COMPRESS_AT = int(os.getenv("COMPRESS_AT", "25000"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
 MAX_WEB_SEARCHES = int(os.getenv("MAX_WEB_SEARCHES", "3"))
 
@@ -284,16 +285,20 @@ class NaturalTaskExecutor:
         self.skills_loader = SkillsLoader(workspace_path)
 
         # Initialize tool executor with skills loader
-        self.tool_executor = ExtendedToolExecutor(skills_loader=self.skills_loader)
-        self.available_tools = self.tool_executor.get_available_tools()
+        self.tool_executor = ExtendedToolExecutor(
+            skills_loader=self.skills_loader,
+            protected_root=project_root,
+        )
+        self.available_tools = self.tool_executor.get_available_tools(
+            include_gateway_tools=bus is not None
+        )
 
-        # Initialize new modules for automatic data integration
+        # Task analytics remain separate from Grok-style long-term memory.
         from agent.core.data_integrator import DataIntegrator
-        from agent.core.preference_manager import PreferenceManager
-        from agent.core.knowledge_base import KnowledgeBase
         self.data_integrator = DataIntegrator()
-        self.preference_manager = PreferenceManager()
-        self.knowledge_base = KnowledgeBase()
+        self.memory_store = MemoryStore(workspace_path / "memory", project_root)
+        self.tool_executor.memory_store = self.memory_store
+        self._memory_context_by_session: dict[str, str] = {}
 
         self.execution_history = []
         self.step_count = 0
@@ -317,7 +322,12 @@ class NaturalTaskExecutor:
         self.web_search_count = 0  # 网络搜索计数
         self.max_web_searches = MAX_WEB_SEARCHES  # 从环境变量读取
         self.max_steps = MAX_STEPS  # 从环境变量读取
-        self.compress_at = int(os.getenv("COMPRESS_AT", "25000"))
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "30000"))
+        self.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
+        self.context_compactor = ContextCompactor(
+            ContextCompactor.policy_from_runtime(self.context_window, None)
+        )
+        self.compress_at = self.context_compactor.policy.trigger_tokens
         self.task_compression_summary = ""  # 当前任务的压缩摘要
         # 从记忆文件加载累积的压缩摘要
         self.accumulated_compression = (
@@ -467,6 +477,15 @@ class NaturalTaskExecutor:
         accumulated_compression = memory_manager.load_accumulated_compression()
         memory_manager.append_execution_step(f"【用户请求】{user_request}")
 
+        memory_context_key = session_key or "cli"
+        if memory_context_key not in self._memory_context_by_session:
+            persisted_context = memory_manager.load_memory_context()
+            if not persisted_context:
+                persisted_context = self.memory_store.initial_context(user_request)
+                memory_manager.save_memory_context(persisted_context)
+            self._memory_context_by_session[memory_context_key] = persisted_context
+        memory_context = self._memory_context_by_session[memory_context_key]
+
         data_integrator = self._data_integrator_for_session(session_key)
         task_id = data_integrator.start_task(user_request)
         context = self._build_context_for(memory_manager, accumulated_compression)
@@ -475,6 +494,7 @@ class NaturalTaskExecutor:
             context,
             memory_manager=memory_manager,
             accumulated_compression=accumulated_compression,
+            memory_context=memory_context,
         )
         cancel_event = threading.Event()
         legacy_cancel_event = None if session_key else self._stop_event
@@ -498,6 +518,7 @@ class NaturalTaskExecutor:
             "event_state": {},
             "execution_history": task_execution_history,
             "user_request": user_request,
+            "memory_context_key": memory_context_key,
             "compression_check": lambda state: self._graph_compression_check(
                 state, memory_manager
             ),
@@ -558,6 +579,7 @@ class NaturalTaskExecutor:
         *,
         memory_manager: MemoryManager,
         accumulated_compression: str,
+        memory_context: str = "",
     ) -> tuple[str, str]:
         """Render the existing Agent.md prompt for a LangGraph task."""
         from agent.tools.time_tool import TimeTool
@@ -586,24 +608,37 @@ class NaturalTaskExecutor:
             "skills_summary": self.skills_loader.build_skills_summary(),
             "user_request": user_request,
             "context": context,
+            "runtime_mode_instruction": (
+                "This task is running through an active gateway channel. "
+                "The `send_file` tool may send a completed file to that channel."
+                if bool(getattr(self, "is_gateway_mode", False))
+                else "This task is running locally, not through a gateway or "
+                "Feishu channel. Do not claim to send messages or files to a "
+                "gateway; provide local file paths in your response instead."
+            ),
+            "plan_mode_instruction": (
+                "For multi-step work, call `todo_write` before substantive "
+                "execution to create a short structured plan. Use stable IDs, "
+                "set `merge: false` initially, and send only changed items with "
+                "`merge: true` afterward. Keep at most one item `in_progress`. "
+                "Update statuses after meaningful progress or "
+                "replanning; do not use it for trivial one-step requests or as a "
+                "substitute for user-visible work updates."
+            ),
+            "project_context": (
+                "当前任务不属于桌面项目工作区，使用 JCodex 默认工作目录。"
+            ),
+            "file_write_boundary": (
+                "Protect the JCodex application source tree at "
+                "`{project_root}`: you may inspect it, but do not create, edit, "
+                "overwrite, append, move, rename, or delete files inside it "
+                "except under `{temp_path}` and `{output_path}`. This restriction "
+                "applies only to the JCodex source tree. Desktop, Documents, "
+                "Downloads, and other local paths explicitly placed in scope by "
+                "the user may be created, edited, moved, renamed, or deleted. "
+                "Normal approval rules still apply to mutating tools."
+            ),
         }
-        try:
-            self.preference_manager._load_preferences()
-            values["user_preferences"] = (
-                self.preference_manager.generate_prompt_context()
-            )
-        except Exception:
-            values["user_preferences"] = ""
-        try:
-            values["knowledge_context"] = self.knowledge_base.build_query_context(
-                user_request=user_request,
-                current_context=context,
-                accumulated_compression=accumulated_compression,
-                execution_history=values["execution_history"],
-            )
-        except Exception:
-            values["knowledge_context"] = "（暂无相关知识）"
-
         template = (project_root / "Agent.md").read_text(encoding="utf-8")
         marker = "【User Task】"
         split_index = template.find(marker)
@@ -617,6 +652,9 @@ class NaturalTaskExecutor:
             placeholder = "{" + key + "}"
             system_prompt = system_prompt.replace(placeholder, str(value))
             user_message = user_message.replace(placeholder, str(value))
+        memory_store = getattr(self, "memory_store", None)
+        if memory_store:
+            system_prompt = memory_store.append_context(system_prompt, memory_context)
         return system_prompt, user_message
 
     def _build_context_for(
@@ -637,23 +675,57 @@ class NaturalTaskExecutor:
     def _graph_compression_check(
         self, state: dict[str, Any], memory_manager: MemoryManager
     ) -> Optional[dict[str, Any]]:
-        """Check the active CLI/gateway memory at a graph step boundary."""
-        history = memory_manager.load_execution_history()
-        history_text = "\n".join(history)
-        tokens_before = self._estimate_tokens(history_text) if history_text else 0
-        if tokens_before <= self.compress_at:
+        """Check the exact model prompt at a safe graph boundary."""
+        snapshot = ContextCompactor.build_snapshot(
+            state,
+            self.context_compactor.policy,
+            self.available_tools,
+        )
+        if self.context_compactor.should_prefire(snapshot):
+            self.context_compactor.start_prefire(snapshot, self._sample_compaction_prompt)
+        if not self.context_compactor.should_compact(snapshot):
             return None
+        history = memory_manager.load_execution_history()
         return {
             "execution_history": history,
-            "history_text": history_text,
+            "history_text": snapshot.transcript,
+            "context_snapshot": snapshot,
             "step_count": len(history),
-            "tokens_before": tokens_before,
-            "threshold": self.compress_at,
+            "tokens_before": snapshot.tokens,
+            "threshold": snapshot.trigger_tokens,
+            "context_window": snapshot.context_window,
+            "usage_percent": snapshot.usage_percent,
             "compression_id": (
                 f"auto:{state.get('run_id', '')}:"
                 f"{int(state.get('step_count', 0) or 0)}"
             ),
         }
+
+    def _sample_compaction_prompt(self, prompt: str) -> str:
+        """Call the model without adding the compaction request to task history."""
+        result = self.ai_engine.call_messages(
+            [{"role": "user", "content": prompt}],
+            tools=None,
+            temperature=0.1,
+            timeout=max(1, int(os.getenv("COMPACTION_TIMEOUT_SECONDS", "300"))),
+            max_retries=1,
+        )
+        if result.get("finish_reason") in {"error", "length"}:
+            raise RuntimeError(str(result.get("content", "Compaction model failed")))
+        return str(result.get("content", "") or "")
+
+    def _sample_memory_flush(self, messages: list[dict[str, str]]) -> str:
+        """Run Grok's memory flush call without exposing tools or mutating history."""
+        result = self.ai_engine.call_messages(
+            messages,
+            tools=None,
+            temperature=0.1,
+            timeout=max(1, int(os.getenv("MEMORY_FLUSH_TIMEOUT_SECONDS", "180"))),
+            max_retries=1,
+        )
+        if result.get("finish_reason") in {"error", "length"}:
+            raise RuntimeError(str(result.get("content", "Memory flush model failed")))
+        return str(result.get("content", "") or "")
 
     @staticmethod
     def _graph_continuation_message(user_message: str) -> str:
@@ -686,6 +758,10 @@ class NaturalTaskExecutor:
                 ):
                     cancel_event = active.get("cancel_event")
                     break
+        snapshot["flush_messages"] = list(state.get("messages") or [])
+        snapshot["memory_session_id"] = str(
+            state.get("thread_id") or snapshot.get("compression_id") or uuid.uuid4().hex
+        )
         result = self._compress_memory_snapshot(
             memory_manager,
             snapshot,
@@ -700,12 +776,27 @@ class NaturalTaskExecutor:
             return result
 
         accumulated = memory_manager.load_accumulated_compression()
+        memory_context_key = str(
+            (self._active_graph_runtime or {}).get("memory_context_key")
+            or next(
+                (
+                    active.get("memory_context_key")
+                    for active in self._gateway_active.values()
+                    if str(active.get("thread_id", "")) == str(state.get("thread_id", ""))
+                ),
+                "cli",
+            )
+        )
+        refreshed_memory = self.memory_store.initial_context(user_request)
+        self._memory_context_by_session[memory_context_key] = refreshed_memory
+        memory_manager.save_memory_context(refreshed_memory)
         context = self._build_context_for(memory_manager, accumulated)
         system_prompt, user_message = self._build_langgraph_prompt(
             user_request,
             context,
             memory_manager=memory_manager,
             accumulated_compression=accumulated,
+            memory_context=refreshed_memory,
         )
         result["system_prompt"] = system_prompt
         result["replacement_messages"] = [
@@ -1400,6 +1491,34 @@ class NaturalTaskExecutor:
             "{steps_remaining}", str(self.max_steps - self.step_count + 1)
         )
         system_prompt = system_prompt.replace(
+            "{plan_mode_instruction}",
+            "For multi-step work, call `todo_write` before substantive "
+            "execution and keep the structured todo plan current.",
+        )
+        system_prompt = system_prompt.replace(
+            "{runtime_mode_instruction}",
+            "This task is running through an active gateway channel."
+            if self.is_gateway_mode
+            else "This task is running locally, not through a gateway or Feishu "
+            "channel. Do not claim to send messages or files to a gateway; "
+            "provide local file paths in your response instead.",
+        )
+        system_prompt = system_prompt.replace(
+            "{project_context}",
+            "当前任务不属于桌面项目工作区，使用 JCodex 默认工作目录。",
+        )
+        system_prompt = system_prompt.replace(
+            "{file_write_boundary}",
+            "Protect the JCodex application source tree at "
+            "`{project_root}`: you may inspect it, but do not create, edit, "
+            "overwrite, append, move, rename, or delete files inside it except "
+            "under `{temp_path}` and `{output_path}`. This restriction applies "
+            "only to the JCodex source tree. Desktop, Documents, Downloads, "
+            "and other local paths explicitly placed in scope by the user may "
+            "be created, edited, moved, renamed, or deleted. Normal approval "
+            "rules still apply to mutating tools.",
+        )
+        system_prompt = system_prompt.replace(
             "{accumulated_compression}",
             self.accumulated_compression
             if self.accumulated_compression
@@ -1438,26 +1557,11 @@ class NaturalTaskExecutor:
         system_prompt = system_prompt.replace("{cache_path}", str(cache_path))
         system_prompt = system_prompt.replace("{skills_summary}", skills_summary)
 
-        # 添加用户偏好上下文
-        try:
-            # 使用实例的preference_manager，并重新加载以获取最新变化
-            self.preference_manager._load_preferences()
-            preference_context = self.preference_manager.generate_prompt_context()
-            system_prompt = system_prompt.replace("{user_preferences}", preference_context)
-        except Exception:
-            system_prompt = system_prompt.replace("{user_preferences}", "")
-
-        # 添加知识库检索上下文
-        try:
-            knowledge_context = self.knowledge_base.build_query_context(
-                user_request=user_request,
-                current_context=context,
-                accumulated_compression=self.accumulated_compression,
-                execution_history=execution_history_text,
-            )
-            system_prompt = system_prompt.replace("{knowledge_context}", knowledge_context)
-        except Exception:
-            system_prompt = system_prompt.replace("{knowledge_context}", "（暂无相关知识）")
+        memory_context = self._memory_context_by_session.get("cli", "")
+        if not memory_context:
+            memory_context = self.memory_store.initial_context(user_request)
+            self._memory_context_by_session["cli"] = memory_context
+        system_prompt = self.memory_store.append_context(system_prompt, memory_context)
 
         # 替换用户消息中的变量
         user_message = user_message_template
@@ -1465,7 +1569,9 @@ class NaturalTaskExecutor:
         user_message = user_message.replace("{context}", context)
 
         # 获取工具定义
-        available_tools = self.tool_executor.get_available_tools()
+        available_tools = self.tool_executor.get_available_tools(
+            include_gateway_tools=self.is_gateway_mode
+        )
 
         # AI 思考时显示 spinner
         start_spinner("AI思考中")
@@ -1717,7 +1823,12 @@ AI 想要执行以下操作：
         finally:
             self.is_compressing = False
 
-    def _compress_memory_for_gateway(self, memory_manager: MemoryManager) -> str:
+    def _compress_memory_for_gateway(
+        self,
+        memory_manager: MemoryManager,
+        memory_context_key: str = "gateway",
+        query: str = "",
+    ) -> str:
         """Compress one isolated gateway chat without swapping global memory."""
         history = memory_manager.load_execution_history()
         if not history:
@@ -1732,6 +1843,9 @@ AI 想要执行以下操作：
         result = self._compress_memory_snapshot(memory_manager, snapshot)
         if not result.get("success"):
             return f"❌ 压缩失败: {result.get('message', '未知错误')}"
+        refreshed_memory = self.memory_store.initial_context(query or "continue")
+        self._memory_context_by_session[memory_context_key] = refreshed_memory
+        memory_manager.save_memory_context(refreshed_memory)
         return f"✅ 历史记录已压缩\n📁 存档位置: {result.get('archive_path', '')}"
 
     def _compress_memory_snapshot(
@@ -1784,22 +1898,53 @@ AI 想要执行以下操作：
             if is_cancelled():
                 return build_result(False, "cancelled", "记忆压缩已停止")
 
-            report("analyzing", "正在分析近期对话与执行记录")
-            prompt = (
-                "请简洁总结以下执行过程，保留用户请求、已完成步骤、关键工具参数、"
-                "重要结果和仍未完成事项。使用 Markdown 表格，不要输出思考过程。\n\n"
-                + history_text
+            report("memory_flush", "正在压缩前提取可供未来会话复用的长期记忆")
+            flush_messages = snapshot.get("flush_messages") or [
+                {"role": "user", "content": history_text}
+            ]
+            flush_result = None
+            if self.memory_store.should_flush(
+                tokens_before,
+                self.context_compactor.policy.context_window,
+                self.context_compactor.policy.trigger_percent,
+            ):
+                flush_result = self.memory_store.flush(
+                    flush_messages,
+                    self._sample_memory_flush,
+                    session_id=str(
+                        snapshot.get("memory_session_id") or uuid.uuid4().hex
+                    ),
+                )
+
+            report("analyzing", "正在分析完整模型上下文与工具调用链")
+            context_snapshot = snapshot.get("context_snapshot")
+            if context_snapshot is None:
+                context_snapshot = ContextCompactor.build_snapshot(
+                    {
+                        "system_prompt": "",
+                        "messages": [HumanMessage(content=history_text)],
+                        "step_count": step_count,
+                    },
+                    self.context_compactor.policy,
+                )
+            compacted = self.context_compactor.compact(
+                context_snapshot,
+                self._sample_compaction_prompt,
+                progress=report,
+                cancelled=is_cancelled,
             )
-            report("summarizing", "正在提炼关键决策、工具结果与未完成事项")
-            try:
-                response = self.langchain_model.invoke(prompt)
-                summary = memory_manager.strip_reasoning(str(response.content or ""))
-            except Exception as exc:
-                return build_result(False, "error", f"AI调用失败: {exc}")
             if is_cancelled():
                 return build_result(False, "cancelled", "记忆压缩已停止")
-            if not summary:
-                return build_result(False, "error", "AI未生成有效摘要，压缩已取消")
+            if not compacted.success:
+                return build_result(
+                    False,
+                    compacted.status,
+                    compacted.message,
+                    attempts=compacted.attempts,
+                    input_stage=compacted.input_stage,
+                    error=compacted.error,
+                )
+            summary = compacted.summary
 
             report("archiving", "正在保存完整历史存档")
             archive_path = memory_manager.save_compression_archive(history_text)
@@ -1808,147 +1953,63 @@ AI 想要执行以下操作：
                 return build_result(False, "cancelled", "记忆压缩已停止")
 
             report("updating", "正在更新长期记忆与下一轮上下文")
-            previous = memory_manager.load_accumulated_compression()
             combined = f"{summary}\n📁 详细内容: {full_archive}"
-            if previous:
-                combined += f"\n\n{previous}"
             memory_manager.save_accumulated_compression(combined)
             memory_manager.clear_execution_history()
             return build_result(
                 True,
                 "success",
                 "近期记忆已整理为摘要，任务将从当前步骤继续",
-                tokens_after=0,
+                tokens_after=compacted.tokens_after,
                 archive_path=full_archive,
+                attempts=compacted.attempts,
+                input_stage=compacted.input_stage,
+                two_pass_used=compacted.two_pass_used,
+                memory_flush_status=(
+                    flush_result.status if flush_result else "below_threshold"
+                ),
+                memory_flush_path=flush_result.path if flush_result else "",
             )
         finally:
             self._compression_lock.release()
 
     def _compress_current_task_impl(self) -> None:
-        """Run the compression work while the lifecycle flag is held."""
-        execution_history = self.memory_manager.load_execution_history()
-
-        if not execution_history:
+        """Run manual compaction through the shared full-replace engine."""
+        history = self.memory_manager.load_execution_history()
+        if not history:
             Toast.warning("没有执行历史可以压缩")
             return
-
-        # 先调用AI生成简短摘要，确保成功后再保存
-        import re
-        history_text = "\n".join(execution_history)
-        # 移除history_text中的think标签，避免AI看到重复的思考过程
-        history_text = re.sub(r'<think>[\s\S]*?</think>', '', history_text)
-        step_count = len(execution_history)
-        summary_prompt = f"""请以简洁的表格形式总结以下执行过程：
-
-【执行步骤】（共 {step_count} 步）
-{history_text}
-
-请生成一个表格，包含以下列：
-- 用户问题
-- 步骤
-- 操作描述
-- 工具/命令
-- 执行结果
-
-格式：
-| 用户问题 | 步骤 | 操作 | 工具/命令 | 结果 |
-|---------|------|------|---------|------|
-| [用户的问题] | 1 | [描述] | [工具名] | [结果] |
-| | 2 | [描述] | [工具名] | [结果] |
-
-要求：
-1. 用户问题只在第一行填写，后续行留空
-2. 每一步对应一行
-3. 表格简洁清晰，突出关键信息
-4. 不要省略任何重要步骤
-
-表格："""
-
-        try:
-            result = self.ai_engine.call_api(summary_prompt)
-            task_summary = (
-                result.get("content", "") if isinstance(result, dict) else result
-            )
-
-            # 清空AI引擎的对话历史（已保存到执行历史文件）
-            self.ai_engine.clear_history()
-
-            # 检查AI是否成功返回摘要（不是错误信息）
-            if not task_summary or task_summary.strip() == "":
-                Toast.warning(f"AI未能生成摘要，压缩取消")
-                return
-            if task_summary.startswith("API Error:") or "Error:" in task_summary:
-                Toast.error(f"AI调用错误，压缩取消")
-                return
-
-            # 提取并移除task_summary中的think标签内容
-            import re as re_module
-            think_match = re_module.search(r'<think>([\s\S]*?)</think>', task_summary)
-            if think_match:
-                think_content = think_match.group(1).strip()
-                if think_content:
-                    # 将think标签内容移除
-                    task_summary = re_module.sub(r'<think>[\s\S]*?</think>', '', task_summary)
-
-        except Exception as e:
-            print(f"⚠️ AI调用失败，压缩取消\n")
+        history_text = "\n".join(history)
+        result = self._compress_memory_snapshot(
+            self.memory_manager,
+            {
+                "execution_history": history,
+                "history_text": history_text,
+                "step_count": len(history),
+                "tokens_before": self._estimate_tokens(history_text),
+            },
+        )
+        if not result.get("success"):
+            Toast.error(f"压缩失败: {result.get('message', '未知错误')}")
             return
 
-        # 只有AI成功返回摘要，才保存完整的执行历史到存档文件夹（按日期组织）
-        archive_path = self.memory_manager.save_compression_archive(history_text)
-
-        # 构建完整的存档路径（绝对路径）
-        full_archive_path = str(self.memory_manager.memory_dir / archive_path)
-
-        # 添加到累积压缩摘要（新的压缩添加到前面，包含存档路径和简短摘要）
-        if self.accumulated_compression:
-            # 新的压缩摘要添加到前面，包含存档路径和简短摘要（不显示编号）
-            self.accumulated_compression = f"{task_summary}\n📁 详细内容: {full_archive_path}\n\n{self.accumulated_compression}"
-        else:
-            self.accumulated_compression = (
-                f"{task_summary}\n📁 详细内容: {full_archive_path}"
-            )
-
-        # 保存到记忆文件
-        self.memory_manager.save_accumulated_compression(self.accumulated_compression)
-
-        # 同步记忆快照到知识库，供后续检索片段复用
-        try:
-            sync_result = self.knowledge_base.sync_memory_snapshot(
-                archive_path=full_archive_path,
-                user_request=self.current_user_request,
-                summary_text=task_summary,
-                history_text=history_text,
-                task_id=self.data_integrator.get_current_task_id(),
-            )
-            print(
-                f"🧠 记忆已同步到知识库: 摘要 {sync_result.get('summary_entry_id')}, "
-                f"片段 {sync_result.get('fragment_count')}"
-            )
-        except Exception as e:
-            print(f"⚠️ 记忆同步到知识库失败: {e}")
-
-        # 回显本轮检索到的知识片段
-        try:
-            retrieved_summary = self.knowledge_base.format_last_retrieved_entries()
-            if retrieved_summary and retrieved_summary != "（未检索到知识片段）":
-                print(retrieved_summary)
-        except Exception:
-            pass
-
-        # 彻底清空 AIEngine 的对话历史以减少上下文
-        # 压缩摘要已经保存到文件，不需要再保留在内存中
+        self.accumulated_compression = (
+            self.memory_manager.load_accumulated_compression()
+        )
+        self._memory_context_by_session["cli"] = self.memory_store.initial_context(
+            self.current_user_request
+        )
+        self.memory_manager.save_memory_context(
+            self._memory_context_by_session["cli"]
+        )
         self.ai_engine.clear_history()
         self.current_user_request = ""
-
-        # 清空执行历史（内存和文件）
         self.execution_history = []
         self.step_count = 0
-
-        # 清除执行历史文件（已压缩，不再需要）
-        self.memory_manager.clear_execution_history()
-
-        print(f"✅ 历史记录已压缩并保存到记忆文件\n📁 存档位置: {full_archive_path}\n")
+        print(
+            "✅ 历史记录已压缩并保存到记忆文件\n"
+            f"📁 存档位置: {result.get('archive_path', '')}\n"
+        )
 
     def _truncate_response(self, response: str, max_length: int = 50) -> str:
         """截断长响应，超过max_length的部分用省略号表示"""
@@ -2338,12 +2399,6 @@ AI 想要执行以下操作：
             "file_write",  # 写入文件
             "write",  # 写入文件（OpenCode风格）
             "edit",  # 编辑文件
-            "file_delete",  # 删除文件
-            "dir_change",  # 切换目录（可能影响后续操作）
-            "dir_create",
-            "create_file",
-            "copy_file",
-            "move_file",
             "send_file",
             "generate_pdf",
             "project_preview",
@@ -2353,21 +2408,10 @@ AI 想要执行以下操作：
     def _get_action_description(self, tool_name: str, params: dict) -> str:
         """Get natural description of the action"""
         descriptions = {
-            "file_list": f"列出 {params.get('path', '当前目录')} 中的文件",
             "file_read": f"读取文件 {params.get('path')}",
             "file_write": f"写入文件 {params.get('path')}",
-            "file_delete": f"删除文件 {params.get('path')}",
-            "dir_create": f"创建目录 {params.get('path')}",
-            "dir_change": f"切换到目录 {params.get('path')}",
             "shell": f"执行命令: {params.get('command', '')[:50]}",
             "read_pdf": f"读取PDF文件 {params.get('path')}",
-            "read_markdown": f"读取Markdown文件 {params.get('path')}",
-            "read_json": f"读取JSON文件 {params.get('path')}",
-            "search_files": f"搜索文件 {params.get('pattern')}",
-            "get_file_info": f"获取文件信息 {params.get('path')}",
-            "copy_file": f"复制文件 {params.get('source')} 到 {params.get('destination')}",
-            "move_file": f"移动文件 {params.get('source')} 到 {params.get('destination')}",
-            "create_file": f"创建文件 {params.get('path')}",
             "send_file": f"发送文件到飞书 {params.get('path')}",
             "load_skill": f"加载 skill: {params.get('skill_name')}",
         }
@@ -2557,6 +2601,7 @@ AI 想要执行以下操作：
 
         # 清空压缩摘要链
         self.accumulated_compression = ""
+        getattr(self, "_memory_context_by_session", {}).clear()
         self.task_compression_summary = ""
 
         # 清除记忆文件
@@ -2703,7 +2748,7 @@ def _print_terminal_header() -> None:
 """
         print(Colors.CYAN + ascii_art.rstrip() + Colors.RESET)
     else:
-        print(f"\n{Colors.CYAN}{Colors.BOLD}麒麟 OS-Agent{Colors.RESET}")
+        print(f"\n{Colors.CYAN}{Colors.BOLD}JCodex{Colors.RESET}")
 
     print(f"{Colors.BOLD}系统自动化与知识记忆工作台{Colors.RESET}")
     print(
@@ -2713,7 +2758,7 @@ def _print_terminal_header() -> None:
 
 
 async def gateway_mode():
-    """Run 麒麟OS-Agent in gateway mode with multiple channels."""
+    """Run JCodex in gateway mode with multiple channels."""
     # Fix event loop issue for lark-oapi WebSocket client
     try:
         import nest_asyncio
@@ -2729,7 +2774,7 @@ async def gateway_mode():
     warnings.filterwarnings("ignore", category=RuntimeWarning)
     warnings.filterwarnings("ignore", message=".*cannot enter context.*")
 
-    print("\n🚀 启动麒麟OS-Agent网关模式...\n")
+    print("\n启动 JCodex 网关模式...\n")
 
     # Load configuration
     config = load_config()
@@ -2834,6 +2879,7 @@ async def gateway_mode():
                         except Exception:
                             pass
                     executor._memory_for_session(session_key).clear_all()
+                    executor._memory_context_by_session.pop(session_key, None)
                     await bus.publish_outbound(
                         OutboundMessage(
                             channel=msg.channel,
@@ -2890,8 +2936,19 @@ async def gateway_mode():
                         )
                     )
                     if history:
+                        last_user_query = next(
+                            (
+                                item.partition("【用户请求】")[2].strip()
+                                for item in reversed(history)
+                                if "【用户请求】" in item
+                            ),
+                            "continue",
+                        )
                         compressed = await asyncio.to_thread(
-                            executor._compress_memory_for_gateway, session_memory
+                            executor._compress_memory_for_gateway,
+                            session_memory,
+                            session_key,
+                            last_user_query,
                         )
                         await bus.publish_outbound(
                             OutboundMessage(

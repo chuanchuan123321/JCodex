@@ -11,7 +11,7 @@ import time
 import uuid
 from contextlib import nullcontext
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -36,10 +36,11 @@ from langgraph.types import Command, interrupt
 from typing_extensions import Annotated, NotRequired, TypedDict
 
 from agent.core.tool_loop_guard import ToolLoopGuard
+from agent.core.tool_result import ToolExecutionResult
 
 
 EventCallback = Callable[[dict[str, Any]], None]
-ToolExecutor = Callable[..., str]
+ToolExecutor = Callable[..., Any]
 ApprovalPredicate = Callable[[str, dict[str, Any]], bool]
 
 
@@ -201,6 +202,7 @@ class RunResult:
 class _RuntimeBinding:
     emit: EventCallback
     runtime: dict[str, Any]
+    pending_model_inputs: list[dict[str, Any]] = field(default_factory=list)
 
 
 def create_checkpoint_saver(
@@ -247,12 +249,38 @@ class LangGraphRunner:
         self.checkpointer = checkpointer or InMemorySaver()
         self.tools = self._build_tools(tool_definitions)
         self.tools_by_name = {tool.name: tool for tool in self.tools}
-        if self.tools:
-            self.model_with_tools = self.model.bind_tools(
-                self.tools, tool_choice="auto", parallel_tool_calls=False
-            )
+        self.model_with_tools = self._bind_tools(self.tools)
+        self.tools_without_plan = [
+            tool
+            for tool in self.tools
+            if tool.name not in {"todo_write", "update_plan"}
+        ]
+        self.model_without_plan = (
+            self.model_with_tools
+            if len(self.tools_without_plan) == len(self.tools)
+            else self._bind_tools(self.tools_without_plan)
+        )
+        self.tools_without_question = [
+            tool for tool in self.tools if tool.name != "question"
+        ]
+        self.model_without_question = (
+            self.model_with_tools
+            if len(self.tools_without_question) == len(self.tools)
+            else self._bind_tools(self.tools_without_question)
+        )
+        self.tools_without_plan_or_question = [
+            tool for tool in self.tools_without_plan if tool.name != "question"
+        ]
+        if len(self.tools_without_plan_or_question) == len(self.tools_without_plan):
+            self.model_without_plan_or_question = self.model_without_plan
+        elif len(self.tools_without_plan_or_question) == len(
+            self.tools_without_question
+        ):
+            self.model_without_plan_or_question = self.model_without_question
         else:
-            self.model_with_tools = self.model
+            self.model_without_plan_or_question = self._bind_tools(
+                self.tools_without_plan_or_question
+            )
         self._bindings: dict[str, _RuntimeBinding] = {}
         self._bindings_lock = threading.RLock()
         self.graph = self._build_graph()
@@ -490,6 +518,22 @@ class LangGraphRunner:
         if state.get("system_prompt"):
             messages.append(SystemMessage(content=state["system_prompt"]))
         messages.extend(state["messages"])
+        transient_inputs = self._take_model_inputs(binding)
+        if transient_inputs:
+            messages.append(
+                HumanMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": (
+                                "The image requested with view_image is attached below. "
+                                "Inspect it and continue the current task."
+                            ),
+                        },
+                        *transient_inputs,
+                    ]
+                )
+            )
 
         assembled: Optional[AIMessageChunk] = None
         announced_tools: set[tuple[int, str]] = set()
@@ -500,8 +544,20 @@ class LangGraphRunner:
             if callable(cancellation_scope)
             else nullcontext()
         )
+        if binding.runtime.get("voice_mode", False):
+            model = (
+                self.model_without_question
+                if binding.runtime.get("plan_enabled", True)
+                else self.model_without_plan_or_question
+            )
+        else:
+            model = (
+                self.model_with_tools
+                if binding.runtime.get("plan_enabled", True)
+                else self.model_without_plan
+            )
         with scope:
-            for chunk in self.model_with_tools.stream(messages):
+            for chunk in model.stream(messages):
                 self._raise_if_cancelled(binding)
                 if not isinstance(chunk, AIMessageChunk):
                     continue
@@ -587,6 +643,65 @@ class LangGraphRunner:
         tool_call_id = str(call.get("id", ""))
         prepared_id = f"{state.get('run_id', '')}:{state.get('step_count', 0)}:{index}"
         stream_id = f"{state.get('run_id', '')}:{state.get('step_count', 0)}"
+
+        if (
+            name in {"todo_write", "update_plan"}
+            and not binding.runtime.get("plan_enabled", True)
+        ):
+            content = f"Error: {name} is disabled because Plan Mode is off"
+            self._emit(
+                binding,
+                "tool_end",
+                tool=name,
+                params=args,
+                result=content,
+                failed=True,
+                disabled=True,
+                tool_call_id=tool_call_id,
+                prepared_tool_call_id=prepared_id,
+                stream_id=stream_id,
+                duration_ms=0,
+                execution_duration_ms=0,
+            )
+            return {
+                "messages": [
+                    ToolMessage(
+                        content=content,
+                        name=name,
+                        tool_call_id=tool_call_id,
+                        status="error",
+                    )
+                ],
+                "pending_index": index + 1,
+            }
+
+        if name == "question" and binding.runtime.get("voice_mode", False):
+            content = "Error: question is disabled in voice conversation mode"
+            self._emit(
+                binding,
+                "tool_end",
+                tool=name,
+                params=args,
+                result=content,
+                failed=True,
+                disabled=True,
+                tool_call_id=tool_call_id,
+                prepared_tool_call_id=prepared_id,
+                stream_id=stream_id,
+                duration_ms=0,
+                execution_duration_ms=0,
+            )
+            return {
+                "messages": [
+                    ToolMessage(
+                        content=content,
+                        name=name,
+                        tool_call_id=tool_call_id,
+                        status="error",
+                    )
+                ],
+                "pending_index": index + 1,
+            }
 
         if name == "question":
             questions = self._normalize_questions(args)
@@ -730,12 +845,15 @@ class LangGraphRunner:
             stream_id=stream_id,
             started_at_ms=started_at_ms,
         )
+        model_inputs: list[dict[str, Any]] = []
         if guard_decision["action"] == "execute":
             self._raise_if_cancelled(binding)
-            result = self._execute_tool(name, args, binding)
+            raw_result = self._execute_tool(name, args, binding)
             # A non-cooperative tool may return after the user has already
             # cancelled. Never checkpoint or emit that stale result.
             self._raise_if_cancelled(binding)
+            result = self._tool_result_text(raw_result)
+            model_inputs = self._tool_result_model_inputs(raw_result)
             guard.record_result(
                 name,
                 args,
@@ -762,6 +880,8 @@ class LangGraphRunner:
             duration_ms=duration_ms,
             execution_duration_ms=execution_duration_ms,
         )
+        if model_inputs and not failed:
+            self._queue_model_inputs(binding, model_inputs)
         return {
             "messages": [
                 ToolMessage(
@@ -978,7 +1098,7 @@ class LangGraphRunner:
 
     def _execute_tool(
         self, name: str, args: dict[str, Any], binding: _RuntimeBinding
-    ) -> str:
+    ) -> Any:
         runtime = binding.runtime
         try:
             signature = inspect.signature(self.tool_executor)
@@ -994,11 +1114,41 @@ class LangGraphRunner:
                 signature.bind(*candidate)
             except TypeError:
                 continue
-            return str(self.tool_executor(*candidate))
+            return self.tool_executor(*candidate)
         raise TypeError(
             "tool_executor must accept (name, args, runtime), (name, args), "
             "or one {'tool', 'params'} mapping"
         )
+
+    @staticmethod
+    def _tool_result_text(result: Any) -> str:
+        if isinstance(result, ToolExecutionResult):
+            return str(result.content)
+        return str(result or "")
+
+    @staticmethod
+    def _tool_result_model_inputs(result: Any) -> list[dict[str, Any]]:
+        if not isinstance(result, ToolExecutionResult):
+            return []
+        return [
+            dict(item)
+            for item in result.model_inputs
+            if isinstance(item, Mapping)
+        ]
+
+    @staticmethod
+    def _queue_model_inputs(
+        binding: _RuntimeBinding, inputs: Sequence[Mapping[str, Any]]
+    ) -> None:
+        binding.pending_model_inputs.extend(
+            dict(item) for item in inputs if isinstance(item, Mapping)
+        )
+
+    @staticmethod
+    def _take_model_inputs(binding: _RuntimeBinding) -> list[dict[str, Any]]:
+        inputs = binding.pending_model_inputs
+        binding.pending_model_inputs = []
+        return inputs
 
     def _build_tools(
         self, definitions: Sequence[dict[str, Any] | BaseTool]
@@ -1027,6 +1177,14 @@ class LangGraphRunner:
                 )
             )
         return tools
+
+    def _bind_tools(self, tools: Sequence[BaseTool]) -> Any:
+        """Bind one immutable tool set for a runtime policy."""
+        if not tools:
+            return self.model
+        return self.model.bind_tools(
+            list(tools), tool_choice="auto", parallel_tool_calls=False
+        )
 
     def _emit_message_chunk(
         self,

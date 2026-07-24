@@ -9,9 +9,6 @@ class ToolLoopGuard:
     """Reuse successful observations and block repeated state changes."""
 
     OBSERVATION_TOOLS = {
-        "file_list",
-        "list_files",
-        "dir_list",
         "read",
         "file_read",
         "glob",
@@ -20,16 +17,12 @@ class ToolLoopGuard:
         "web_search",
         "websearch",
         "read_url",
+        "view_image",
     }
     MUTATION_TOOLS = {
         "write",
         "file_write",
-        "create_file",
         "edit",
-        "file_delete",
-        "dir_create",
-        "copy_file",
-        "move_file",
         "generate_pdf",
         "generate_docx",
         "generate_pptx",
@@ -37,7 +30,7 @@ class ToolLoopGuard:
         "project_preview",
     }
     IGNORED_PARAM_KEYS = {"description", "reason", "summary"}
-    ALWAYS_EXECUTE_TOOLS = {"update_plan"}
+    ALWAYS_EXECUTE_TOOLS = {"todo_write", "update_plan", "view_image"}
 
     def __init__(self):
         self.reset()

@@ -6,6 +6,7 @@ import pytest
 
 import chat
 from agent.core.langgraph_runner import RunResult
+from agent.core.memory_manager import MemoryManager
 
 
 def _reset_spinner(monkeypatch) -> None:
@@ -38,6 +39,32 @@ def test_successive_content_chunks_are_not_erased(monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert output == "这是一条完整回答。"
     assert "\r" not in output
+
+
+def test_terminal_prompt_resolves_the_plan_instruction(tmp_path) -> None:
+    executor = chat.NaturalTaskExecutor.__new__(chat.NaturalTaskExecutor)
+    executor.max_steps = 20
+    executor.max_web_searches = 3
+    executor.skills_loader = SimpleNamespace(build_skills_summary=lambda: "")
+    executor.preference_manager = SimpleNamespace(
+        _load_preferences=lambda: None,
+        generate_prompt_context=lambda: "",
+    )
+    executor.knowledge_base = SimpleNamespace(
+        build_query_context=lambda **_kwargs: ""
+    )
+
+    prompt, _ = executor._build_langgraph_prompt(
+        "实现功能",
+        "还没有执行任何步骤。",
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        accumulated_compression="",
+    )
+
+    assert "{plan_mode_instruction}" not in prompt
+    assert "call `todo_write` before substantive execution" in prompt
+    assert "{runtime_mode_instruction}" not in prompt
+    assert "running locally, not through a gateway" in prompt
 
 
 def test_gateway_question_answer_keeps_free_text_supplement() -> None:

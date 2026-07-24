@@ -100,6 +100,8 @@ class AIEngine:
         tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send a chat-completions request using the current model settings."""
         headers = {
@@ -118,16 +120,17 @@ class AIEngine:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        max_retries = 3
+        request_timeout = max(1.0, float(timeout if timeout is not None else 120))
+        retries = max(1, int(max_retries if max_retries is not None else 3))
         retry_delay = 5
 
-        for attempt in range(max_retries):
+        for attempt in range(retries):
             try:
                 response = requests.post(
                     f"{self.api_base_url}{self.api_path}",
                     headers=headers,
                     json=payload,
-                    timeout=120,
+                    timeout=request_timeout,
                 )
 
                 response.raise_for_status()
@@ -167,9 +170,9 @@ class AIEngine:
                 }
 
             except requests.exceptions.RequestException as e:
-                if attempt < max_retries - 1:
+                if attempt < retries - 1:
                     print(
-                        f"[API] 请求失败，{retry_delay}秒后重试 ({attempt + 1}/{max_retries}): {str(e)}"
+                        f"[API] 请求失败，{retry_delay}秒后重试 ({attempt + 1}/{retries}): {str(e)}"
                     )
                     import time
 
@@ -430,6 +433,8 @@ class AIEngine:
         tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Call the chat API without mutating the conversation history."""
         request_messages = list(messages)
@@ -440,6 +445,8 @@ class AIEngine:
             tools=tools,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
         )
 
     def add_message(self, role: str, content: Any) -> None:

@@ -173,21 +173,6 @@ class 数据清洗器:
                 entry.quality = 数据质量等级.低
                 return False
 
-        if entry.data_type == "command":
-            # 校验命令安全性
-            dangerous_patterns = [
-                r'rm\s+-rf\s+/',
-                r'drop\s+database',
-                r':(){ :|:& };:',
-                r'sudo\s+rm\s+-rf',
-            ]
-            content_str = str(entry.content)
-            for pattern in dangerous_patterns:
-                if re.search(pattern, content_str):
-                    entry.quality = 数据质量等级.低
-                    entry.tags.append("safety_check_failed")
-                    return False
-
         entry.validated = True
         return True
 

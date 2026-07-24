@@ -25,7 +25,19 @@ class MemoryManager:
 
         self.compression_file = self.memory_dir / "accumulated_compression.md"
         self.execution_history_file = self.memory_dir / "execution_history.md"
+        self.memory_context_file = self.memory_dir / "memory_context.md"
         self.index_file = self.memory_dir / "index.json"
+
+    def load_memory_context(self) -> str:
+        """Load the exact persisted first-turn memory block for prompt reuse."""
+        try:
+            return self.memory_context_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def save_memory_context(self, context: str) -> None:
+        """Persist the injected memory block verbatim to preserve prompt prefixes."""
+        self.memory_context_file.write_text(str(context or "").strip(), encoding="utf-8")
 
     def _get_today_folder(self) -> Path:
         """Get or create today's date folder."""
@@ -174,6 +186,8 @@ class MemoryManager:
             self.compression_file.unlink()
         if self.execution_history_file.exists():
             self.execution_history_file.unlink()
+        if self.memory_context_file.exists():
+            self.memory_context_file.unlink()
         if self.index_file.exists():
             self.index_file.unlink()
 
@@ -186,6 +200,7 @@ class MemoryManager:
             # Recreate the main files (empty)
             self.compression_file.touch()
             self.execution_history_file.touch()
+            self.memory_context_file.touch()
             self.index_file.touch()
 
     def clear_execution_history(self) -> None:

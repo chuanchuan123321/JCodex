@@ -15,6 +15,13 @@ def _snapshot(step: str, status: str = "in_progress") -> dict:
     }
 
 
+def _todos(step: str, status: str = "in_progress", *, merge: bool = False) -> dict:
+    return {
+        "merge": merge,
+        "todos": [{"id": "main", "content": step, "status": status}],
+    }
+
+
 def test_plan_tool_atomically_replaces_complete_snapshot() -> None:
     tool = PlanTool()
 
@@ -174,7 +181,55 @@ def test_extended_executor_isolates_plans_by_task_message(monkeypatch) -> None:
     assert executor.get_plan_snapshot("conversation-b", 202) is not None
 
 
-def test_plan_updates_do_not_invalidate_observation_loop_guard() -> None:
+def test_extended_executor_isolates_todo_plans_by_task_message(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent.core.extended_tool_executor.PreviewManager",
+        lambda *_args, **_kwargs: object(),
+    )
+    executor = ExtendedToolExecutor(project_root=".")
+
+    first = json.loads(
+        executor.execute(
+            {"tool": "todo_write", "params": _todos("任务 A")},
+            conversation_id="conversation-a",
+            message_id=101,
+        )
+    )
+    second = json.loads(
+        executor.execute(
+            {"tool": "todo_write", "params": _todos("任务 B")},
+            conversation_id="conversation-b",
+            message_id=202,
+        )
+    )
+    updated = json.loads(
+        executor.execute(
+            {
+                "tool": "todo_write",
+                "params": _todos("任务 A 已完成", "completed", merge=True),
+            },
+            conversation_id="conversation-a",
+            message_id=101,
+        )
+    )
+
+    assert first["version"] == 1
+    assert second["todos"][0]["content"] == "任务 B"
+    assert updated["version"] == 2
+    assert updated["todos"][0]["status"] == "completed"
+
+    executor.discard_plan_snapshot("conversation-a", 101)
+    recreated = json.loads(
+        executor.execute(
+            {"tool": "todo_write", "params": _todos("重新开始")},
+            conversation_id="conversation-a",
+            message_id=101,
+        )
+    )
+    assert recreated["version"] == 1
+
+
+def test_todo_updates_do_not_invalidate_observation_loop_guard() -> None:
     guard = ToolLoopGuard()
     params = {"filePath": "demo.txt"}
     decision = guard.before_call("read", params)
@@ -182,10 +237,10 @@ def test_plan_updates_do_not_invalidate_observation_loop_guard() -> None:
         "read", params, "contents", decision["signature"], decision["kind"]
     )
 
-    plan_decision = guard.before_call("update_plan", _snapshot("继续处理"))
+    plan_decision = guard.before_call("todo_write", _todos("继续处理"))
     guard.record_result(
-        "update_plan",
-        _snapshot("继续处理"),
+        "todo_write",
+        _todos("继续处理"),
         '{"success": true}',
         plan_decision["signature"],
         plan_decision["kind"],

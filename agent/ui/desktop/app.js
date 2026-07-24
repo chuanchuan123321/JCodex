@@ -1,4 +1,4 @@
-// 麒麟OS-Agent Desktop UI - Frontend Logic
+// JCodex Desktop UI - Frontend Logic
 
 let isInitialized = false;
 let isProcessing = false;
@@ -9,14 +9,57 @@ let completedMessageByMessageId = new Map();
 let streamingResponses = new Map();
 let composerAttachments = [];
 let currentSettingsSnapshot = null;
-let showKnowledgeAppendix = true;
+let showKnowledgeAppendix = false;
 let autoAllowAll = localStorage.getItem('minibot-auto-allow-all') === 'true';
+let planModeEnabled = localStorage.getItem('minibot-plan-mode-enabled') === 'true';
 let refreshInFlight = false;
 let tokenRefreshInFlight = false;
 let statusRefreshInFlight = false;
+let eelConnectionLost = false;
+let eelConnectionNoticeShown = false;
+let chatBottomPinGeneration = 0;
+let chatAutoFollow = true;
+let chatFollowFrame = 0;
+let voiceModeActive = false;
+let voiceListening = false;
+let voiceSpaceHeld = false;
+let voiceRecognition = null;
+let voiceTranscriptFinal = '';
+let voiceTranscriptInterim = '';
+let voiceRecognitionError = '';
+let voiceSpeechActive = false;
+let voiceSpeechQueue = [];
+let voiceCurrentUtterance = null;
+let voiceSpeechGeneration = 0;
+const voiceSpeechKeys = new Set();
+let voicePreferredSpeechVoice = null;
+let voiceVoicesListenerBound = false;
+let voicePendingSend = false;
+let voiceAudioContext = null;
+let voiceAnalyser = null;
+let voiceAudioSource = null;
+let voiceAudioStream = null;
+let voiceTimeDomainBuffer = null;
+let voiceStrandsFrame = 0;
+let voiceStrandsPhase = 0;
+let voiceStrandsRenderer = null;
+let voiceAmplitudeSmoothed = 0.18;
+let voiceAmplitudeTimestamp = 0;
+let voiceLayoutObserver = null;
+let voiceRecognitionStarting = false;
+let voiceRecognitionRunning = false;
+let voiceRecognitionFinishTimer = 0;
+let voiceRecognitionRestartTimer = 0;
+let voiceSessionToken = 0;
+let voicePendingSendToken = 0;
+let voicePointerId = null;
+let voiceModeHintTimer = 0;
 let lastFocusedElement = null;
 let activeConversationId = null;
 let conversations = [];
+let projects = [];
+let editingProjectId = null;
+const expandedProjectIds = new Set();
 let conversationRefreshGeneration = 0;
 const conversationExecutionStates = new Map();
 const executionPollers = new Map();
@@ -30,7 +73,28 @@ let activePreviewId = null;
 let activePreviewUrl = '';
 let previewSyncGeneration = 0;
 let previewLastFocusedElement = null;
+let activeChangeReview = null;
 const activePlanProgress = new Map();
+const SIDEBAR_PANEL_STORAGE_KEY = 'minibot-sidebar-panel';
+const SIDEBAR_PANEL_NAMES = new Set(['tasks', 'files', 'memory', 'skills', 'settings']);
+const SIDEBAR_PANEL_WIDTH_STORAGE_KEY = 'minibot-sidebar-panel-width';
+const SIDEBAR_PANEL_MIN_WIDTH = 210;
+const SIDEBAR_PANEL_MAX_WIDTH = 432;
+const SIDEBAR_RAIL_WIDTH = 48;
+const SIDEBAR_WIDTH_STEP = 16;
+const CHANGE_REVIEW_WIDTH_STORAGE_KEY = 'minibot-change-review-width';
+const CHANGE_REVIEW_MIN_WIDTH = 440;
+const CHANGE_REVIEW_MAX_WIDTH = 900;
+const CHANGE_REVIEW_WIDTH_STEP = 24;
+const DOCKED_MAIN_MIN_WIDTH = 380;
+const workspaceExpandedDirectories = new Set();
+const workspaceDirectoryItems = new Map();
+const workspaceDirectoryRequests = new Map();
+const CHAT_BOTTOM_THRESHOLD = 240;
+const CHAT_BOTTOM_VIEWPORT_RATIO = 0.25;
+const STREAM_RENDER_INTERVAL_MS = 50;
+const STREAM_RENDER_MAX_INTERVAL_MS = 120;
+const VOICE_RECOGNITION_LANGUAGE = 'zh-CN';
 
 const THEME_ASSETS = {
     light: {
@@ -138,6 +202,803 @@ function setAppStatus(state, text) {
     label.textContent = text;
 }
 
+function markEelConnectionLost() {
+    eelConnectionLost = true;
+    if (!eelConnectionNoticeShown) {
+        eelConnectionNoticeShown = true;
+        setAppStatus('error', '桌面服务连接已断开');
+        showToast('桌面服务连接已断开；请重新打开当前服务地址。', 'error', 5000);
+    }
+}
+
+function handleEelConnectionError(error) {
+    const message = String(error?.message || error || '');
+    if (!/Eel connection is unavailable|WebSocket is already in CLOSING or CLOSED state/i.test(message)) {
+        return false;
+    }
+    markEelConnectionLost();
+    return true;
+}
+
+function canCallEel() {
+    // Before Eel's first socket opens, its generated mock functions queue
+    // startup calls. After a real disconnect, do not keep scheduling calls.
+    return typeof eel !== 'undefined' && !eelConnectionLost;
+}
+
+function getChatDistanceFromBottom(chatMessages = document.getElementById('chatMessages')) {
+    if (!chatMessages) return Infinity;
+    return Math.max(
+        0,
+        chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
+    );
+}
+
+function setChatAutoFollow(enabled) {
+    chatAutoFollow = Boolean(enabled);
+    if (!chatAutoFollow && chatFollowFrame) {
+        cancelAnimationFrame(chatFollowFrame);
+        chatFollowFrame = 0;
+    }
+}
+
+function updateChatAutoFollow(chatMessages = document.getElementById('chatMessages')) {
+    const threshold = Math.max(
+        CHAT_BOTTOM_THRESHOLD,
+        Number(chatMessages?.clientHeight || 0) * CHAT_BOTTOM_VIEWPORT_RATIO
+    );
+    setChatAutoFollow(getChatDistanceFromBottom(chatMessages) <= threshold);
+}
+
+function followChatOutput(
+    chatMessages = document.getElementById('chatMessages'),
+    {force = false} = {}
+) {
+    if (!chatMessages || (!force && !chatAutoFollow)) return;
+    if (chatFollowFrame) return;
+    chatFollowFrame = requestAnimationFrame(() => {
+        chatFollowFrame = 0;
+        if (!force && !chatAutoFollow) return;
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+}
+
+function pinChatToBottom(
+    chatMessages = document.getElementById('chatMessages'),
+    {force = false} = {}
+) {
+    if (!chatMessages) return;
+    if (!force && !chatAutoFollow) return;
+    if (force) setChatAutoFollow(true);
+    const generation = ++chatBottomPinGeneration;
+    chatMessages.style.scrollBehavior = 'auto';
+
+    const align = remainingFrames => {
+        if (generation !== chatBottomPinGeneration) return;
+        if (!chatAutoFollow) {
+            chatMessages.style.removeProperty('scroll-behavior');
+            return;
+        }
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        if (remainingFrames > 0) {
+            requestAnimationFrame(() => align(remainingFrames - 1));
+            return;
+        }
+        chatMessages.style.removeProperty('scroll-behavior');
+    };
+
+    // Re-align after layout and font/markdown measurements settle.
+    align(2);
+}
+
+function getSpeechRecognitionConstructor() {
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function getPreferredSpeechVoiceScore(voice) {
+    const language = String(voice?.lang || '').toLowerCase().replace('_', '-');
+    if (!language.startsWith('zh')) return Number.NEGATIVE_INFINITY;
+
+    const name = String(voice?.name || '').toLowerCase();
+    let score = language === 'zh-cn' || language === 'zh-hans' ? 120 : 80;
+    if (/natural|premium|enhanced|neural|自然|增强/.test(name)) score += 60;
+    if (/xiaoxiao|yunxi|yunyang|xiaoyi|ting[- ]?ting|婷婷/.test(name)) score += 45;
+    if (/mandarin|putonghua|普通话|中文/.test(name)) score += 12;
+    if (voice?.localService) score += 6;
+    if (voice?.default) score += 3;
+    return score;
+}
+
+function refreshPreferredSpeechVoice() {
+    if (!('speechSynthesis' in window)) return null;
+    const voices = window.speechSynthesis.getVoices();
+    voicePreferredSpeechVoice = voices
+        .map((voice, index) => ({voice, index, score: getPreferredSpeechVoiceScore(voice)}))
+        .filter(item => Number.isFinite(item.score))
+        .sort((left, right) => right.score - left.score || left.index - right.index)[0]
+        ?.voice || null;
+    return voicePreferredSpeechVoice;
+}
+
+function initializeVoiceSpeechVoices() {
+    if (!('speechSynthesis' in window)) return;
+    refreshPreferredSpeechVoice();
+    if (voiceVoicesListenerBound) return;
+    if (typeof window.speechSynthesis.addEventListener === 'function') {
+        window.speechSynthesis.addEventListener('voiceschanged', refreshPreferredSpeechVoice);
+    } else {
+        window.speechSynthesis.onvoiceschanged = refreshPreferredSpeechVoice;
+    }
+    voiceVoicesListenerBound = true;
+}
+
+function setVoiceModeStatus(message, state = 'idle') {
+    const overlay = document.getElementById('voiceModeOverlay');
+    const status = document.getElementById('voiceModeStatus');
+    if (status) status.textContent = String(message || '');
+    if (overlay) overlay.dataset.voiceState = state;
+}
+
+function showVoiceModeHint() {
+    const hint = document.getElementById('voiceModeHint');
+    if (!hint) return;
+    clearTimeout(voiceModeHintTimer);
+    const outputActive = Boolean(
+        isProcessing && getActiveExecutionState()?.running
+    );
+    hint.textContent = outputActive
+        ? '按住空格打断并说话'
+        : '按住空格说话';
+    hint.hidden = false;
+    voiceModeHintTimer = window.setTimeout(() => {
+        hint.hidden = true;
+    }, 2600);
+}
+
+function updateVoiceTranscript() {
+    const transcript = document.getElementById('voiceTranscript');
+    if (!transcript) return;
+    const text = `${voiceTranscriptFinal}${voiceTranscriptInterim}`.trim();
+    transcript.textContent = text || '我会把识别到的内容显示在这里';
+    transcript.classList.toggle('has-content', Boolean(text));
+}
+
+function getVoiceAmplitude() {
+    const synthetic = voiceSpeechActive
+        ? 0.5 + (0.5 + 0.5 * Math.sin(voiceStrandsPhase * 2.4)) * 0.28
+        : voiceListening ? 0.31 : 0.18;
+    if (!voiceAnalyser) return synthetic;
+    if (!voiceTimeDomainBuffer || voiceTimeDomainBuffer.length !== voiceAnalyser.fftSize) {
+        voiceTimeDomainBuffer = new Uint8Array(voiceAnalyser.fftSize);
+    }
+    const data = voiceTimeDomainBuffer;
+    voiceAnalyser.getByteTimeDomainData(data);
+    let total = 0;
+    data.forEach(value => {
+        const normalized = (value - 128) / 128;
+        total += normalized * normalized;
+    });
+    const rms = Math.sqrt(total / data.length);
+    // Browser AGC stays disabled so sensitivity does not drift between turns.
+    // Compensate here with a compressed software gain that preserves quieter speech.
+    const activeLevel = Math.max(0, rms - 0.003);
+    const normalizedSpeech = Math.min(1, activeLevel * 14);
+    const measured = 0.27 + Math.pow(normalizedSpeech, 0.72) * 0.58;
+    return Math.min(0.88, Math.max(synthetic, measured));
+}
+
+function getSmoothedVoiceAmplitude(timestamp) {
+    const target = getVoiceAmplitude();
+    const elapsed = voiceAmplitudeTimestamp
+        ? Math.min(0.1, Math.max(0, (timestamp - voiceAmplitudeTimestamp) / 1000))
+        : 1 / 60;
+    voiceAmplitudeTimestamp = timestamp;
+    const response = target > voiceAmplitudeSmoothed ? 5.2 : 2.6;
+    const blend = 1 - Math.exp(-response * elapsed);
+    const proposedDelta = (target - voiceAmplitudeSmoothed) * blend;
+    const maxDelta = (target > voiceAmplitudeSmoothed ? 1.15 : 0.62) * elapsed;
+    voiceAmplitudeSmoothed += Math.max(-maxDelta, Math.min(maxDelta, proposedDelta));
+    return voiceAmplitudeSmoothed;
+}
+
+function resetVoiceAmplitude(level = 0.18) {
+    voiceAmplitudeSmoothed = level;
+    voiceAmplitudeTimestamp = 0;
+}
+
+const VOICE_STRANDS_VERTEX_SHADER = `#version 300 es
+in vec2 position;
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}`;
+
+const VOICE_STRANDS_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+
+uniform float uTime;
+uniform vec2 uResolution;
+uniform float uEnergy;
+
+out vec4 fragColor;
+
+const float PI = 3.14159265;
+
+vec3 palette(float t) {
+    vec3 magenta = vec3(1.0, 0.08, 0.82);
+    vec3 purple = vec3(0.52, 0.16, 1.0);
+    vec3 cyan = vec3(0.02, 0.86, 1.0);
+    vec3 amber = vec3(1.0, 0.63, 0.06);
+    float x = fract(t) * 4.0;
+    if (x < 1.0) return mix(magenta, purple, x);
+    if (x < 2.0) return mix(purple, cyan, x - 1.0);
+    if (x < 3.0) return mix(cyan, amber, x - 2.0);
+    return mix(amber, magenta, x - 3.0);
+}
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
+
+    float energy = 0.16 + uEnergy * 0.84;
+    float env = pow(max(cos(uv.x * PI * 0.5), 0.0), 2.75);
+    vec3 color = vec3(0.0);
+    float time = uTime * (0.18 + energy * 0.22);
+    float sharedWave = sin(uv.x * 1.34 + time * 0.92) * 0.68
+                     + sin(uv.x * 2.18 - time * 0.48) * 0.32;
+
+    for (int index = 0; index < 4; index++) {
+        float fi = float(index);
+        float strand = 1.5 - fi;
+        float phase = fi * 0.54;
+        float ripple = sin(uv.x * (1.72 + fi * 0.11) - time * (0.52 + fi * 0.08) + phase);
+        float fan = strand * (0.10 + energy * 0.04);
+        float y = (fan
+                 + sharedWave * (0.075 + energy * 0.105)
+                 + ripple * (0.022 + energy * 0.035)) * env;
+        float distanceToStrand = abs(uv.y - y);
+        float thickness = (0.022 + energy * 0.042) * (0.42 + env) * (0.9 + energy * 0.38);
+        float glow = thickness / (distanceToStrand + thickness * 0.52);
+        glow = pow(glow, 1.78);
+        float halo = exp(-distanceToStrand / max(thickness * 4.2, 0.0001)) * 0.14;
+        float hue = fi / 4.0 + uv.x * 0.042 + uTime * 0.009;
+        vec3 strandColor = palette(hue);
+        color += strandColor * (glow + halo) * env;
+    }
+
+    float mergeY = sharedWave * env * (0.052 + energy * 0.050);
+    float mergeDistance = abs(uv.y - mergeY);
+    float mergeGlow = exp(-mergeDistance / (0.047 + energy * 0.028)) * env;
+    color += vec3(1.0, 0.97, 1.0) * mergeGlow * (0.16 + energy * 0.09);
+
+    color *= 0.47 + energy * 0.68;
+    color = 1.0 - exp(-color * (2.45 + energy * 1.85));
+    float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = max(mix(vec3(gray), color, 1.42), 0.0);
+    float luminance = max(max(color.r, color.g), color.b);
+    float alpha = pow(clamp(luminance, 0.0, 1.0), 2.1)
+                * smoothstep(0.035, 0.12, luminance)
+                * smoothstep(0.0, 0.06, env);
+    float verticalFade = 1.0 - smoothstep(0.64, 0.98, abs(uv.y));
+    alpha *= verticalFade;
+    if (alpha <= 0.001) discard;
+    vec3 tint = clamp(color / max(luminance, 0.0001), 0.0, 1.0);
+    fragColor = vec4(tint * alpha, alpha);
+}`;
+
+function compileVoiceShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const message = gl.getShaderInfoLog(shader) || 'Unable to compile voice shader';
+        gl.deleteShader(shader);
+        throw new Error(message);
+    }
+    return shader;
+}
+
+function createVoiceStrandsRenderer() {
+    const canvas = document.getElementById('voiceStrandsCanvas');
+    const gl = canvas?.getContext('webgl2', {
+        alpha: true,
+        antialias: true,
+        premultipliedAlpha: true,
+    });
+    if (!canvas || !gl) return null;
+    const vertexShader = compileVoiceShader(gl, gl.VERTEX_SHADER, VOICE_STRANDS_VERTEX_SHADER);
+    const fragmentShader = compileVoiceShader(gl, gl.FRAGMENT_SHADER, VOICE_STRANDS_FRAGMENT_SHADER);
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    gl.deleteShader(vertexShader);
+    gl.deleteShader(fragmentShader);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        const message = gl.getProgramInfoLog(program) || 'Unable to link voice shader';
+        gl.deleteProgram(program);
+        throw new Error(message);
+    }
+    const position = gl.getAttribLocation(program, 'position');
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array([-1, -1, 3, -1, -1, 3]),
+        gl.STATIC_DRAW
+    );
+    gl.useProgram(program);
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    gl.clearColor(0, 0, 0, 0);
+    gl.disable(gl.BLEND);
+    return {
+        canvas,
+        gl,
+        program,
+        buffer,
+        time: gl.getUniformLocation(program, 'uTime'),
+        resolution: gl.getUniformLocation(program, 'uResolution'),
+        energy: gl.getUniformLocation(program, 'uEnergy'),
+        timeOrigin: null,
+    };
+}
+
+function resizeVoiceStrands(renderer) {
+    const rect = renderer.canvas.getBoundingClientRect();
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(1, Math.round(rect.width * ratio));
+    const height = Math.max(1, Math.round(rect.height * ratio));
+    if (renderer.canvas.width !== width || renderer.canvas.height !== height) {
+        renderer.canvas.width = width;
+        renderer.canvas.height = height;
+    }
+    renderer.gl.viewport(0, 0, width, height);
+    return {width, height};
+}
+
+function drawVoiceStrands(timestamp = performance.now()) {
+    if (!voiceStrandsRenderer) return;
+    const renderer = voiceStrandsRenderer;
+    const {gl, program} = renderer;
+    const {width, height} = resizeVoiceStrands(renderer);
+    const energy = getSmoothedVoiceAmplitude(timestamp);
+    renderer.timeOrigin ??= timestamp;
+    const animationTime = (timestamp - renderer.timeOrigin) * 0.001;
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(program);
+    gl.uniform1f(renderer.time, animationTime);
+    gl.uniform2f(renderer.resolution, width, height);
+    gl.uniform1f(renderer.energy, energy);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    voiceStrandsPhase = (
+        voiceStrandsPhase + 0.012 + energy * 0.018
+    ) % (Math.PI * 10);
+    voiceStrandsFrame = requestAnimationFrame(drawVoiceStrands);
+}
+
+function positionVoiceStrands() {
+    if (!voiceModeActive) return;
+    const overlay = document.getElementById('voiceModeOverlay');
+    const inputArea = document.querySelector('.main-content .input-area');
+    const inputContainer = inputArea?.querySelector('.input-container');
+    const mainContent = document.querySelector('.main-content');
+    if (!overlay || !inputArea || !inputContainer || !mainContent) return;
+
+    const inputRect = inputContainer.getBoundingClientRect();
+    const mainRect = mainContent.getBoundingClientRect();
+    const width = Math.max(
+        320,
+        Math.min(mainRect.width - 28, inputRect.width * 1.35, 1180)
+    );
+    const bottom = Math.max(8, window.innerHeight - inputRect.top + 10);
+    overlay.style.setProperty(
+        '--voice-strands-center-x',
+        `${inputRect.left + inputRect.width / 2}px`
+    );
+    overlay.style.setProperty('--voice-strands-bottom', `${bottom}px`);
+    overlay.style.setProperty('--voice-strands-width', `${width}px`);
+}
+
+function startVoiceStrands() {
+    if (voiceStrandsFrame) return;
+    positionVoiceStrands();
+    try {
+        voiceStrandsRenderer ||= createVoiceStrandsRenderer();
+    } catch (error) {
+        console.error('Failed to initialize voice strands:', error);
+        voiceStrandsRenderer = null;
+    }
+    if (!voiceStrandsRenderer) return;
+    voiceStrandsFrame = requestAnimationFrame(drawVoiceStrands);
+}
+
+function stopVoiceStrands() {
+    if (voiceStrandsFrame) cancelAnimationFrame(voiceStrandsFrame);
+    voiceStrandsFrame = 0;
+    resetVoiceAmplitude();
+    if (!voiceStrandsRenderer) return;
+    voiceStrandsRenderer.timeOrigin = null;
+    voiceStrandsPhase = 0;
+    const {gl} = voiceStrandsRenderer;
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.flush();
+}
+
+async function startVoiceAudioMeter(sessionToken = voiceSessionToken) {
+    if (voiceAudioStream || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                autoGainControl: false,
+                echoCancellation: true,
+                noiseSuppression: true,
+                channelCount: 1,
+            },
+        });
+        if (!voiceModeActive || !voiceListening || sessionToken !== voiceSessionToken) {
+            stream.getTracks().forEach(track => track.stop());
+            return;
+        }
+        voiceAudioStream = stream;
+        voiceAudioContext = new AudioContext();
+        voiceAnalyser = voiceAudioContext.createAnalyser();
+        voiceAnalyser.fftSize = 1024;
+        voiceTimeDomainBuffer = new Uint8Array(voiceAnalyser.fftSize);
+        voiceAudioSource = voiceAudioContext.createMediaStreamSource(voiceAudioStream);
+        voiceAudioSource.connect(voiceAnalyser);
+    } catch (error) {
+        voiceAudioStream = null;
+        if (String(error?.name || '') === 'NotAllowedError') {
+            setVoiceModeStatus('请允许麦克风权限，仍可使用空格触发识别', 'error');
+        }
+    }
+}
+
+function stopVoiceAudioMeter() {
+    voiceAudioStream?.getTracks().forEach(track => track.stop());
+    voiceAudioSource?.disconnect?.();
+    voiceAudioContext?.close?.();
+    voiceAudioStream = null;
+    voiceAudioSource = null;
+    voiceAnalyser = null;
+    voiceTimeDomainBuffer = null;
+    voiceAudioContext = null;
+}
+
+function cancelVoiceSpeech() {
+    voiceSpeechGeneration += 1;
+    voiceSpeechQueue.length = 0;
+    voiceSpeechKeys.clear();
+    voiceCurrentUtterance = null;
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    voiceSpeechActive = false;
+    document.getElementById('voiceModeOverlay')?.classList.remove('is-speaking');
+}
+
+function pauseVoiceResponseForConversation() {
+    // Keep the reply visible, but give an interrupted user the audio channel.
+    streamingResponses.forEach(state => {
+        state.voiceDisabled = true;
+    });
+    cancelVoiceSpeech();
+}
+
+function pauseActiveOutputForVoiceInput() {
+    const state = getActiveExecutionState();
+    if (!isProcessing || !state?.running) return false;
+
+    // Use the same cancellation path as the visible stop button so a spoken
+    // interruption freezes the live task before the next voice turn is sent.
+    document.getElementById('stopButton')?.click();
+    return true;
+}
+
+function playNextVoiceResponse() {
+    if (!voiceModeActive || voiceListening || voiceCurrentUtterance) return;
+    if (!('speechSynthesis' in window)) return;
+    const next = voiceSpeechQueue.shift();
+    if (!next) {
+        voiceSpeechActive = false;
+        document.getElementById('voiceModeOverlay')?.classList.remove('is-speaking');
+        if (voiceModeActive && !voiceListening) {
+            setVoiceModeStatus('按住空格键继续说话', 'idle');
+        }
+        return;
+    }
+
+    const generation = voiceSpeechGeneration;
+    const preferredVoice = voicePreferredSpeechVoice || refreshPreferredSpeechVoice();
+    const utterance = new SpeechSynthesisUtterance(next.content);
+    voiceCurrentUtterance = utterance;
+    if (preferredVoice) utterance.voice = preferredVoice;
+    utterance.lang = preferredVoice?.lang || VOICE_RECOGNITION_LANGUAGE;
+    utterance.rate = 0.94;
+    utterance.pitch = 1.02;
+    utterance.onstart = () => {
+        if (!voiceModeActive) return;
+        voiceSpeechActive = true;
+        document.getElementById('voiceModeOverlay')?.classList.add('is-speaking');
+        setVoiceModeStatus('正在为你朗读回答', 'speaking');
+    };
+    const finish = () => {
+        if (generation !== voiceSpeechGeneration || voiceCurrentUtterance !== utterance) return;
+        voiceCurrentUtterance = null;
+        if (voiceSpeechQueue.length && voiceModeActive && !voiceListening) {
+            window.setTimeout(playNextVoiceResponse, 45);
+            return;
+        }
+        playNextVoiceResponse();
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    window.speechSynthesis.speak(utterance);
+}
+
+function enqueueVoiceSpeech(content, speechKey) {
+    if (!voiceModeActive || !('speechSynthesis' in window)) return false;
+    const speechText = String(content || '').replace(/\s+/g, ' ').trim();
+    if (!speechText) return false;
+    const key = String(speechKey || speechText);
+    if (voiceSpeechKeys.has(key)) return false;
+    voiceSpeechKeys.add(key);
+    voiceSpeechQueue.push({content: speechText, key});
+    playNextVoiceResponse();
+    return true;
+}
+
+function speakVoiceResponse(content, messageId = 0) {
+    const visibleContent = getVisibleModelContent(content).replace(/\s+/g, ' ').trim();
+    enqueueVoiceSpeech(
+        visibleContent,
+        `message:${Number(messageId || 0)}:${visibleContent}`
+    );
+}
+
+function createVoiceRecognition(sessionToken) {
+    const Recognition = getSpeechRecognitionConstructor();
+    if (!Recognition) return null;
+    const recognition = new Recognition();
+    recognition.lang = VOICE_RECOGNITION_LANGUAGE;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onstart = () => {
+        if (recognition !== voiceRecognition || sessionToken !== voiceSessionToken) return;
+        voiceRecognitionStarting = false;
+        voiceRecognitionRunning = true;
+        if (!voiceModeActive || !voiceListening) {
+            try {
+                recognition.stop();
+            } catch (_error) {
+                // The recognition engine may already have ended.
+            }
+            return;
+        }
+        document.getElementById('voiceModeOverlay')?.classList.add('is-listening');
+        setVoiceModeStatus('已暂停回答，正在聆听…松开空格键发送', 'listening');
+    };
+    recognition.onresult = event => {
+        if (recognition !== voiceRecognition || sessionToken !== voiceSessionToken) return;
+        let interim = '';
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+            const result = event.results[index];
+            const value = String(result[0]?.transcript || '');
+            if (result.isFinal) voiceTranscriptFinal += value;
+            else interim += value;
+        }
+        voiceTranscriptInterim = interim;
+        updateVoiceTranscript();
+    };
+    recognition.onerror = event => {
+        if (recognition !== voiceRecognition || sessionToken !== voiceSessionToken) return;
+        const error = String(event.error || 'unknown');
+        voiceRecognitionError = error;
+        voiceRecognitionStarting = false;
+        if (error === 'not-allowed' || error === 'service-not-allowed') {
+            setVoiceModeStatus('请允许麦克风权限后重试', 'error');
+        } else if (error !== 'aborted' && error !== 'no-speech') {
+            setVoiceModeStatus('语音识别暂时不可用，请重试', 'error');
+        }
+    };
+    recognition.onend = () => {
+        if (recognition !== voiceRecognition || sessionToken !== voiceSessionToken) return;
+        voiceRecognitionStarting = false;
+        voiceRecognitionRunning = false;
+        if (voicePendingSend) {
+            const pendingToken = voicePendingSendToken;
+            voicePendingSend = false;
+            voicePendingSendToken = 0;
+            clearTimeout(voiceRecognitionFinishTimer);
+            voiceRecognitionFinishTimer = 0;
+            if (pendingToken === voiceSessionToken) submitVoiceTranscript();
+            return;
+        }
+        if (voiceListening && voiceSpaceHeld && voiceModeActive && !voiceRecognitionError) {
+            clearTimeout(voiceRecognitionRestartTimer);
+            voiceRecognitionRestartTimer = window.setTimeout(() => {
+                voiceRecognitionRestartTimer = 0;
+                if (!voiceListening || !voiceSpaceHeld || !voiceModeActive || voiceRecognitionRunning) return;
+                voiceRecognitionStarting = true;
+                try {
+                    recognition.start();
+                } catch (_error) {
+                    voiceRecognitionStarting = false;
+                    setVoiceModeStatus('语音识别正在准备，请稍后重试', 'error');
+                }
+            }, 0);
+        }
+    };
+    return recognition;
+}
+
+function isVoiceShortcutBlocked(target) {
+    if (!target) return false;
+    return Boolean(target.closest?.('.modal.active, dialog[open]'));
+}
+
+function startVoiceListening() {
+    if (!voiceModeActive || voiceListening) return;
+    const outputPaused = pauseActiveOutputForVoiceInput();
+    pauseVoiceResponseForConversation();
+    voiceSessionToken += 1;
+    const sessionToken = voiceSessionToken;
+    voiceListening = true;
+    resetVoiceAmplitude(0.31);
+    voicePendingSend = false;
+    voicePendingSendToken = 0;
+    clearTimeout(voiceRecognitionFinishTimer);
+    clearTimeout(voiceRecognitionRestartTimer);
+    voiceRecognitionFinishTimer = 0;
+    voiceRecognitionRestartTimer = 0;
+    document.getElementById('voiceModeOverlay')?.classList.add('is-listening');
+    setVoiceModeStatus(
+        outputPaused
+            ? '已暂停输出，正在聆听…松开空格键发送'
+            : '正在聆听…松开空格键发送',
+        'listening'
+    );
+    startVoiceAudioMeter(sessionToken);
+    voiceTranscriptFinal = '';
+    voiceTranscriptInterim = '';
+    voiceRecognitionError = '';
+    updateVoiceTranscript();
+    const previousRecognition = voiceRecognition;
+    voiceRecognition = null;
+    voiceRecognitionStarting = false;
+    voiceRecognitionRunning = false;
+    try {
+        previousRecognition?.abort();
+    } catch (_error) {
+        // The previous recognition round may already be fully closed.
+    }
+    voiceRecognition = createVoiceRecognition(sessionToken);
+    if (!voiceRecognition) {
+        setVoiceModeStatus('正在聆听…当前环境不支持自动识别', 'listening');
+        return;
+    }
+    voiceRecognitionStarting = true;
+    try {
+        voiceRecognition.start();
+    } catch (_error) {
+        voiceRecognitionStarting = false;
+        setVoiceModeStatus('语音识别正在准备，请稍后重试', 'error');
+    }
+}
+
+function stopVoiceListening({send = true} = {}) {
+    if (!voiceListening && !voiceRecognitionRunning && !voiceRecognitionStarting) return;
+    voiceSpaceHeld = false;
+    voicePointerId = null;
+    voicePendingSend = send;
+    voicePendingSendToken = voiceSessionToken;
+    voiceListening = false;
+    resetVoiceAmplitude();
+    document.getElementById('voiceModeOverlay')?.classList.remove('is-listening');
+    stopVoiceAudioMeter();
+    clearTimeout(voiceRecognitionRestartTimer);
+    voiceRecognitionRestartTimer = 0;
+    if (voiceRecognition && (voiceRecognitionRunning || voiceRecognitionStarting)) {
+        let waitingForRecognitionEnd = true;
+        try {
+            voiceRecognition.stop();
+        } catch (_error) {
+            waitingForRecognitionEnd = false;
+            voiceRecognitionStarting = false;
+            voiceRecognitionRunning = false;
+        }
+        setVoiceModeStatus(send ? '正在整理识别内容…' : '已停止聆听', 'processing');
+        if (!waitingForRecognitionEnd) {
+            voicePendingSend = false;
+            voicePendingSendToken = 0;
+            if (send) submitVoiceTranscript();
+            return;
+        }
+        clearTimeout(voiceRecognitionFinishTimer);
+        voiceRecognitionFinishTimer = window.setTimeout(() => {
+            voiceRecognitionFinishTimer = 0;
+            if (!voicePendingSend) return;
+            const pendingToken = voicePendingSendToken;
+            voicePendingSend = false;
+            voicePendingSendToken = 0;
+            if (pendingToken === voiceSessionToken) submitVoiceTranscript();
+        }, 320);
+        return;
+    }
+    voicePendingSend = false;
+    voicePendingSendToken = 0;
+    if (send) submitVoiceTranscript();
+}
+
+function submitVoiceTranscript() {
+    const transcript = `${voiceTranscriptFinal}${voiceTranscriptInterim}`.trim();
+    const blockingRecognitionError = voiceRecognitionError
+        && voiceRecognitionError !== 'no-speech'
+        && voiceRecognitionError !== 'aborted';
+    if (!transcript || blockingRecognitionError) {
+        if (voiceModeActive && !blockingRecognitionError) {
+            setVoiceModeStatus('没有听清，请按住空格键重试', 'idle');
+        }
+        return;
+    }
+    const messageInput = document.getElementById('messageInput');
+    messageInput.value = transcript;
+    messageInput.dispatchEvent(new Event('input', {bubbles: true}));
+    setVoiceModeStatus('已识别，正在发送…', 'processing');
+    sendMessage();
+}
+
+function openVoiceMode() {
+    voiceModeActive = true;
+    lastFocusedElement = document.activeElement;
+    const overlay = document.getElementById('voiceModeOverlay');
+    const button = document.getElementById('voiceModeButton');
+    overlay.hidden = false;
+    overlay.setAttribute('aria-hidden', 'false');
+    button?.setAttribute('aria-pressed', 'true');
+    button?.setAttribute('aria-label', '关闭语音对话模式');
+    document.body.classList.add('voice-mode-active');
+    showVoiceModeHint();
+    setVoiceModeStatus('按住空格键开始说话', 'idle');
+    positionVoiceStrands();
+    requestAnimationFrame(positionVoiceStrands);
+    startVoiceStrands();
+    if (!getSpeechRecognitionConstructor()) {
+        setVoiceModeStatus('当前环境不支持自动识别，请检查桌面麦克风设置', 'error');
+    }
+    document.getElementById('voiceHoldButton')?.focus();
+}
+
+function closeVoiceMode() {
+    voiceModeActive = false;
+    voiceSpaceHeld = false;
+    voicePointerId = null;
+    clearTimeout(voiceRecognitionFinishTimer);
+    clearTimeout(voiceRecognitionRestartTimer);
+    voiceRecognitionFinishTimer = 0;
+    voiceRecognitionRestartTimer = 0;
+    stopVoiceListening({send: false});
+    if (voiceRecognition) voiceRecognition.abort();
+    voiceRecognitionStarting = false;
+    voiceRecognitionRunning = false;
+    voicePendingSend = false;
+    voicePendingSendToken = 0;
+    cancelVoiceSpeech();
+    stopVoiceAudioMeter();
+    stopVoiceStrands();
+    const overlay = document.getElementById('voiceModeOverlay');
+    const button = document.getElementById('voiceModeButton');
+    overlay.hidden = true;
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.classList.remove('is-listening', 'is-speaking');
+    button?.setAttribute('aria-pressed', 'false');
+    button?.setAttribute('aria-label', '打开语音对话模式');
+    document.body.classList.remove('voice-mode-active');
+    lastFocusedElement?.focus?.();
+}
+
+function toggleVoiceMode() {
+    if (voiceModeActive) closeVoiceMode();
+    else openVoiceMode();
+}
+
 function updateProcessingUI(processing, stateText = '') {
     isProcessing = Boolean(processing);
     const messageInput = document.getElementById('messageInput');
@@ -163,6 +1024,7 @@ function getConversationExecutionState(conversationId, create = true) {
         state = {
             conversationId: id,
             messageId: 0,
+            terminalMessageId: 0,
             running: false,
             stopping: false,
             outputStopped: false,
@@ -181,6 +1043,24 @@ function getConversationExecutionState(conversationId, create = true) {
 function updateConversationExecutionState(conversationId, updates = {}) {
     const state = getConversationExecutionState(conversationId);
     if (!state) return null;
+    const incomingMessageId = Number(updates.messageId || state.messageId || 0);
+    if (
+        updates.running === true
+        && incomingMessageId
+        && incomingMessageId <= Number(state.terminalMessageId || 0)
+    ) {
+        return state;
+    }
+    if (updates.running === false && incomingMessageId) {
+        state.terminalMessageId = Math.max(
+            Number(state.terminalMessageId || 0), incomingMessageId
+        );
+    } else if (
+        updates.running === true
+        && incomingMessageId > Number(state.terminalMessageId || 0)
+    ) {
+        state.terminalMessageId = 0;
+    }
     Object.assign(state, updates);
     if (Number(updates.messageId || 0) > 0) {
         state.messageId = Number(updates.messageId);
@@ -210,7 +1090,7 @@ function planProgressKey(conversationId, messageId) {
 
 function normalizePlanProgress(raw, conversationId = activeConversationId, messageId = 0) {
     if (!raw || !Array.isArray(raw.plan) || !raw.plan.length) return null;
-    const validStatuses = new Set(['pending', 'in_progress', 'completed']);
+    const validStatuses = new Set(['pending', 'in_progress', 'completed', 'cancelled']);
     const validTerminalStates = new Set(['complete', 'error', 'stopped']);
     const terminalState = String(
         raw.terminal_state || raw.terminalState || ''
@@ -274,7 +1154,9 @@ function renderPlanProgress(snapshot = null) {
         return;
     }
 
-    const completed = planState.plan.filter(item => item.status === 'completed').length;
+    const completed = planState.plan.filter(
+        item => ['completed', 'cancelled'].includes(item.status)
+    ).length;
     const currentIndex = planState.plan.findIndex(item => item.status === 'in_progress');
     const pendingIndex = planState.plan.findIndex(item => item.status === 'pending');
     const displayIndex = currentIndex >= 0
@@ -497,17 +1379,28 @@ function syncExecutionStatesFromConversations(items) {
         const backendMessageId = Number(item.active_message_id || item.message_id || 0);
         state.unreadCompletion = Boolean(item.unread_completion);
         if (backendRunning) {
-            state.running = true;
-            state.stopping = Boolean(item.stopping);
-            state.awaitingQuestion = Boolean(item.awaiting_question);
-            state.awaitingApproval = Boolean(item.awaiting_approval);
-            if (backendMessageId) state.messageId = backendMessageId;
+            if (
+                backendMessageId
+                && backendMessageId <= Number(state.terminalMessageId || 0)
+            ) {
+                continue;
+            }
+            updateConversationExecutionState(conversationId, {
+                messageId: backendMessageId || state.messageId,
+                running: true,
+                stopping: Boolean(item.stopping),
+                awaitingQuestion: Boolean(item.awaiting_question),
+                awaitingApproval: Boolean(item.awaiting_approval),
+            });
         } else if (state.running) {
-            state.running = false;
-            state.stopping = false;
-            state.outputStopped = false;
-            state.awaitingQuestion = false;
-            state.awaitingApproval = false;
+            updateConversationExecutionState(conversationId, {
+                messageId: state.messageId,
+                running: false,
+                stopping: false,
+                outputStopped: false,
+                awaitingQuestion: false,
+                awaitingApproval: false,
+            });
         }
     }
     for (const conversationId of conversationExecutionStates.keys()) {
@@ -607,6 +1500,11 @@ function isImageAttachment(item) {
     return /\.(?:png|jpe?g|webp)$/i.test(String(item?.name || ''));
 }
 
+function isDirectoryReference(item) {
+    return item?.kind === 'directory_reference'
+        || item?.parse_mode === 'directory_reference';
+}
+
 function getImageMimeFromName(name) {
     const extension = String(name || '').split('.').pop().toLowerCase();
     if (extension === 'png') return 'image/png';
@@ -650,11 +1548,23 @@ function getImagePreview(item) {
 }
 
 function renderAttachmentVisual(item, className) {
+    if (isDirectoryReference(item)) {
+        return `
+            <span class="${className} is-directory" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                </svg>
+            </span>`;
+    }
     const preview = getImagePreview(item);
     if (preview) {
         return `<span class="${className} is-image" aria-hidden="true"><img src="${escapeHtml(preview)}" alt=""></span>`;
     }
-    if (isImageAttachment(item) || item?.parse_mode === 'vision') {
+    if (
+        isImageAttachment(item)
+        || item?.parse_mode === 'vision'
+        || item?.parse_mode === 'image_view'
+    ) {
         return `
             <span class="${className} is-image-placeholder" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
@@ -685,7 +1595,7 @@ function renderComposerAttachments() {
             ${renderAttachmentVisual(item, 'composer-attachment-icon')}
             <span class="composer-attachment-copy">
                 <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
-                <small>${item.status === 'parsing' ? '正在解析' : item.status === 'error' ? escapeHtml(item.error || '解析失败') : isImageAttachment(item) ? `等待发送给视觉模型 · ${formatAttachmentSize(item.size)}` : formatAttachmentSize(item.size)}</small>
+                <small>${item.status === 'parsing' ? '正在解析' : item.status === 'error' ? escapeHtml(item.error || '解析失败') : isDirectoryReference(item) ? escapeHtml(item.path || '参考文件夹') : isImageAttachment(item) ? `等待保存图片 · ${formatAttachmentSize(item.size)}` : formatAttachmentSize(item.size)}</small>
             </span>
             <button type="button" class="composer-attachment-remove" onclick="removeComposerAttachment('${item.id}')" aria-label="移除 ${escapeHtml(item.name)}">×</button>
         </div>
@@ -727,6 +1637,8 @@ function buildAttachmentPayload(attachments) {
         size: item.size,
         type: item.type,
         data: item.data,
+        path: item.path || '',
+        kind: item.kind || '',
     }));
 }
 
@@ -743,6 +1655,94 @@ function getClipboardImages(clipboardData) {
 
 function getDroppedFiles(dataTransfer) {
     return Array.from(dataTransfer?.files || []);
+}
+
+function getDroppedDirectoryEntries(dataTransfer) {
+    return Array.from(dataTransfer?.items || [])
+        .filter(item => item.kind === 'file')
+        .map(item => item.webkitGetAsEntry?.())
+        .filter(entry => entry?.isDirectory);
+}
+
+function getDroppedFilePath(file) {
+    return String(file?.path || file?.webkitRelativePath || '').trim();
+}
+
+function getPathBaseName(path) {
+    return String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+}
+
+function normalizeDirectoryReference(path, fallbackName = '') {
+    const normalizedPath = String(path || '').trim().replace(/[\\/]+$/, '');
+    if (!normalizedPath) return null;
+    const name = normalizedPath.split(/[\\/]/).filter(Boolean).pop()
+        || String(fallbackName || '参考文件夹');
+    return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name,
+        size: 0,
+        type: 'inode/directory',
+        data: '',
+        path: normalizedPath,
+        kind: 'directory_reference',
+        status: 'ready',
+    };
+}
+
+function addComposerDirectoryReferences(paths, fallbackNames = []) {
+    const existingPaths = new Set(
+        composerAttachments
+            .filter(isDirectoryReference)
+            .map(item => String(item.path || ''))
+    );
+    const availableSlots = ATTACHMENT_LIMITS.count - composerAttachments.length;
+    const references = paths
+        .map((path, index) => normalizeDirectoryReference(path, fallbackNames[index]))
+        .filter(item => item && !existingPaths.has(item.path))
+        .slice(0, Math.max(0, availableSlots));
+    if (!references.length) return 0;
+    composerAttachments.push(...references);
+    renderComposerAttachments();
+    updateComposerSendState();
+    return references.length;
+}
+
+async function getDroppedFolderPaths(dataTransfer, directoryEntries) {
+    const directoryNames = new Set(directoryEntries.map(entry => entry.name));
+    const directPaths = getDroppedFiles(dataTransfer)
+        .map(getDroppedFilePath)
+        .filter(path => path && directoryNames.has(getPathBaseName(path)));
+    if (directPaths.length >= directoryEntries.length) return directPaths;
+    if (typeof eel?.get_dragged_folder_paths !== 'function') return directPaths;
+    try {
+        const result = await eel.get_dragged_folder_paths(
+            directoryEntries.map(entry => entry.name)
+        )();
+        if (result?.success) return Array.from(new Set([...directPaths, ...(result.paths || [])]));
+    } catch (error) {
+        if (!handleEelConnectionError(error)) {
+            console.error('Failed to resolve dropped folder paths:', error);
+        }
+    }
+    return directPaths;
+}
+
+async function addDroppedComposerItems(dataTransfer) {
+    const directoryEntries = getDroppedDirectoryEntries(dataTransfer);
+    const droppedFiles = getDroppedFiles(dataTransfer);
+    const folderPaths = await getDroppedFolderPaths(dataTransfer, directoryEntries);
+    const folderNames = new Set(directoryEntries.map(entry => entry.name));
+    const matchedFolderPaths = folderPaths.filter(path => folderNames.has(getPathBaseName(path)));
+    const folderCount = addComposerDirectoryReferences(
+        matchedFolderPaths,
+        directoryEntries.map(entry => entry.name)
+    );
+    const directoryNames = new Set(directoryEntries.map(entry => entry.name));
+    const regularFiles = droppedFiles.filter(file => !directoryNames.has(file.name));
+    if (regularFiles.length) await addComposerAttachments(regularFiles);
+    if (directoryEntries.length && folderCount === 0) {
+        showToast('无法读取该文件夹路径，请将文件夹直接从 Finder 拖入', 'error');
+    }
 }
 
 function hasDraggedFiles(dataTransfer) {
@@ -864,29 +1864,39 @@ function init() {
         setTimeout(init, 100);
         return;
     }
+    eel._websocket?.addEventListener('open', () => {
+        eelConnectionLost = false;
+        eelConnectionNoticeShown = false;
+    });
+    eel._websocket?.addEventListener('close', () => {
+        markEelConnectionLost();
+    });
     initializeUI();
+    initializeSidebarWidth();
+    setSidebarPanel(getSavedSidebarPanel());
     initializeOSAgent();
     refreshAllWorkspace();
     refreshSkills();
     updateTokenIndicator();
     updateEmbeddingStatus();
     setInterval(() => {
-        if (!document.hidden) refreshAllWorkspace();
+        if (!document.hidden && canCallEel()) refreshAllWorkspace();
     }, 5000);
     setInterval(() => {
-        if (!document.hidden) updateTokenIndicator();
+        if (!document.hidden && canCallEel()) updateTokenIndicator();
     }, 4000);
     setInterval(() => {
-        if (!document.hidden) updateEmbeddingStatus();
+        if (!document.hidden && canCallEel()) updateEmbeddingStatus();
     }, 12000);
     setInterval(() => {
-        if (!document.hidden && activeConversationId) {
+        if (!document.hidden && activeConversationId && canCallEel()) {
             syncPreviewSessions(activeConversationId);
         }
     }, 4000);
     setInterval(() => {
-        if (!document.hidden && !refreshInFlight) {
+        if (!document.hidden && !refreshInFlight && canCallEel()) {
             refreshConversations(activeConversationId).catch(error => {
+                if (handleEelConnectionError(error)) return;
                 console.error('Failed to sync task activity:', error);
             });
         }
@@ -907,21 +1917,36 @@ function initializeUI() {
     const themeToggle = document.getElementById('themeToggle');
     const tokenIndicator = document.getElementById('tokenIndicator');
     const accessToggle = document.getElementById('accessToggle');
+    const planModeToggle = document.getElementById('planModeToggle');
     const modelBadge = document.getElementById('modelBadge');
+    const voiceModeButton = document.getElementById('voiceModeButton');
+    const voiceHoldButton = document.getElementById('voiceHoldButton');
     const inputAddButton = document.getElementById('inputAddButton');
+    const composerAddMenuAnchor = document.getElementById('composerAddMenuAnchor');
+    const composerAddMenu = document.getElementById('composerAddMenu');
     const attachmentInput = document.getElementById('attachmentInput');
+    const skillFolderInput = document.getElementById('skillFolderInput');
     const clearQueueButton = document.getElementById('clearQueueButton');
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+    const sidebarResizeHandle = document.getElementById('sidebarResizeHandle');
     const newTaskButton = document.getElementById('newTaskButton');
+    const newProjectButton = document.getElementById('newProjectButton');
+    const sidebarNav = document.querySelector('.sidebar-nav');
     const planProgress = document.getElementById('planProgress');
     const planProgressTrigger = document.getElementById('planProgressTrigger');
     const inputContainer = messageInput.closest('.input-container');
     const chatMessages = document.getElementById('chatMessages');
     const previewFrame = document.getElementById('browserPreviewFrame');
+    const changeReviewPanel = document.getElementById('changeReviewPanel');
+    const voiceInputArea = document.querySelector('.main-content .input-area');
+    const voiceMainContent = document.querySelector('.main-content');
+    const changeReviewResizeHandle = document.getElementById('changeReviewResizeHandle');
     let composerDragDepth = 0;
 
     applyAccessToggleState(autoAllowAll);
+    applyPlanModeToggleState(planModeEnabled);
+    initializeVoiceSpeechVoices();
     syncAutoAllowAll(autoAllowAll);
     updateModelBadge();
 
@@ -978,18 +2003,126 @@ function initializeUI() {
             setAutoAllowAll(!autoAllowAll);
         });
     }
+    if (planModeToggle) {
+        planModeToggle.addEventListener('click', () => {
+            setPlanModeEnabled(false);
+            inputAddButton?.focus();
+        });
+    }
     if (modelBadge) {
         modelBadge.addEventListener('click', openSettings);
     }
+    voiceModeButton?.addEventListener('click', toggleVoiceMode);
+    window.addEventListener('resize', positionVoiceStrands);
+    if ('ResizeObserver' in window && voiceInputArea && voiceMainContent) {
+        voiceLayoutObserver?.disconnect();
+        voiceLayoutObserver = new ResizeObserver(positionVoiceStrands);
+        voiceLayoutObserver.observe(voiceInputArea);
+        voiceLayoutObserver.observe(inputContainer);
+        voiceLayoutObserver.observe(voiceMainContent);
+    }
+    voiceHoldButton?.addEventListener('pointerdown', event => {
+        event.preventDefault();
+        if (voicePointerId !== null) return;
+        voicePointerId = event.pointerId;
+        voiceHoldButton.setPointerCapture?.(event.pointerId);
+        voiceSpaceHeld = true;
+        startVoiceListening();
+    });
+    voiceHoldButton?.addEventListener('pointerup', event => {
+        event.preventDefault();
+        if (voicePointerId !== null && event.pointerId !== voicePointerId) return;
+        stopVoiceListening();
+    });
+    voiceHoldButton?.addEventListener('pointercancel', event => {
+        if (voicePointerId !== null && event.pointerId !== voicePointerId) return;
+        stopVoiceListening({send: false});
+    });
+    voiceHoldButton?.addEventListener('lostpointercapture', event => {
+        if (voicePointerId !== null && event.pointerId !== voicePointerId) return;
+        if (voiceSpaceHeld) stopVoiceListening({send: false});
+    });
+    document.addEventListener('keydown', event => {
+        if (!voiceModeActive || event.code !== 'Space') return;
+        if (isVoiceShortcutBlocked(event.target)) return;
+        event.preventDefault();
+        if (event.repeat) return;
+        voiceSpaceHeld = true;
+        startVoiceListening();
+    }, true);
+    document.addEventListener('keyup', event => {
+        if (!voiceModeActive || event.code !== 'Space') return;
+        if (isVoiceShortcutBlocked(event.target)) return;
+        event.preventDefault();
+        if (!voiceSpaceHeld) return;
+        stopVoiceListening();
+    }, true);
+    window.addEventListener('pointerup', event => {
+        if (!voiceModeActive || !voiceSpaceHeld) return;
+        if (voicePointerId !== null && event.pointerId !== voicePointerId) return;
+        stopVoiceListening();
+    });
+    window.addEventListener('blur', () => {
+        if (voiceSpaceHeld) stopVoiceListening({send: false});
+    });
     if (inputAddButton) {
         inputAddButton.addEventListener('click', () => {
-            attachmentInput?.click();
+            toggleComposerAddMenu();
+        });
+        inputAddButton.addEventListener('keydown', event => {
+            if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                openComposerAddMenu(true);
+            } else if (event.key === 'Escape') {
+                closeComposerAddMenu(true);
+            }
         });
     }
+    composerAddMenu?.addEventListener('click', event => {
+        const action = event.target.closest('[data-composer-action]')?.dataset.composerAction;
+        if (!action) return;
+        closeComposerAddMenu();
+        if (action === 'upload-attachment') {
+            attachmentInput?.click();
+            return;
+        }
+        if (action === 'upload-folder') {
+            selectComposerFolder(messageInput);
+            return;
+        }
+        if (action === 'enable-plan-mode') {
+            setPlanModeEnabled(true);
+            messageInput.focus();
+        }
+    });
+    composerAddMenu?.addEventListener('keydown', event => {
+        const items = getComposerAddMenuItems();
+        const currentIndex = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeComposerAddMenu(true);
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (!items.length) return;
+            const offset = event.key === 'ArrowDown' ? 1 : -1;
+            const nextIndex = currentIndex < 0
+                ? 0
+                : (currentIndex + offset + items.length) % items.length;
+            items[nextIndex].focus();
+        } else if (event.key === 'Home' || event.key === 'End') {
+            event.preventDefault();
+            items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+        }
+    });
     attachmentInput?.addEventListener('change', async () => {
         await addComposerAttachments(Array.from(attachmentInput.files || []));
         attachmentInput.value = '';
         messageInput.focus();
+    });
+    initializeSidebarAutoHideScrollbars();
+    skillFolderInput?.addEventListener('change', async () => {
+        await importSkillFolder(Array.from(skillFolderInput.files || []));
+        skillFolderInput.value = '';
     });
     inputContainer?.addEventListener('dragenter', (event) => {
         if (!hasDraggedFiles(event.dataTransfer)) return;
@@ -1013,16 +2146,18 @@ function initializeUI() {
         event.preventDefault();
         composerDragDepth = 0;
         inputContainer.classList.remove('is-dragging-files');
-        await addComposerAttachments(getDroppedFiles(event.dataTransfer));
+        await addDroppedComposerItems(event.dataTransfer);
         messageInput.focus();
     });
     clearQueueButton?.addEventListener('click', clearMessageQueue);
     sidebarToggle?.addEventListener('click', () => {
         document.body.classList.toggle('sidebar-open');
-        sidebarToggle.setAttribute(
-            'aria-expanded',
-            document.body.classList.contains('sidebar-open') ? 'true' : 'false'
-        );
+        const isOpen = document.body.classList.contains('sidebar-open');
+        sidebarToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+        sidebarToggle.setAttribute('aria-label', isOpen ? '关闭工作台导航' : '打开工作台导航');
+        if (isOpen) {
+            document.querySelector('.sidebar-nav-item.is-active')?.focus();
+        }
     });
     sidebarBackdrop?.addEventListener('click', closeMobileSidebar);
     const mobileSidebarQuery = window.matchMedia('(max-width: 780px)');
@@ -1034,8 +2169,87 @@ function initializeUI() {
     } else {
         mobileSidebarQuery.addListener(handleSidebarBreakpointChange);
     }
-    newTaskButton?.addEventListener('click', createNewConversation);
+    const updateSidebarNavOrientation = (event = mobileSidebarQuery) => {
+        sidebarNav?.setAttribute('aria-orientation', event.matches ? 'horizontal' : 'vertical');
+    };
+    updateSidebarNavOrientation();
+    if (typeof mobileSidebarQuery.addEventListener === 'function') {
+        mobileSidebarQuery.addEventListener('change', updateSidebarNavOrientation);
+    } else {
+        mobileSidebarQuery.addListener(updateSidebarNavOrientation);
+    }
+    initializeSidebarResizeHandle(sidebarResizeHandle, mobileSidebarQuery);
+    initializeChangeReviewResizeHandle(changeReviewResizeHandle);
+    window.addEventListener('resize', syncDockedLayoutWidths);
+    newTaskButton?.addEventListener('click', () => createNewConversation());
+    newProjectButton?.addEventListener('click', () => openProjectDialog());
+    document.getElementById('projectDialogClose')?.addEventListener('click', closeProjectDialog);
+    document.getElementById('projectDialogCancel')?.addEventListener('click', closeProjectDialog);
+    document.getElementById('projectDialogSave')?.addEventListener('click', saveProjectDialog);
+    document.getElementById('projectBrowseButton')?.addEventListener('click', async event => {
+        const button = event.currentTarget;
+        const originalLabel = button.textContent;
+        button.disabled = true;
+        button.textContent = '正在选择…';
+        try {
+            const result = await eel.select_project_folder()();
+            if (result?.success && result.path) {
+                const input = document.getElementById('projectPathInput');
+                input.value = result.path;
+                if (!document.getElementById('projectNameInput').value.trim()) {
+                    document.getElementById('projectNameInput').value = result.path.split(/[\\/]/).filter(Boolean).pop() || '';
+                }
+            } else if (!result?.cancelled && result?.error) {
+                showToast(`选择目录失败：${result.error}`, 'error');
+            }
+        } catch (error) {
+            showToast(`选择目录失败：${error.message}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = originalLabel;
+        }
+    });
+    document.getElementById('projectDialog')?.addEventListener('click', event => {
+        if (event.target.id === 'projectDialog') closeProjectDialog();
+    });
+    sidebarNav?.addEventListener('click', event => {
+        const button = event.target.closest('[data-sidebar-panel]');
+        if (!button) return;
+        setSidebarPanel(button.dataset.sidebarPanel, {focus: false});
+    });
+    sidebarNav?.addEventListener('keydown', event => {
+        const items = getSidebarPanelButtons();
+        const currentIndex = items.indexOf(document.activeElement);
+        if (!items.length || currentIndex < 0) return;
+        if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        let nextIndex = currentIndex;
+        if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % items.length;
+        if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + items.length) % items.length;
+        if (event.key === 'Home') nextIndex = 0;
+        if (event.key === 'End') nextIndex = items.length - 1;
+        items[nextIndex].focus();
+        setSidebarPanel(items[nextIndex].dataset.sidebarPanel, {focus: false});
+    });
     chatMessages?.addEventListener('click', handlePreviewLinkClick);
+    chatMessages?.addEventListener('scroll', () => {
+        updateChatAutoFollow(chatMessages);
+    }, {passive: true});
+    chatMessages?.addEventListener('wheel', event => {
+        if (event.deltaY < 0) setChatAutoFollow(false);
+    }, {passive: true});
+    document.getElementById('changeReviewClose')?.addEventListener('click', () => {
+        closeChangeReview();
+    });
+    document.getElementById('changeReviewFileList')?.addEventListener('click', event => {
+        const file = event.target.closest('[data-review-file-index]');
+        if (file) selectChangeReviewFile(Number(file.dataset.reviewFileIndex));
+    });
+    changeReviewPanel?.addEventListener('transitionend', () => {
+        if (changeReviewPanel.classList.contains('is-open')) {
+            document.getElementById('changeReviewDiff')?.focus({preventScroll: true});
+        }
+    });
     document.getElementById('browserPreviewClose')?.addEventListener('click', () => {
         closeBrowserPreview();
     });
@@ -1054,7 +2268,7 @@ function initializeUI() {
     previewFrame?.addEventListener('load', () => {
         if (activePreviewId && previewFrame.src !== 'about:blank') hideBrowserPreviewState();
     });
-    document.querySelectorAll('.sidebar-footer .btn-settings').forEach((button) => {
+    document.querySelectorAll('.sidebar-workbench .sidebar-action-item').forEach((button) => {
         button.addEventListener('click', closeMobileSidebar);
     });
 
@@ -1066,11 +2280,14 @@ function initializeUI() {
 
         const conversationId = state.conversationId;
         const messageId = Number(state.messageId || currentMessageId || 0);
-        state.running = false;
-        state.stopping = false;
-        state.outputStopped = false;
-        state.awaitingQuestion = false;
-        state.awaitingApproval = false;
+        updateConversationExecutionState(conversationId, {
+            messageId,
+            running: false,
+            stopping: false,
+            outputStopped: false,
+            awaitingQuestion: false,
+            awaitingApproval: false,
+        });
         resetTrackedExecutionActivity(state);
         updateConversationListItemState(conversationId, {
             running: false,
@@ -1100,6 +2317,18 @@ function initializeUI() {
             pendingStopRequests.set(conversationId, request);
             const result = await request;
             if (!result?.success) throw new Error(result?.error || '停止失败');
+            const modifiedFiles = result?.modified_files;
+            if (
+                modifiedFiles
+                && String(activeConversationId || '') === conversationId
+                && Number(modifiedFiles.message_id || messageId) === messageId
+            ) {
+                addModifiedFilesSummary({
+                    ...modifiedFiles,
+                    conversation_id: conversationId,
+                    message_id: messageId,
+                });
+            }
             markPlanProgressTerminal(
                 conversationId, messageId, 'stopped', '任务已停止'
             );
@@ -1153,9 +2382,96 @@ function initializeUI() {
         if (!planProgress?.hidden && !planProgress.contains(event.target)) {
             closePlanProgress();
         }
+        if (!composerAddMenu?.hidden && !composerAddMenuAnchor?.contains(event.target)) {
+            closeComposerAddMenu();
+        }
     });
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') closePlanProgress();
+        if (event.key === 'Escape') {
+            if (voiceModeActive) {
+                closeVoiceMode();
+                return;
+            }
+            if (activeChangeReview) {
+                closeChangeReview();
+                return;
+            }
+            closePlanProgress();
+            closeComposerAddMenu(true);
+            if (document.getElementById('projectDialog')?.classList.contains('active')) {
+                closeProjectDialog();
+            }
+        }
+    });
+}
+
+async function selectComposerFolder(messageInput = document.getElementById('messageInput')) {
+    if (typeof eel?.select_reference_folder !== 'function') {
+        showToast('当前版本无法打开文件夹选择器', 'error');
+        return;
+    }
+    try {
+        const result = await eel.select_reference_folder()();
+        if (result?.success && result.path) {
+            const added = addComposerDirectoryReferences([result.path]);
+            if (!added) {
+                const duplicate = composerAttachments.some(item => (
+                    isDirectoryReference(item) && String(item.path || '') === String(result.path)
+                ));
+                showToast(
+                    duplicate ? '该文件夹已经添加' : `最多添加 ${ATTACHMENT_LIMITS.count} 个附件`,
+                    duplicate ? 'info' : 'error'
+                );
+            }
+        } else if (!result?.cancelled && result?.error) {
+            showToast(`选择文件夹失败：${result.error}`, 'error');
+        }
+    } catch (error) {
+        if (!handleEelConnectionError(error)) {
+            showToast(`选择文件夹失败：${error.message}`, 'error');
+        }
+    } finally {
+        messageInput?.focus();
+    }
+}
+
+function initializeSidebarAutoHideScrollbars() {
+    const scrollAreas = document.querySelectorAll([
+        '.sidebar-panel',
+        '.sidebar-panel.is-active .task-history-list',
+        '#sidebarPanelFiles .file-list',
+        '#sidebarPanelSkills #skillsList',
+    ].join(','));
+    scrollAreas.forEach((area) => {
+        if (area.dataset.autoHideScrollbar === 'true') return;
+        area.dataset.autoHideScrollbar = 'true';
+        let hideTimer = 0;
+        const show = () => {
+            area.classList.add('is-scrollbar-active');
+            window.clearTimeout(hideTimer);
+            hideTimer = window.setTimeout(() => {
+                if (!area.matches(':hover') && !area.matches(':focus-within')) {
+                    area.classList.remove('is-scrollbar-active');
+                }
+            }, 700);
+        };
+        area.addEventListener('scroll', show, {passive: true});
+        area.addEventListener('pointerenter', show);
+        area.addEventListener('pointerleave', () => {
+            window.clearTimeout(hideTimer);
+            hideTimer = window.setTimeout(() => {
+                if (!area.matches(':focus-within')) area.classList.remove('is-scrollbar-active');
+            }, 320);
+        });
+        area.addEventListener('focusin', show);
+        area.addEventListener('focusout', () => {
+            window.clearTimeout(hideTimer);
+            hideTimer = window.setTimeout(() => {
+                if (!area.matches(':hover') && !area.matches(':focus-within')) {
+                    area.classList.remove('is-scrollbar-active');
+                }
+            }, 320);
+        });
     });
 }
 
@@ -1167,30 +2483,344 @@ function fillComposer(value) {
 }
 
 function hideWelcome() {
-    const welcome = document.querySelector('.welcome-message');
     const chatMessages = document.getElementById('chatMessages');
     chatMessages?.classList.remove('is-welcome');
-    if (chatMessages) chatMessages.scrollTop = 0;
-    if (!welcome) return;
-    welcome.classList.add('is-leaving');
-    setTimeout(() => welcome.remove(), 260);
+    // Remove the full-height empty state before appending the first message.
+    // Keeping it in the layout during an exit animation causes two costly
+    // reflows and a visible scroll jump on the first send.
+    const welcome = chatMessages?.querySelector('.welcome-message');
+    if (welcome) {
+        setChatAutoFollow(true);
+        welcome.remove();
+    }
 }
 
 function closeMobileSidebar() {
     document.body.classList.remove('sidebar-open');
-    document.getElementById('sidebarToggle')?.setAttribute('aria-expanded', 'false');
+    const toggle = document.getElementById('sidebarToggle');
+    toggle?.setAttribute('aria-expanded', 'false');
+    toggle?.setAttribute('aria-label', '打开工作台导航');
 }
 
-function welcomeMarkup() {
+function getStoredSidebarPanelWidth() {
+    try {
+        const value = Number(localStorage.getItem(SIDEBAR_PANEL_WIDTH_STORAGE_KEY) || 216);
+        return Math.round(Math.min(
+            SIDEBAR_PANEL_MAX_WIDTH,
+            Math.max(SIDEBAR_PANEL_MIN_WIDTH, Number.isFinite(value) ? value : 216)
+        ));
+    } catch (_error) {
+        return 216;
+    }
+}
+
+function getCurrentSidebarTotalWidth() {
+    const sidebar = document.getElementById('sidebarShell');
+    const measuredWidth = sidebar?.getBoundingClientRect().width;
+    if (Number.isFinite(measuredWidth) && measuredWidth > 0) return measuredWidth;
+    return SIDEBAR_RAIL_WIDTH + getStoredSidebarPanelWidth();
+}
+
+function isDockedReviewLayout() {
+    return window.innerWidth >= 1320;
+}
+
+function getReviewPanelWidthLimit(sidebarWidth = getCurrentSidebarTotalWidth()) {
+    if (!isDockedReviewLayout()) return Math.min(760, window.innerWidth);
+    return Math.max(
+        CHANGE_REVIEW_MIN_WIDTH,
+        Math.min(
+            CHANGE_REVIEW_MAX_WIDTH,
+            window.innerWidth - sidebarWidth - DOCKED_MAIN_MIN_WIDTH
+        )
+    );
+}
+
+function clampChangeReviewPanelWidth(value, sidebarWidth = getCurrentSidebarTotalWidth()) {
+    const numericValue = Number(value);
+    const fallback = Math.min(700, getReviewPanelWidthLimit(sidebarWidth));
+    if (!Number.isFinite(numericValue)) return fallback;
+    return Math.round(Math.min(
+        getReviewPanelWidthLimit(sidebarWidth),
+        Math.max(CHANGE_REVIEW_MIN_WIDTH, numericValue)
+    ));
+}
+
+function getSavedChangeReviewPanelWidth() {
+    try {
+        return clampChangeReviewPanelWidth(
+            localStorage.getItem(CHANGE_REVIEW_WIDTH_STORAGE_KEY) || 700
+        );
+    } catch (_error) {
+        return clampChangeReviewPanelWidth(700);
+    }
+}
+
+function setChangeReviewPanelWidth(
+    width,
+    {persist = true, sidebarWidth = getCurrentSidebarTotalWidth()} = {}
+) {
+    const panelWidth = clampChangeReviewPanelWidth(width, sidebarWidth);
+    document.documentElement.style.setProperty('--change-review-width', `${panelWidth}px`);
+    const handle = document.getElementById('changeReviewResizeHandle');
+    handle?.setAttribute('aria-valuenow', String(panelWidth));
+    handle?.setAttribute(
+        'aria-valuemax',
+        String(getReviewPanelWidthLimit(sidebarWidth))
+    );
+    if (persist) {
+        try {
+            localStorage.setItem(CHANGE_REVIEW_WIDTH_STORAGE_KEY, String(panelWidth));
+        } catch (_error) {
+            // Width remains usable if browser storage is unavailable.
+        }
+    }
+    return panelWidth;
+}
+
+function clampSidebarPanelWidth(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return SIDEBAR_PANEL_MIN_WIDTH;
+    const reservesDockedReview = isDockedReviewLayout()
+        && document.body.classList.contains('change-review-open');
+    const viewportLimit = reservesDockedReview
+        ? Math.max(
+            SIDEBAR_PANEL_MIN_WIDTH,
+            window.innerWidth
+                - SIDEBAR_RAIL_WIDTH
+                - CHANGE_REVIEW_MIN_WIDTH
+                - DOCKED_MAIN_MIN_WIDTH
+        )
+        : SIDEBAR_PANEL_MAX_WIDTH;
+    return Math.round(Math.min(
+        SIDEBAR_PANEL_MAX_WIDTH,
+        viewportLimit,
+        Math.max(SIDEBAR_PANEL_MIN_WIDTH, numericValue)
+    ));
+}
+
+function getSavedSidebarPanelWidth() {
+    return clampSidebarPanelWidth(getStoredSidebarPanelWidth());
+}
+
+function setSidebarPanelWidth(width, {persist = true} = {}) {
+    const panelWidth = clampSidebarPanelWidth(width);
+    document.documentElement.style.setProperty('--sidebar-panel-width', `${panelWidth}px`);
+    const handle = document.getElementById('sidebarResizeHandle');
+    handle?.setAttribute('aria-valuenow', String(panelWidth + SIDEBAR_RAIL_WIDTH));
+    if (persist) {
+        try {
+            localStorage.setItem(SIDEBAR_PANEL_WIDTH_STORAGE_KEY, String(panelWidth));
+        } catch (_error) {
+            // Width remains usable if browser storage is unavailable.
+        }
+    }
+    if (
+        isDockedReviewLayout()
+        && document.body.classList.contains('change-review-open')
+    ) {
+        setChangeReviewPanelWidth(getSavedChangeReviewPanelWidth(), {
+            persist: false,
+            sidebarWidth: SIDEBAR_RAIL_WIDTH + panelWidth,
+        });
+    }
+    return panelWidth;
+}
+
+function syncDockedLayoutWidths() {
+    if (!isDockedReviewLayout()) return;
+    setSidebarPanelWidth(
+        getSavedSidebarPanelWidth(),
+        {persist: false}
+    );
+    if (document.body.classList.contains('change-review-open')) {
+        setChangeReviewPanelWidth(
+            getSavedChangeReviewPanelWidth(),
+            {
+                persist: false,
+                sidebarWidth: getCurrentSidebarTotalWidth(),
+            }
+        );
+    }
+}
+
+function initializeSidebarWidth() {
+    setSidebarPanelWidth(getSavedSidebarPanelWidth(), {persist: false});
+    setChangeReviewPanelWidth(getSavedChangeReviewPanelWidth(), {persist: false});
+}
+
+function installPointerResizeCleanup(handle, finishResize) {
+    handle.addEventListener('pointerup', finishResize);
+    handle.addEventListener('pointercancel', finishResize);
+    handle.addEventListener('lostpointercapture', finishResize);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+    window.addEventListener('blur', finishResize);
+}
+
+function initializeSidebarResizeHandle(handle, mobileQuery) {
+    if (!handle) return;
+    let pointerId = null;
+
+    const finishResize = () => {
+        document.body.classList.remove('is-resizing-sidebar');
+        if (pointerId === null) return;
+        const capturedPointerId = pointerId;
+        pointerId = null;
+        try {
+            if (handle.hasPointerCapture(capturedPointerId)) {
+                handle.releasePointerCapture(capturedPointerId);
+            }
+        } catch (_error) {
+            // The pointer can end outside the window before capture is released.
+        }
+    };
+    const updateFromPointer = event => {
+        if (pointerId === null || mobileQuery.matches) return;
+        setSidebarPanelWidth(event.clientX - SIDEBAR_RAIL_WIDTH);
+    };
+
+    handle.addEventListener('pointerdown', event => {
+        if (mobileQuery.matches || event.button !== 0) return;
+        event.preventDefault();
+        pointerId = event.pointerId;
+        handle.setPointerCapture(pointerId);
+        document.body.classList.add('is-resizing-sidebar');
+        updateFromPointer(event);
+    });
+    handle.addEventListener('pointermove', updateFromPointer);
+    installPointerResizeCleanup(handle, finishResize);
+    handle.addEventListener('keydown', event => {
+        if (mobileQuery.matches) return;
+        const currentWidth = getSavedSidebarPanelWidth();
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            setSidebarPanelWidth(currentWidth - SIDEBAR_WIDTH_STEP);
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            setSidebarPanelWidth(currentWidth + SIDEBAR_WIDTH_STEP);
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            setSidebarPanelWidth(SIDEBAR_PANEL_MIN_WIDTH);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            setSidebarPanelWidth(SIDEBAR_PANEL_MAX_WIDTH);
+        }
+    });
+}
+
+function initializeChangeReviewResizeHandle(handle) {
+    if (!handle) return;
+    let pointerId = null;
+
+    const finishResize = () => {
+        document.body.classList.remove('is-resizing-review');
+        if (pointerId === null) return;
+        const capturedPointerId = pointerId;
+        pointerId = null;
+        try {
+            if (handle.hasPointerCapture(capturedPointerId)) {
+                handle.releasePointerCapture(capturedPointerId);
+            }
+        } catch (_error) {
+            // Capture may already be gone after a fast cross-window drag.
+        }
+    };
+    const updateFromPointer = event => {
+        if (pointerId === null || !isDockedReviewLayout()) return;
+        setChangeReviewPanelWidth(window.innerWidth - event.clientX);
+    };
+
+    handle.addEventListener('pointerdown', event => {
+        if (!isDockedReviewLayout() || event.button !== 0) return;
+        event.preventDefault();
+        pointerId = event.pointerId;
+        handle.setPointerCapture(pointerId);
+        document.body.classList.add('is-resizing-review');
+        updateFromPointer(event);
+    });
+    handle.addEventListener('pointermove', updateFromPointer);
+    installPointerResizeCleanup(handle, finishResize);
+    handle.addEventListener('keydown', event => {
+        const currentWidth = getSavedChangeReviewPanelWidth();
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            setChangeReviewPanelWidth(currentWidth + CHANGE_REVIEW_WIDTH_STEP);
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            setChangeReviewPanelWidth(currentWidth - CHANGE_REVIEW_WIDTH_STEP);
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            setChangeReviewPanelWidth(CHANGE_REVIEW_MIN_WIDTH);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            setChangeReviewPanelWidth(getReviewPanelWidthLimit());
+        }
+    });
+}
+
+function getSidebarPanelButtons() {
+    return Array.from(document.querySelectorAll('.sidebar-nav-item[data-sidebar-panel]'));
+}
+
+function getSavedSidebarPanel() {
+    try {
+        const saved = localStorage.getItem(SIDEBAR_PANEL_STORAGE_KEY);
+        return SIDEBAR_PANEL_NAMES.has(saved) ? saved : 'tasks';
+    } catch (_error) {
+        return 'tasks';
+    }
+}
+
+function setSidebarPanel(panelName, {focus = false} = {}) {
+    const name = SIDEBAR_PANEL_NAMES.has(panelName) ? panelName : 'tasks';
+    const panel = document.querySelector(`[data-sidebar-panel-content="${name}"]`);
+    if (!panel) return;
+
+    document.querySelectorAll('[data-sidebar-panel-content]').forEach(item => {
+        const isActive = item === panel;
+        item.hidden = !isActive;
+        item.classList.toggle('is-active', isActive);
+    });
+    getSidebarPanelButtons().forEach(button => {
+        const isActive = button.dataset.sidebarPanel === name;
+        button.classList.toggle('is-active', isActive);
+        button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        button.tabIndex = isActive ? 0 : -1;
+    });
+    try {
+        localStorage.setItem(SIDEBAR_PANEL_STORAGE_KEY, name);
+    } catch (_error) {
+        // Side panel selection remains usable when browser storage is unavailable.
+    }
+    if (focus) {
+        document.querySelector(`[data-sidebar-panel="${name}"]`)?.focus();
+    }
+}
+
+function getWelcomeHeading(conversation = getActiveConversation()) {
+    const project = getProject(conversation?.project_id);
+    const projectName = String(project?.name || '').trim();
+    return projectName
+        ? `今天想在“${projectName}”里完成什么？`
+        : '今天想完成什么？';
+}
+
+function updateWelcomeHeading(conversation = getActiveConversation()) {
+    const heading = document.getElementById('welcomeTitle');
+    if (heading) heading.textContent = getWelcomeHeading(conversation);
+}
+
+function welcomeMarkup(conversation = getActiveConversation()) {
     return `
         <div class="welcome-message">
             <div class="welcome-mark" aria-hidden="true">
                 <img class="theme-asset-mark" src="${THEME_ASSETS[getCurrentTheme()].mark}" alt="">
                 <span class="welcome-mark-glow"></span>
             </div>
-            <div class="welcome-kicker">Kylin Agent Workspace</div>
-            <h2>今天想完成什么？</h2>
-            <p>描述目标，麒麟 OS-Agent 会规划步骤、调用工具并持续汇报进度。</p>
+            <div class="welcome-kicker">JCODEX WORKSPACE</div>
+            <h2 id="welcomeTitle">${escapeHtml(getWelcomeHeading(conversation))}</h2>
+            <p>描述目标，JCodex 会规划步骤、调用工具并持续汇报进度。</p>
             <div class="quick-actions">
                 <button class="quick-action" data-prompt="扫描当前项目并给出最值得优先修复的问题">
                     <span class="quick-action-copy"><strong>扫描当前项目</strong><small>发现风险与优化机会</small></span><span class="quick-action-arrow">↗</span>
@@ -1198,8 +2828,8 @@ function welcomeMarkup() {
                 <button class="quick-action" data-prompt="整理工作区文件并生成一份结构说明">
                     <span class="quick-action-copy"><strong>整理工作区</strong><small>归类文件并生成说明</small></span><span class="quick-action-arrow">↗</span>
                 </button>
-                <button class="quick-action" data-prompt="查看当前偏好、知识库和向量引擎状态">
-                    <span class="quick-action-copy"><strong>查看记忆状态</strong><small>偏好、知识与向量引擎</small></span><span class="quick-action-arrow">↗</span>
+                <button class="quick-action" data-prompt="调研当前任务涉及的技术方案，核对可靠来源，并运行必要测试给出结论">
+                    <span class="quick-action-copy"><strong>调研与验证</strong><small>检索资料并运行测试</small></span><span class="quick-action-arrow">↗</span>
                 </button>
             </div>
         </div>`;
@@ -1211,7 +2841,9 @@ function bindQuickActions() {
     });
 }
 
-function resetConversationView() {
+function resetConversationView(conversation = getActiveConversation()) {
+    if (voiceModeActive) cancelVoiceSpeech();
+    closeChangeReview({restoreFocus: false});
     closeBrowserPreview(false);
     previewSessions.clear();
     previewSyncGeneration += 1;
@@ -1225,8 +2857,9 @@ function resetConversationView() {
     closePlanProgress();
     document.getElementById('planProgress')?.setAttribute('hidden', '');
     const chatMessages = document.getElementById('chatMessages');
+    setChatAutoFollow(true);
     chatMessages.classList.add('is-welcome');
-    chatMessages.innerHTML = welcomeMarkup();
+    chatMessages.innerHTML = welcomeMarkup(conversation);
     chatMessages.scrollTop = 0;
     bindQuickActions();
 }
@@ -1239,6 +2872,143 @@ function formatConversationDate(value) {
         return date.toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
     }
     return date.toLocaleDateString('zh-CN', {month: 'numeric', day: 'numeric'});
+}
+
+function getProject(projectId) {
+    const id = String(projectId || '');
+    return projects.find(project => String(project.id || '') === id) || null;
+}
+
+function getActiveConversation() {
+    return conversations.find(item => String(item.id || '') === String(activeConversationId || '')) || null;
+}
+
+function updateActiveProjectLabel(conversation = getActiveConversation()) {
+    const element = document.getElementById('activeProjectName');
+    const project = getProject(conversation?.project_id);
+    if (element) {
+        element.textContent = project?.name || '普通任务';
+        element.title = project?.root_path || 'JCodex 默认工作区';
+    }
+    updateWelcomeHeading(conversation);
+}
+
+function createProjectTaskRow(item) {
+    const row = createTaskHistoryItem(item.id);
+    row.classList.add('project-task-item');
+    return row;
+}
+
+function applyTaskRowState(row, item) {
+    const conversationId = String(item.id || '');
+    const execution = getConversationExecutionState(item.id, false);
+    const running = Boolean(item.running || execution?.running);
+    const unread = !running && Boolean(item.unread_completion || execution?.unreadCompletion);
+    const stateLabel = running ? '正在执行' : unread ? '执行完成，尚未查看' : '';
+    row.dataset.conversationId = conversationId;
+    row.classList.toggle('is-active', conversationId === String(activeConversationId || ''));
+    row.classList.toggle('is-running', running);
+    row.classList.toggle('has-unread-completion', unread);
+
+    const main = row.querySelector('.task-history-main');
+    const dot = row.querySelector('.task-history-state-dot');
+    const name = row.querySelector('.task-history-name');
+    const date = row.querySelector('.task-history-date');
+    const title = String(item.title || '新任务');
+    const dateText = formatConversationDate(item.updated_at);
+    main.title = title;
+    name.textContent = title;
+    date.textContent = dateText;
+    dot.hidden = !stateLabel;
+    if (stateLabel) {
+        dot.setAttribute('aria-label', stateLabel);
+        dot.title = stateLabel;
+    } else {
+        dot.removeAttribute('aria-label');
+        dot.removeAttribute('title');
+    }
+}
+
+function renderProjectList() {
+    const list = document.getElementById('projectList');
+    const count = document.getElementById('projectCount');
+    if (!list) return;
+    if (count) count.textContent = projects.length ? String(projects.length) : '';
+    list.replaceChildren();
+    if (!projects.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sidebar-empty';
+        empty.textContent = '暂无项目';
+        list.appendChild(empty);
+        return;
+    }
+
+    projects.forEach(project => {
+        const projectId = String(project.id || '');
+        const projectTasks = conversations.filter(item => String(item.project_id || '') === projectId);
+        const activeInside = projectTasks.some(item => String(item.id || '') === String(activeConversationId || ''));
+        if (activeInside) expandedProjectIds.add(projectId);
+        const expanded = expandedProjectIds.has(projectId);
+        const group = document.createElement('section');
+        group.className = 'project-group';
+        group.dataset.projectId = projectId;
+
+        const header = document.createElement('div');
+        header.className = 'project-row';
+        header.classList.toggle('is-active', activeInside);
+        header.classList.toggle('is-unavailable', !project.available);
+        header.innerHTML = `
+            <button class="project-toggle" type="button" aria-expanded="${expanded ? 'true' : 'false'}" title="${expanded ? '收起项目' : '展开项目'}">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button class="project-main" type="button" title="${escapeHtml(project.root_path || '')}">
+                <svg class="project-folder-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                <span class="project-name">${escapeHtml(project.name || '项目')}</span>
+                <span class="project-task-count">${projectTasks.length}</span>
+            </button>
+            <button class="project-menu" type="button" aria-label="管理项目">•••</button>`;
+        const children = document.createElement('div');
+        children.className = 'project-task-list';
+        children.hidden = !expanded;
+
+        projectTasks.forEach(item => {
+            const row = createProjectTaskRow(item);
+            applyTaskRowState(row, item);
+            children.appendChild(row);
+        });
+        header.querySelector('.project-toggle').addEventListener('click', () => {
+            if (expandedProjectIds.has(projectId)) expandedProjectIds.delete(projectId);
+            else expandedProjectIds.add(projectId);
+            renderProjectList();
+        });
+        header.querySelector('.project-main').addEventListener('click', () => {
+            expandedProjectIds.add(projectId);
+            if (projectTasks.length) switchConversation(projectTasks[0].id);
+            else createNewConversation(projectId);
+        });
+        header.querySelector('.project-menu').addEventListener('click', event => {
+            event.stopPropagation();
+            openProjectMenu(event, projectId);
+        });
+        group.append(header, children);
+        list.appendChild(group);
+    });
+}
+
+async function refreshProjects() {
+    if (!canCallEel() || typeof eel.list_projects !== 'function') return projects;
+    try {
+        const result = await eel.list_projects()();
+        if (!result?.success) throw new Error(result?.error || '项目列表加载失败');
+        projects = result.projects || [];
+        renderProjectList();
+        updateActiveProjectLabel();
+        return projects;
+    } catch (error) {
+        if (handleEelConnectionError(error)) return projects;
+        console.error('Failed to refresh projects:', error);
+        return projects;
+    }
 }
 
 function createTaskHistoryItem(conversationId) {
@@ -1280,8 +3050,11 @@ function createTaskHistoryItem(conversationId) {
 
 function renderConversationList() {
     const list = document.getElementById('taskHistoryList');
+    const count = document.getElementById('taskHistoryCount');
     if (!list) return;
-    if (!conversations.length) {
+    const ordinaryConversations = conversations.filter(item => !item.project_id);
+    if (count) count.textContent = ordinaryConversations.length ? `${ordinaryConversations.length}` : '';
+    if (!ordinaryConversations.length) {
         if (!list.querySelector('.sidebar-empty')) {
             list.replaceChildren();
             const empty = document.createElement('div');
@@ -1300,42 +3073,11 @@ function renderConversationList() {
         ])
     );
 
-    conversations.forEach((item, index) => {
+    ordinaryConversations.forEach((item, index) => {
         const conversationId = String(item.id || '');
-        const execution = getConversationExecutionState(item.id, false);
-        const running = Boolean(item.running || execution?.running);
-        const unread = !running && Boolean(
-            item.unread_completion || execution?.unreadCompletion
-        );
-        const stateLabel = running ? '正在执行' : unread ? '执行完成，尚未查看' : '';
-
         const row = existingRows.get(conversationId)
             || createTaskHistoryItem(conversationId);
-        row.dataset.conversationId = conversationId;
-        row.classList.toggle('is-active', conversationId === activeConversationId);
-        row.classList.toggle('is-running', running);
-        row.classList.toggle('has-unread-completion', unread);
-
-        const main = row.querySelector('.task-history-main');
-        const dot = row.querySelector('.task-history-state-dot');
-        const name = row.querySelector('.task-history-name');
-        const date = row.querySelector('.task-history-date');
-        const title = String(item.title || '新任务');
-        const dateText = formatConversationDate(item.updated_at);
-
-        if (main.title !== title) main.title = title;
-        if (name.textContent !== title) name.textContent = title;
-        if (date.textContent !== dateText) date.textContent = dateText;
-        if (dot.hidden === Boolean(stateLabel)) dot.hidden = !stateLabel;
-        if (stateLabel) {
-            if (dot.getAttribute('aria-label') !== stateLabel) {
-                dot.setAttribute('aria-label', stateLabel);
-            }
-            if (dot.title !== stateLabel) dot.title = stateLabel;
-        } else {
-            dot.removeAttribute('aria-label');
-            dot.removeAttribute('title');
-        }
+        applyTaskRowState(row, item);
 
         const currentAtIndex = list.children[index];
         if (currentAtIndex !== row) {
@@ -1345,6 +3087,7 @@ function renderConversationList() {
     });
 
     existingRows.forEach(row => row.remove());
+    renderProjectList();
 }
 
 function updateActiveTaskTitle(title) {
@@ -1353,15 +3096,27 @@ function updateActiveTaskTitle(title) {
 }
 
 async function refreshConversations(preferredId = null) {
+    if (!canCallEel()) return activeConversationId;
     const generation = ++conversationRefreshGeneration;
-    const result = await eel.list_conversations()();
+    let result;
+    try {
+        result = await eel.list_conversations()();
+    } catch (error) {
+        if (handleEelConnectionError(error)) return activeConversationId;
+        throw error;
+    }
     if (!result?.success) throw new Error(result?.error || '任务列表加载失败');
     if (generation !== conversationRefreshGeneration) return activeConversationId;
     conversations = result.conversations || [];
     syncExecutionStatesFromConversations(conversations);
-    activeConversationId = preferredId || result.active_id || conversations[0]?.id || null;
+    const preferredExists = preferredId
+        && conversations.some(item => String(item.id) === String(preferredId));
+    activeConversationId = preferredExists
+        ? preferredId
+        : result.active_id || conversations[0]?.id || null;
     const active = conversations.find(item => item.id === activeConversationId);
     if (active) updateActiveTaskTitle(active.title);
+    updateActiveProjectLabel(active);
     renderConversationList();
     conversationExecutionStates.forEach(state => {
         if (state.running && state.messageId) {
@@ -1372,15 +3127,17 @@ async function refreshConversations(preferredId = null) {
     return activeConversationId;
 }
 
-async function createNewConversation() {
+async function createNewConversation(projectId = '') {
     try {
-        const result = await eel.create_conversation('新任务')();
+        const result = await eel.create_conversation('新任务', String(projectId || ''))();
         if (!result?.success) throw new Error(result?.error || '创建失败');
         activeConversationId = result.conversation.id;
         markConversationReadLocally(activeConversationId);
-        resetConversationView();
+        resetConversationView(result.conversation);
         updateActiveTaskTitle(result.conversation.title);
+        if (projectId) expandedProjectIds.add(String(projectId));
         await refreshConversations(activeConversationId);
+        await refreshProjects();
         syncActiveConversationProcessingUI();
         updateTokenIndicator();
         closeMobileSidebar();
@@ -1432,6 +3189,7 @@ function openConversationMenu(event, conversationId) {
     menu.className = 'conversation-context-menu';
     menu.innerHTML = `
         <button type="button" data-action="rename">重命名</button>
+        ${item.project_id ? '<button type="button" data-action="move-out">移出项目</button>' : ''}
         <button type="button" data-action="delete" class="is-danger">删除任务</button>`;
     document.body.appendChild(menu);
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1446,6 +3204,21 @@ function openConversationMenu(event, conversationId) {
         if (conversationId === activeConversationId) updateActiveTaskTitle(result.conversation.title);
         await refreshConversations(activeConversationId);
     };
+    const moveOut = menu.querySelector('[data-action="move-out"]');
+    if (moveOut) moveOut.onclick = async () => {
+        menu.remove();
+        if (isConversationRunning(conversationId)) {
+            return showToast('正在执行的任务请先停止后再移动', 'info');
+        }
+        const result = await eel.move_conversation_to_project(conversationId, '')();
+        if (!result?.success) return showToast(result?.error || '移动失败', 'error');
+        await refreshConversations(activeConversationId);
+        await refreshProjects();
+        if (String(conversationId) === String(activeConversationId || '')) {
+            updateActiveProjectLabel(result.conversation);
+        }
+        showToast('任务已移到普通任务', 'success');
+    };
     menu.querySelector('[data-action="delete"]').onclick = async () => {
         menu.remove();
         if (isConversationRunning(conversationId)) {
@@ -1453,13 +3226,120 @@ function openConversationMenu(event, conversationId) {
         }
         const confirmed = await showConfirmDialog(`删除任务“${item.title}”？此操作不可撤销。`);
         if (!confirmed) return;
+        const deletedWasActive = String(conversationId) === String(activeConversationId || '');
         const result = await eel.delete_conversation(conversationId)();
         if (!result?.success) return showToast(result?.error || '删除失败', 'error');
         conversationExecutionStates.delete(String(conversationId));
         clearConversationPlanProgress(conversationId);
-        await refreshConversations(result.active_id);
-        const loaded = await eel.load_conversation(result.active_id)();
+        const nextActiveId = await refreshConversations(
+            deletedWasActive ? result.active_id : activeConversationId
+        );
+        // Redrawing a live task clears its streaming cards, so preserve it when
+        // the deleted item was only a different sidebar task.
+        if (!deletedWasActive) return;
+        const loaded = await eel.load_conversation(nextActiveId)();
         if (loaded?.success) renderConversation(loaded.conversation);
+    };
+    setTimeout(() => document.addEventListener('click', () => menu.remove(), {once: true}), 0);
+}
+
+function closeProjectDialog() {
+    const dialog = document.getElementById('projectDialog');
+    dialog?.classList.remove('active');
+    dialog?.setAttribute('aria-hidden', 'true');
+    editingProjectId = null;
+    lastFocusedElement?.focus?.();
+}
+
+function openProjectDialog(projectId = '') {
+    const project = getProject(projectId);
+    editingProjectId = project ? String(project.id) : null;
+    lastFocusedElement = document.activeElement;
+    document.getElementById('projectDialogTitle').textContent = project ? '编辑项目' : '添加项目';
+    document.getElementById('projectNameInput').value = project?.name || '';
+    document.getElementById('projectPathInput').value = project?.root_path || '';
+    document.getElementById('projectInstructionsInput').value = project?.instructions || '';
+    document.getElementById('projectDialogSave').textContent = project ? '保存项目' : '添加并新建任务';
+    const dialog = document.getElementById('projectDialog');
+    dialog?.classList.add('active');
+    dialog?.setAttribute('aria-hidden', 'false');
+    document.getElementById(project ? 'projectNameInput' : 'projectPathInput')?.focus();
+}
+
+async function saveProjectDialog() {
+    const name = document.getElementById('projectNameInput')?.value.trim() || '';
+    const rootPath = document.getElementById('projectPathInput')?.value.trim() || '';
+    const instructions = document.getElementById('projectInstructionsInput')?.value.trim() || '';
+    if (!rootPath) {
+        showToast('请输入项目本地目录', 'error');
+        document.getElementById('projectPathInput')?.focus();
+        return;
+    }
+    const button = document.getElementById('projectDialogSave');
+    if (button) button.disabled = true;
+    try {
+        const result = editingProjectId
+            ? await eel.update_project(editingProjectId, name, rootPath, instructions)()
+            : await eel.create_project(name, rootPath, instructions)();
+        if (!result?.success) throw new Error(result?.error || '项目保存失败');
+        const createdConversationId = result.conversation?.id || null;
+        const projectId = String(result.project?.id || editingProjectId || '');
+        if (projectId) expandedProjectIds.add(projectId);
+        closeProjectDialog();
+        await refreshProjects();
+        await refreshConversations(createdConversationId || activeConversationId);
+        if (createdConversationId) {
+            const loaded = await eel.set_active_conversation(createdConversationId)();
+            if (loaded?.success) renderConversation(loaded.conversation);
+        }
+        showToast(result.conversation ? '项目已添加' : '项目已更新', 'success');
+    } catch (error) {
+        showToast(`项目保存失败：${error.message}`, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function openProjectMenu(event, projectId) {
+    document.querySelector('.conversation-context-menu')?.remove();
+    const project = getProject(projectId);
+    if (!project) return;
+    const menu = document.createElement('div');
+    menu.className = 'conversation-context-menu project-context-menu';
+    menu.innerHTML = `
+        <button type="button" data-action="new-task">新建项目任务</button>
+        <button type="button" data-action="open-folder">打开项目目录</button>
+        <button type="button" data-action="edit">编辑项目</button>
+        <button type="button" data-action="delete" class="is-danger">移除项目</button>`;
+    document.body.appendChild(menu);
+    const rect = event.currentTarget.getBoundingClientRect();
+    menu.style.left = `${Math.min(rect.left, window.innerWidth - 170)}px`;
+    menu.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - 154)}px`;
+    menu.querySelector('[data-action="new-task"]').onclick = () => {
+        menu.remove();
+        createNewConversation(projectId);
+    };
+    menu.querySelector('[data-action="open-folder"]').onclick = async () => {
+        menu.remove();
+        const result = await eel.open_project_folder(projectId)();
+        if (!result?.success) showToast(result?.error || '无法打开项目目录', 'error');
+    };
+    menu.querySelector('[data-action="edit"]').onclick = () => {
+        menu.remove();
+        openProjectDialog(projectId);
+    };
+    menu.querySelector('[data-action="delete"]').onclick = async () => {
+        menu.remove();
+        const confirmed = await showConfirmDialog(
+            `移除项目“${project.name}”？本地代码不会被删除，项目任务会移到普通任务。`
+        );
+        if (!confirmed) return;
+        const result = await eel.delete_project(projectId)();
+        if (!result?.success) return showToast(result?.error || '移除项目失败', 'error');
+        expandedProjectIds.delete(String(projectId));
+        await refreshConversations(activeConversationId);
+        await refreshProjects();
+        showToast('项目已移除，本地目录保持不变', 'success');
     };
     setTimeout(() => document.addEventListener('click', () => menu.remove(), {once: true}), 0);
 }
@@ -1492,6 +3372,56 @@ function setAutoAllowAll(enabled) {
     showToast(autoAllowAll ? '已切换到完全访问' : '已切换到询问模式', 'info', 1600);
 }
 
+function applyPlanModeToggleState(enabled) {
+    const planModePill = document.getElementById('planModePill');
+    if (!planModePill) return;
+    const isEnabled = Boolean(enabled);
+    planModePill.hidden = !isEnabled;
+    planModePill.setAttribute(
+        'aria-label',
+        isEnabled ? '计划模式已开启' : '计划模式已关闭'
+    );
+}
+
+function setPlanModeEnabled(enabled) {
+    planModeEnabled = Boolean(enabled);
+    localStorage.setItem('minibot-plan-mode-enabled', planModeEnabled ? 'true' : 'false');
+    applyPlanModeToggleState(planModeEnabled);
+    showToast(planModeEnabled ? '计划模式已开启' : '计划模式已关闭', 'info', 1600);
+}
+
+function getComposerAddMenuItems() {
+    return Array.from(
+        document.querySelectorAll('#composerAddMenu [role="menuitem"]:not(:disabled)')
+    );
+}
+
+function openComposerAddMenu(focusFirst = false) {
+    const menu = document.getElementById('composerAddMenu');
+    const trigger = document.getElementById('inputAddButton');
+    if (!menu || !trigger) return;
+    menu.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    if (focusFirst) getComposerAddMenuItems()[0]?.focus();
+}
+
+function closeComposerAddMenu(restoreFocus = false) {
+    const menu = document.getElementById('composerAddMenu');
+    const trigger = document.getElementById('inputAddButton');
+    if (!menu || !trigger) return;
+    const wasOpen = !menu.hidden;
+    menu.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && wasOpen) trigger.focus();
+}
+
+function toggleComposerAddMenu() {
+    const menu = document.getElementById('composerAddMenu');
+    if (!menu) return;
+    if (menu.hidden) openComposerAddMenu();
+    else closeComposerAddMenu();
+}
+
 async function updateModelBadge() {
     try {
         const settings = await eel.load_settings()();
@@ -1507,26 +3437,31 @@ async function updateModelBadge() {
 async function updateEmbeddingStatus() {
     const badge = document.getElementById('embeddingBadge');
     const label = document.getElementById('embeddingProviderText');
-    if (!badge || !label || typeof eel === 'undefined' || statusRefreshInFlight) return;
+    if (!badge || !label || !canCallEel() || statusRefreshInFlight) return;
 
     statusRefreshInFlight = true;
     try {
         const status = await eel.get_embedding_status()();
         const provider = status.provider || 'unknown';
         const dimension = status.dimension || 0;
-        const isKylin = provider === 'kylin-coreai-embedding';
-        const isFallback = provider === 'hash-fallback';
+        const isApi = provider === 'api' && status.available;
+        const isFtsOnly = provider === 'disabled';
 
-        badge.classList.toggle('sdk-active', isKylin);
-        badge.classList.toggle('sdk-fallback', isFallback);
-        badge.classList.toggle('sdk-error', !isKylin && !isFallback);
-        label.textContent = isKylin
-            ? `麒麟 SDK ${dimension || ''}D`
-            : isFallback
-                ? `Hash 降级 ${dimension || ''}D`
-                : '向量引擎未知';
-        badge.title = status.fallback_reason || status.error || `当前向量引擎：${provider}`;
+        badge.classList.toggle('sdk-active', isApi);
+        badge.classList.toggle('sdk-fallback', isFtsOnly);
+        badge.classList.toggle('sdk-error', !isApi && !isFtsOnly);
+        label.textContent = isApi
+            ? `Hybrid ${dimension || ''}D`
+            : isFtsOnly
+                ? 'FTS5 / BM25'
+                : '记忆检索异常';
+        badge.title = isApi
+            ? `OpenAI-compatible embeddings: ${status.model || provider}`
+            : isFtsOnly
+                ? 'Embedding 未配置，按 Grok 逻辑使用 FTS5/BM25'
+                : status.error || `当前记忆检索：${provider}`;
     } catch (e) {
+        if (handleEelConnectionError(e)) return;
         badge.classList.add('sdk-error');
         label.textContent = '向量引擎异常';
         badge.title = e.message || '无法获取向量引擎状态';
@@ -1541,10 +3476,8 @@ async function initializeOSAgent() {
 
         if (result[0]) {
             isInitialized = true;
-            const settings = await eel.load_settings()();
-            showKnowledgeAppendix = String(
-                settings.show_knowledge_appendix ?? 'true'
-            ).toLowerCase() === 'true';
+            await eel.load_settings()();
+            await refreshProjects();
             const conversationId = await refreshConversations();
             if (conversationId) {
                 const loaded = await eel.set_active_conversation(conversationId)();
@@ -1573,8 +3506,9 @@ function renderConversation(conversation) {
     try {
         activeConversationId = conversation?.id || activeConversationId;
         markConversationReadLocally(activeConversationId);
+        updateActiveProjectLabel(conversation);
         const messages = conversation?.messages || [];
-        resetConversationView();
+        resetConversationView(conversation);
         updateActiveTaskTitle(conversation?.title || '新任务');
         const latestPlan = getLatestConversationPlan(messages);
         const activeExecution = getActiveExecutionState();
@@ -1640,8 +3574,11 @@ function renderConversation(conversation) {
                     event.tool || 'Tool',
                     event.content || '',
                     false,
-                    Number(event.duration_ms || 0)
+                    Number(event.duration_ms || 0),
+                    event.target || ''
                 );
+            } else if (event.type === 'modified_files') {
+                addModifiedFilesSummary(event, false);
             } else if (event.type === 'compression') {
                 finishCompressionActivity({
                     ...event,
@@ -1668,7 +3605,7 @@ function renderConversation(conversation) {
                 else pendingKnowledge.set(messageId, event.content || '');
             }
         }
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+        pinChatToBottom(chatMessages, {force: true});
     } finally {
         isRestoringConversation = false;
         renderConversationList();
@@ -1692,6 +3629,8 @@ async function sendMessage() {
     const messageInput = document.getElementById('messageInput');
     const message = messageInput.value.trim();
     const attachments = composerAttachments.slice();
+    const planMode = planModeEnabled;
+    const voiceMode = voiceModeActive;
 
     if (!message && !attachments.length) return;
     const pendingStop = pendingStopRequests.get(String(activeConversationId || ''));
@@ -1710,6 +3649,8 @@ async function sendMessage() {
             conversationId: String(activeConversationId || ''),
             message,
             attachments,
+            planMode,
+            voiceMode,
         });
         messageInput.value = '';
         resetComposerInput(messageInput);
@@ -1762,7 +3703,9 @@ async function sendMessage() {
             message || '请解析并说明附件内容',
             currentMessageId,
             buildAttachmentPayload(attachments),
-            conversationId
+            conversationId,
+            planMode,
+            voiceMode
         )();
         if (result?.status === 'busy') {
             throw new Error(result.error || '已有任务正在执行');
@@ -1792,7 +3735,13 @@ async function sendMessage() {
 }
 
 // 直接发送指定消息（用于队列自动发送）
-async function sendMessageWithText(message, attachments = [], conversationId = activeConversationId) {
+async function sendMessageWithText(
+    message,
+    attachments = [],
+    conversationId = activeConversationId,
+    planMode = planModeEnabled,
+    voiceMode = voiceModeActive
+) {
     if (!isInitialized || (!message && !attachments.length)) return;
 
     // 生成新的消息ID
@@ -1827,7 +3776,9 @@ async function sendMessageWithText(message, attachments = [], conversationId = a
             message || '请解析并说明附件内容',
             messageId,
             buildAttachmentPayload(attachments),
-            targetConversationId
+            targetConversationId,
+            Boolean(planMode),
+            Boolean(voiceMode)
         )();
         if (result?.status === 'busy' || result?.status === 'error') {
             throw new Error(result.error || '任务提交失败');
@@ -1907,17 +3858,24 @@ function startPolling(conversationId, msgId) {
             const status = await eel.get_execution_status(executionId, messageId)();
             if (executionPollers.get(executionId) !== poller) return;
 
+            // The backend may still persist task-end events after the model is
+            // done. Keep polling for those events, but never keep the composer
+            // or Stop button in a running state after `running` becomes false.
+            const backendFinalizationPending = !status?.running
+                && status?.finalized === false;
+            const displayRunning = Boolean(status?.running);
+
             const state = updateConversationExecutionState(executionId, {
                 messageId,
-                running: Boolean(status?.running),
+                running: displayRunning,
                 stopping: Boolean(status?.stopping),
                 awaitingApproval: Boolean(status?.awaiting_approval),
                 awaitingQuestion: Boolean(status?.awaiting_question),
             });
             updateConversationListItemState(executionId, {
-                running: Boolean(status?.running),
+                running: displayRunning,
                 stopping: Boolean(status?.stopping),
-                active_message_id: status?.running ? messageId : 0,
+                active_message_id: displayRunning ? messageId : 0,
                 awaiting_question: Boolean(status?.awaiting_question),
                 awaiting_approval: Boolean(status?.awaiting_approval),
             });
@@ -1941,9 +3899,10 @@ function startPolling(conversationId, msgId) {
                     executionId, messageId, poller
                 );
                 if (!lateResult.valid) return;
-                if (lateResult.hadResults
-                    && !lateResult.terminal
-                    && !poller.terminalEventSeen) return;
+                // The final assistant event is terminal, but the backend can
+                // append a task-end modified-files summary immediately after it.
+                // Drain until the queue is empty before ending this poller.
+                if (lateResult.hadResults && !poller.terminalEventSeen) return;
                 finishCurrentMessage(executionId, messageId);
                 return;
             }
@@ -1982,9 +3941,8 @@ function isTerminalTaskEvent(result) {
 }
 
 async function drainLateTaskResults(conversationId, msgId, poller) {
-    let terminal = false;
     let hadResults = false;
-    for (let batch = 0; batch < 8 && !terminal; batch += 1) {
+    for (let batch = 0; batch < 8; batch += 1) {
         const results = typeof eel.get_next_results === 'function'
             ? await eel.get_next_results(conversationId, msgId, 64)()
             : [await eel.get_next_result(conversationId, msgId)()].filter(Boolean);
@@ -1995,10 +3953,10 @@ async function drainLateTaskResults(conversationId, msgId, poller) {
         hadResults = true;
         for (const result of results) {
             handleResult(result, msgId, conversationId);
-            if (isTerminalTaskEvent(result)) terminal = true;
+            if (isTerminalTaskEvent(result)) poller.terminalEventSeen = true;
         }
     }
-    return {valid: true, terminal, hadResults};
+    return {valid: true, hadResults};
 }
 
 // Compatibility marker for the former single-task polling contract:
@@ -2149,12 +4107,31 @@ function finishCurrentMessage(
         isAwaitingQuestion = false;
         document.querySelector('.approval-container')?.remove();
         finishActiveToolExecutions('执行已结束');
-        document.getElementById('messageInput').focus();
+        if (!voiceModeActive) document.getElementById('messageInput').focus();
     }
     if (state) renderConversationList();
     refreshConversations(activeConversationId).catch(error => {
         console.error('Failed to refresh task history:', error);
     });
+    // Reconcile only the task-end summary. Rebuilding the whole conversation
+    // here clears the live DOM, causes a visible scroll jump, and can race with
+    // the last queued event even though the summary is already persisted.
+    if (isVisible && id) {
+        eel.load_conversation(id)().then(result => {
+            if (String(activeConversationId || '') !== id) return;
+            if (!result?.success) return;
+            const messageId = Number(msgId || 0);
+            const summary = [...(result.conversation?.messages || [])]
+                .reverse()
+                .find(event => event?.type === 'modified_files'
+                    && Number(event.message_id || 0) === messageId);
+            if (summary) addModifiedFilesSummary(summary, false);
+        }).catch(error => {
+            if (!handleEelConnectionError(error)) {
+                console.error('Failed to restore task-end summary:', error);
+            }
+        });
+    }
 
     if (messageQueue.length > 0) dispatchNextQueuedMessage();
 }
@@ -2201,7 +4178,9 @@ async function dispatchNextQueuedMessage() {
             sendMessageWithText(
                 queued.message,
                 queued.attachments || [],
-                queued.conversationId || activeConversationId
+                queued.conversationId || activeConversationId,
+                typeof queued.planMode === 'boolean' ? queued.planMode : planModeEnabled,
+                typeof queued.voiceMode === 'boolean' ? queued.voiceMode : false
             );
         }
     } catch (error) {
@@ -2248,6 +4227,9 @@ function handleResult(result, msgId, conversationId = activeConversationId) {
         finishToolExecution(result, msgId);
         showThinking(); // Show loading for next step
         updateTokenIndicator(); // 更新token
+    } else if (result.type === 'modified_files') {
+        removeThinking();
+        addModifiedFilesSummary(result);
     } else if (result.type === 'pending_approval') {
         removeThinking();
         cancelSiblingPreparedToolExecutions(result, msgId);
@@ -2319,6 +4301,7 @@ function handleResult(result, msgId, conversationId = activeConversationId) {
     } else if (result.type === 'final') {
         removeThinking();
         const finalMessage = addAssistantResponse(result.content);
+        speakVoiceResponse(result.content, msgId);
         completedMessageByMessageId.set(msgId, finalMessage);
         flushPendingKnowledge(msgId, finalMessage);
         updateTokenIndicator(); // 更新token
@@ -2375,7 +4358,7 @@ function showApproval(toolName, params, thinking, approvalId = '') {
 
     chatMessages.appendChild(approvalDiv);
     requestAnimationFrame(() => approvalDiv.classList.add('is-visible'));
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput(chatMessages);
     return approvalDiv;
 }
 
@@ -2470,15 +4453,8 @@ function showQuestionPrompt(questions, msgId, active = true, questionId = '') {
     container.addEventListener('input', () => validateQuestionPrompt(container));
     container.addEventListener('submit', submitQuestionPrompt);
     chatMessages.appendChild(container);
-    requestAnimationFrame(() => {
-        if (active) container.scrollIntoView({block: 'end', behavior: 'smooth'});
-    });
     validateQuestionPrompt(container);
-    if (active) {
-        setTimeout(() => {
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        }, 60);
-    }
+    if (active) followChatOutput(chatMessages);
     return container;
 }
 
@@ -2557,7 +4533,7 @@ function showQuestionRenderError(detail) {
         <strong>问题选项暂时无法显示</strong>
         <span>${escapeHtml(detail || '请停止任务后重试')}</span>`;
     chatMessages.appendChild(element);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput(chatMessages);
 }
 
 function collapseThinkingForQuestion() {
@@ -2768,7 +4744,7 @@ function addMessage(role, content, isError = false, animate = true) {
     chatMessages.appendChild(messageDiv);
     if (animate) requestAnimationFrame(() => messageDiv.classList.add('is-visible'));
     else messageDiv.classList.add('is-visible');
-    if (!isRestoringConversation) chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (!isRestoringConversation) followChatOutput(chatMessages);
     return messageDiv;
 }
 
@@ -2805,12 +4781,18 @@ function addUserMessage(content, attachments, messageId, animate = true) {
 }
 
 function renderMessageAttachment(item) {
-    const isImage = isImageAttachment(item) || item.parse_mode === 'vision';
+    const isImage = isImageAttachment(item)
+        || item.parse_mode === 'vision'
+        || item.parse_mode === 'image_view';
+    const isDirectory = isDirectoryReference(item);
+    const imageStatus = item.parse_mode === 'image_view'
+        ? '图片已保存'
+        : '已发送给视觉模型';
     const status = item.success === true
-        ? isImage ? '已发送给视觉模型' : '已解析'
+        ? isDirectory ? '参考目录已加入' : isImage ? imageStatus : '已解析'
         : item.success === false
-            ? isImage ? '图片发送失败' : '解析失败'
-            : isImage ? '等待发送给视觉模型' : '正在解析';
+            ? isDirectory ? '参考目录不可用' : isImage ? '图片保存失败' : '解析失败'
+            : isDirectory ? '正在定位目录' : isImage ? '正在保存图片' : '正在解析';
     const statusClass = item.success === true
         ? 'is-ready'
         : item.success === false
@@ -2824,7 +4806,7 @@ function renderMessageAttachment(item) {
             ${renderAttachmentVisual(item, 'message-attachment-icon')}
             <span class="message-attachment-copy">
                 <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
-                <small>${escapeHtml(status)} · ${formatAttachmentSize(Number(item.size || 0))}</small>
+                <small title="${escapeHtml(item.path || '')}">${escapeHtml(status)}${isDirectory ? ` · ${escapeHtml(item.path || '')}` : ` · ${formatAttachmentSize(Number(item.size || 0))}`}</small>
             </span>
             <span class="message-attachment-status" aria-hidden="true">${item.success === true ? '✓' : item.success === false ? '!' : ''}</span>
         </div>
@@ -2906,10 +4888,11 @@ function markStreamingCommentary(streamId) {
     if (!state) return;
     state.thinkingClosed = true;
     completeStreamingThinking(state);
+    flushVoiceStreamingResponse(state, {final: true});
     state.isCommentary = true;
-    if (state.frame) {
-        cancelAnimationFrame(state.frame);
-        state.frame = null;
+    state.voiceDisabled = true;
+    if (state.frame || state.renderTimer) {
+        cancelStreamingRender(state);
         renderStreamingState(state);
     }
     completeStreamingThinking(state);
@@ -2973,6 +4956,43 @@ function moveThinkingBeforeAnswer(state) {
     }
 }
 
+function getVoiceStreamSentenceBoundary(text) {
+    const source = String(text || '');
+    if (!source) return 0;
+    let boundary = 0;
+    const sentenceEnd = /[。！？!?；;…\n]+|\.(?=\s|$)/g;
+    let match = null;
+    while ((match = sentenceEnd.exec(source)) !== null) {
+        boundary = match.index + match[0].length;
+    }
+    if (!boundary && source.length >= 72) {
+        const softEnd = /[，,：:]\s*/g;
+        while ((match = softEnd.exec(source)) !== null) {
+            if (match.index >= 28) boundary = match.index + match[0].length;
+        }
+    }
+    return boundary;
+}
+
+function flushVoiceStreamingResponse(state, {final = false} = {}) {
+    if (!voiceModeActive || !state || state.isCommentary || state.voiceDisabled) return;
+    const stream = splitStreamingContent(state.content);
+    if (stream.waitingForMarker || (stream.hasThinking && !stream.thinkingComplete)) return;
+    const answer = String(stream.answer || (!stream.hasThinking ? state.content : ''));
+    const consumed = Math.min(Number(state.voiceConsumedLength || 0), answer.length);
+    const pending = answer.slice(consumed);
+    const boundary = final ? pending.length : getVoiceStreamSentenceBoundary(pending);
+    if (!boundary) return;
+    const speechText = pending.slice(0, boundary).replace(/\s+/g, ' ').trim();
+    state.voiceConsumedLength = consumed + boundary;
+    if (!speechText) return;
+    state.voiceQueuedText = `${state.voiceQueuedText || ''}${speechText}`;
+    enqueueVoiceSpeech(
+        speechText,
+        `stream:${state.streamId}:${state.voiceConsumedLength}:${speechText}`
+    );
+}
+
 function appendStreamingResponse(streamId, chunk) {
     const id = String(streamId || currentMessageId);
     let state = streamingResponses.get(id);
@@ -2984,6 +5004,8 @@ function appendStreamingResponse(streamId, chunk) {
             thinkingBody: null,
             content: '',
             frame: null,
+            renderTimer: null,
+            lastRenderedAt: 0,
             streamId: id,
             thinkingCondensed: false,
             thinkingStartedAt: 0,
@@ -2991,27 +5013,53 @@ function appendStreamingResponse(streamId, chunk) {
             thinkingTimer: null,
             thinkingClosed: false,
             isCommentary: false,
+            thinkingDetectionComplete: false,
+            voiceConsumedLength: 0,
+            voiceQueuedText: '',
+            voiceDisabled: false,
         };
         streamingResponses.set(id, state);
     }
     state.content += String(chunk || '');
-    if (!state.thinkingCard && splitStreamingContent(state.content).hasThinking) {
-        if (state.frame) {
-            cancelAnimationFrame(state.frame);
-            state.frame = null;
+    if (!state.thinkingCard && !state.thinkingDetectionComplete) {
+        const stream = splitStreamingContent(state.content);
+        if (stream.hasThinking) {
+            cancelStreamingRender(state);
+            renderStreamingState(state);
+            return;
         }
-        renderStreamingState(state);
-        return;
+        state.thinkingDetectionComplete = !stream.waitingForMarker;
     }
+    flushVoiceStreamingResponse(state);
     scheduleStreamingRender(state);
 }
 
 function scheduleStreamingRender(state) {
-    if (state.frame) return;
-    state.frame = requestAnimationFrame(() => {
-        state.frame = null;
-        renderStreamingState(state);
-    });
+    if (state.frame || state.renderTimer) return;
+    const elapsed = performance.now() - Number(state.lastRenderedAt || 0);
+    const interval = Math.min(
+        STREAM_RENDER_MAX_INTERVAL_MS,
+        STREAM_RENDER_INTERVAL_MS + state.content.length / 250
+    );
+    const delay = Math.max(0, interval - elapsed);
+    const render = () => {
+        state.renderTimer = null;
+        state.frame = requestAnimationFrame(() => {
+            state.frame = null;
+            state.lastRenderedAt = performance.now();
+            renderStreamingState(state);
+        });
+    };
+    if (delay > 0) state.renderTimer = setTimeout(render, delay);
+    else render();
+}
+
+function cancelStreamingRender(state) {
+    if (!state) return;
+    if (state.frame) cancelAnimationFrame(state.frame);
+    if (state.renderTimer) clearTimeout(state.renderTimer);
+    state.frame = null;
+    state.renderTimer = null;
 }
 
 function renderStreamingState(state) {
@@ -3037,9 +5085,7 @@ function renderStreamingState(state) {
         state.bubble.innerHTML = `${renderMarkdown(state.content)}<span class="stream-caret" aria-hidden="true"></span>`;
     }
 
-    const chatMessages = document.getElementById('chatMessages');
-    const distanceFromBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight;
-    if (distanceFromBottom < 180) chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput();
 }
 
 function splitStreamingContent(content) {
@@ -3082,10 +5128,15 @@ function finalizeStreamingResponse(result, msgId) {
     const state = streamingResponses.get(streamId);
     const content = String(result.content || state?.content || '');
     const isCommentary = result.target === 'commentary';
-    if (isCommentary && state) state.isCommentary = true;
+    if (isCommentary && state) {
+        flushVoiceStreamingResponse(state, {final: true});
+        state.isCommentary = true;
+        state.voiceDisabled = true;
+    }
 
     if (result.target === 'discard') {
-        if (state?.frame) cancelAnimationFrame(state.frame);
+        if (state?.voiceQueuedText) cancelVoiceSpeech();
+        cancelStreamingRender(state);
         stopStreamingThinkingTimer(state);
         state?.element?.remove();
         state?.thinkingCard?.remove();
@@ -3094,7 +5145,8 @@ function finalizeStreamingResponse(result, msgId) {
     }
 
     if (result.target === 'thinking') {
-        if (state?.frame) cancelAnimationFrame(state.frame);
+        if (state?.voiceQueuedText) cancelVoiceSpeech();
+        cancelStreamingRender(state);
         state?.element?.remove();
         if (state?.thinkingCard) {
             const { thoughts, answer } = splitThinkingContent(content);
@@ -3111,6 +5163,7 @@ function finalizeStreamingResponse(result, msgId) {
     }
 
     const { thoughts, answer } = splitThinkingContent(content);
+    if (!isCommentary) flushVoiceStreamingResponse(state, {final: true});
     let thinkingCards = [];
     if (state?.thinkingCard) {
         const thought = thoughts[thoughts.length - 1] || '';
@@ -3126,7 +5179,7 @@ function finalizeStreamingResponse(result, msgId) {
     const visibleContent = answer.trim();
     let finalMessage = state?.element;
     if (state) {
-        if (state.frame) cancelAnimationFrame(state.frame);
+        cancelStreamingRender(state);
         stopStreamingThinkingTimer(state);
         if (visibleContent) {
             if (!state.element) createStreamingResponse(streamId, state);
@@ -3160,6 +5213,7 @@ function finalizeStreamingResponse(result, msgId) {
         return;
     }
 
+    if (!state || !state.voiceQueuedText) speakVoiceResponse(content, msgId);
     completedMessageByMessageId.set(msgId, finalMessage);
     flushPendingKnowledge(msgId, finalMessage);
     updateTokenIndicator();
@@ -3171,7 +5225,7 @@ function getVisibleModelContent(content) {
 
 function removeStreamingResponses() {
     streamingResponses.forEach((state) => {
-        if (state.frame) cancelAnimationFrame(state.frame);
+        cancelStreamingRender(state);
         stopStreamingThinkingTimer(state);
         state.element?.remove();
         state.thinkingCard?.remove();
@@ -3181,7 +5235,7 @@ function removeStreamingResponses() {
 
 function finalizeVisibleStreamingResponses() {
     streamingResponses.forEach((state, streamId) => {
-        if (state.frame) cancelAnimationFrame(state.frame);
+        cancelStreamingRender(state);
         stopStreamingThinkingTimer(state);
         if (state.thinkingCard) {
             completeStreamingThinking(state);
@@ -3277,7 +5331,7 @@ function addThinkingCard(
     if (animate) requestAnimationFrame(() => card.classList.add('is-visible'));
     else card.classList.add('is-visible');
     if (completed) condenseThinkingCard(card, !animate);
-    if (scrollIntoView) chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (scrollIntoView) followChatOutput(chatMessages);
     return card;
 }
 
@@ -3309,10 +5363,7 @@ function condenseThinkingCard(card, immediate = false) {
     }
 
     const chatMessages = document.getElementById('chatMessages');
-    const distanceFromBottom = chatMessages
-        ? chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
-        : Infinity;
-    const keepBottomAnchored = distanceFromBottom < 120;
+    const keepBottomAnchored = chatAutoFollow;
 
     card.style.setProperty('--thinking-preview-height', `${previewHeight}px`);
     card.style.setProperty('--thinking-full-height', `${fullHeight}px`);
@@ -3331,7 +5382,7 @@ function condenseThinkingCard(card, immediate = false) {
         summary.setAttribute('aria-expanded', 'false');
         if (keepBottomAnchored && chatMessages) {
             requestAnimationFrame(() => {
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                followChatOutput(chatMessages);
             });
         }
     };
@@ -3404,6 +5455,34 @@ function getPreparedToolStreamId(result) {
     return separatorIndex > 0 ? preparedId.slice(0, separatorIndex) : '';
 }
 
+function getToolTarget(toolName, params = {}, explicitTarget = '') {
+    const target = String(explicitTarget || '').trim();
+    if (target) return target;
+    const values = params && typeof params === 'object' ? params : {};
+    const source = String(values.source || '').trim();
+    const destination = String(values.destination || '').trim();
+    if (source && destination) return `${source} -> ${destination}`;
+    for (const key of ['filePath', 'file_path', 'path', 'filename']) {
+        const value = String(values[key] || '').trim();
+        if (value) return value;
+    }
+    const name = String(toolName || '').toLowerCase();
+    if (/bash|shell/.test(name)) {
+        return String(values.description || values.workdir || '').trim();
+    }
+    if (name === 'read_url') return String(values.url || '').trim();
+    if (/websearch|web_search|codesearch/.test(name)) {
+        const query = String(values.query || values.pattern || '').trim();
+        const path = String(values.path || '').trim();
+        return path && query ? `${path} · ${query}` : (query || path);
+    }
+    if (name === 'project_preview') {
+        return String(values.name || values.workdir || values.entry_path || '').trim();
+    }
+    if (name === 'load_skill') return String(values.skill_name || '').trim();
+    return '';
+}
+
 function getToolProgressCopy(toolName, params = {}) {
     const name = String(toolName || '').toLowerCase();
     const path = params.filePath || params.file_path || params.path || params.filename || '';
@@ -3463,8 +5542,13 @@ function startToolExecution(result, msgId, isPreparing = false) {
         existing.progressCopy = isPreparing
             ? getToolPreparingCopy(toolName)
             : getToolProgressCopy(toolName, result.params || {});
+        existing.target = getToolTarget(toolName, result.params || {}, result.target) || existing.target || '';
         const summary = existing.element.querySelector('.tool-live-summary');
-        if (summary) summary.textContent = existing.progressCopy;
+        if (summary) {
+            summary.textContent = existing.target
+                ? `${existing.progressCopy} · ${existing.target}`
+                : existing.progressCopy;
+        }
         const backendStartedAt = Number(result.started_at_ms || 0);
         if (backendStartedAt > 0) {
             existing.startedAt = Math.min(existing.startedAt, backendStartedAt);
@@ -3479,13 +5563,14 @@ function startToolExecution(result, msgId, isPreparing = false) {
     const progressCopy = isPreparing
         ? getToolPreparingCopy(result.tool)
         : getToolProgressCopy(result.tool, result.params || {});
+    const target = getToolTarget(result.tool, result.params || {}, result.target);
     toolDiv.classList.toggle('is-preparing', isPreparing);
     toolDiv.innerHTML = `
         <div class="tool-card tool-card-running" role="status" aria-live="polite">
             <div class="tool-header tool-header-running">
                 <span class="tool-progress-spinner" aria-hidden="true"><span></span></span>
                 <span class="tool-name">${escapeHtml(result.tool || 'Tool')}</span>
-                <span class="tool-summary tool-live-summary">${escapeHtml(progressCopy)}</span>
+                <span class="tool-summary tool-live-summary">${escapeHtml(target ? `${progressCopy} · ${target}` : progressCopy)}</span>
                 <span class="tool-elapsed">0 秒</span>
             </div>
             <div class="tool-progress-track" aria-hidden="true"><span></span></div>
@@ -3505,6 +5590,7 @@ function startToolExecution(result, msgId, isPreparing = false) {
         messageId: Number(msgId || 0),
         streamId: getPreparedToolStreamId(result),
         progressCopy,
+        target,
         isPreparing: Boolean(isPreparing),
         phase: 0,
         conversationId: String(activeConversationId || ''),
@@ -3517,15 +5603,17 @@ function startToolExecution(result, msgId, isPreparing = false) {
         if (elapsed) elapsed.textContent = `${seconds} 秒`;
         if (liveSummary && seconds > 8 && seconds % 6 === 0) {
             execution.phase = (execution.phase + 1) % phases.length;
-            liveSummary.textContent = `${execution.progressCopy} · ${phases[execution.phase]}`;
+            const status = `${execution.progressCopy} · ${phases[execution.phase]}`;
+            liveSummary.textContent = execution.target
+                ? `${status} · ${execution.target}`
+                : status;
         }
-        const distance = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight;
-        if (distance < 160) chatMessages.scrollTop = chatMessages.scrollHeight;
+        followChatOutput(chatMessages);
     };
     updateElapsed();
     execution.interval = setInterval(updateElapsed, 1000);
     activeToolExecutions.set(key, execution);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput(chatMessages);
     return toolDiv;
 }
 
@@ -3548,7 +5636,8 @@ function finishToolExecution(result, msgId) {
             result.tool,
             result.result,
             true,
-            Number(result.duration_ms || 0)
+            Number(result.duration_ms || 0),
+            getToolTarget(result.tool, result.params || {}, result.target)
         );
         return;
     }
@@ -3561,6 +5650,7 @@ function finishToolExecution(result, msgId) {
     const backendDuration = Math.max(0, Number(result.duration_ms || 0));
     const duration = Math.max(frontendDuration, backendDuration);
     const failed = toolResultFailed(result.result);
+    const target = getToolTarget(result.tool, result.params || {}, result.target) || execution.target || '';
     toolDiv.classList.remove('tool-execution-running');
     toolDiv.classList.add(failed ? 'tool-execution-error' : 'tool-execution-complete');
     toolDiv.innerHTML = `
@@ -3568,7 +5658,7 @@ function finishToolExecution(result, msgId) {
             <summary class="tool-header">
                 <span class="tool-status-icon" aria-hidden="true">${failed ? '!' : '✓'}</span>
                 <span class="tool-name">${escapeHtml(result.tool || 'Tool')}</span>
-                <span class="tool-summary">${failed ? '工具调用失败' : '工具调用完成'} · ${escapeHtml(formatToolDuration(duration))}</span>
+                <span class="tool-summary">${escapeHtml(target ? `${target} · ` : '')}${failed ? '工具调用失败' : '工具调用完成'} · ${escapeHtml(formatToolDuration(duration))}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
             <div class="tool-result">${formatContent(String(result.result || '').substring(0, 1600))}</div>
@@ -3665,13 +5755,12 @@ function startCompressionActivity(
     const updateElapsed = () => {
         const elapsed = activity.querySelector('.compression-elapsed');
         if (elapsed) elapsed.textContent = formatCompressionElapsed(Date.now() - startedAt);
-        const distance = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight;
-        if (distance < 160) chatMessages.scrollTop = chatMessages.scrollHeight;
+        followChatOutput(chatMessages);
     };
     updateElapsed();
     state.interval = setInterval(updateElapsed, 250);
     activeCompressionActivities.set(key, state);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput(chatMessages);
     if (announceStatus) {
         setAppStatus(
             'busy',
@@ -3812,7 +5901,7 @@ function cancelSiblingPreparedToolExecutions(result, msgId) {
     });
 }
 
-function addToolMessage(toolName, result, animate = true, durationMs = 0) {
+function addToolMessage(toolName, result, animate = true, durationMs = 0, target = '') {
     const chatMessages = document.getElementById('chatMessages');
     const toolDiv = document.createElement('div');
     const failed = toolResultFailed(result);
@@ -3822,7 +5911,7 @@ function addToolMessage(toolName, result, animate = true, durationMs = 0) {
             <summary class="tool-header">
                 <span class="tool-status-icon" aria-hidden="true">${failed ? '!' : '✓'}</span>
                 <span class="tool-name">${escapeHtml(toolName)}</span>
-                <span class="tool-summary">${failed ? '工具调用失败' : '工具调用完成'}${durationMs > 0 ? ` · ${escapeHtml(formatToolDuration(durationMs))}` : ''}</span>
+                <span class="tool-summary">${escapeHtml(target ? `${target} · ` : '')}${failed ? '工具调用失败' : '工具调用完成'}${durationMs > 0 ? ` · ${escapeHtml(formatToolDuration(durationMs))}` : ''}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
             <div class="tool-result">${formatContent(String(result).substring(0, 1600))}</div>
@@ -3831,7 +5920,238 @@ function addToolMessage(toolName, result, animate = true, durationMs = 0) {
     chatMessages.appendChild(toolDiv);
     if (animate) requestAnimationFrame(() => toolDiv.classList.add('is-visible'));
     else toolDiv.classList.add('is-visible');
-    if (!isRestoringConversation) chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (!isRestoringConversation) followChatOutput(chatMessages);
+}
+
+function normalizeModifiedFiles(result) {
+    const merged = new Map();
+    (Array.isArray(result?.files) ? result.files : []).forEach(item => {
+        const path = String(item?.path || '').trim();
+        if (!path) return;
+        const existing = merged.get(path) || {
+            path,
+            additions: 0,
+            deletions: 0,
+            reviewable: false,
+            review_reason: '',
+            hunks: [],
+        };
+        existing.additions += Math.max(0, Number(item?.additions || 0));
+        existing.deletions += Math.max(0, Number(item?.deletions || 0));
+        existing.reviewable = Boolean(item?.reviewable);
+        existing.review_reason = String(item?.review_reason || '');
+        existing.hunks = (Array.isArray(item?.hunks) ? item.hunks : []).map(hunk => ({
+            old_start: Math.max(0, Number(hunk?.old_start || 0)),
+            old_count: Math.max(0, Number(hunk?.old_count || 0)),
+            new_start: Math.max(0, Number(hunk?.new_start || 0)),
+            new_count: Math.max(0, Number(hunk?.new_count || 0)),
+            lines: (Array.isArray(hunk?.lines) ? hunk.lines : []).map(line => ({
+                type: ['context', 'add', 'delete'].includes(line?.type)
+                    ? line.type
+                    : 'context',
+                old_line: line?.old_line == null ? null : Number(line.old_line),
+                new_line: line?.new_line == null ? null : Number(line.new_line),
+                content: String(line?.content || ''),
+            })),
+        }));
+        merged.set(path, existing);
+    });
+    return Array.from(merged.values());
+}
+
+function changeReviewFileName(path) {
+    const parts = String(path || '').replace(/\\/g, '/').split('/');
+    return parts[parts.length - 1] || path || '文件';
+}
+
+function changeReviewDirectory(path) {
+    const normalized = String(path || '').replace(/\\/g, '/');
+    const index = normalized.lastIndexOf('/');
+    return index > 0 ? normalized.slice(0, index) : '';
+}
+
+function renderChangeReviewFiles() {
+    const fileList = document.getElementById('changeReviewFileList');
+    if (!fileList || !activeChangeReview) return;
+    fileList.innerHTML = activeChangeReview.files.map((file, index) => `
+        <button class="change-review-file${index === activeChangeReview.selectedIndex ? ' is-active' : ''}" type="button" data-review-file-index="${index}" title="${escapeHtml(file.path)}">
+            <span class="change-review-file-icon" aria-hidden="true">${escapeHtml(changeReviewFileName(file.path).split('.').pop()?.slice(0, 2).toUpperCase() || '#')}</span>
+            <span class="change-review-file-copy">
+                <strong>${escapeHtml(changeReviewFileName(file.path))}</strong>
+                <small>${escapeHtml(changeReviewDirectory(file.path))}</small>
+            </span>
+            <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>
+        </button>`).join('');
+}
+
+function renderChangeReviewDiff() {
+    const fileHeader = document.getElementById('changeReviewFileHeader');
+    const diff = document.getElementById('changeReviewDiff');
+    if (!fileHeader || !diff || !activeChangeReview) return;
+    const file = activeChangeReview.files[activeChangeReview.selectedIndex];
+    if (!file) {
+        fileHeader.textContent = '';
+        diff.innerHTML = '<div class="change-review-empty">没有可审核的文件</div>';
+        return;
+    }
+    fileHeader.innerHTML = `
+        <span title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
+        <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>`;
+    if (!file.reviewable || !file.hunks.length) {
+        diff.innerHTML = `
+            <div class="change-review-empty">
+                <strong>无法显示逐行差异</strong>
+                <span>${escapeHtml(file.review_reason || '此文件没有可显示的文本差异')}</span>
+            </div>`;
+        return;
+    }
+    diff.innerHTML = file.hunks.map(hunk => `
+        <section class="change-review-hunk">
+            <div class="change-review-hunk-header">@@ -${hunk.old_start},${hunk.old_count} +${hunk.new_start},${hunk.new_count} @@</div>
+            <div class="change-review-lines">
+                ${hunk.lines.map(line => {
+                    const type = ['add', 'delete'].includes(line.type) ? line.type : 'context';
+                    const marker = type === 'add' ? '+' : type === 'delete' ? '-' : ' ';
+                    return `<div class="change-review-line change-review-line-${type}">
+                        <span class="change-review-line-number">${line.old_line ?? ''}</span>
+                        <span class="change-review-line-number">${line.new_line ?? ''}</span>
+                        <span class="change-review-line-marker" aria-hidden="true">${marker}</span>
+                        <code>${escapeHtml(line.content)}</code>
+                    </div>`;
+                }).join('')}
+            </div>
+        </section>`).join('');
+}
+
+function selectChangeReviewFile(pathOrIndex) {
+    if (!activeChangeReview) return;
+    const nextIndex = Number.isInteger(Number(pathOrIndex))
+        ? Number(pathOrIndex)
+        : activeChangeReview.files.findIndex(file => file.path === pathOrIndex);
+    if (nextIndex < 0 || nextIndex >= activeChangeReview.files.length) return;
+    activeChangeReview.selectedIndex = nextIndex;
+    renderChangeReviewFiles();
+    renderChangeReviewDiff();
+}
+
+function restoreChatAfterReviewLayout(chatMessages, distanceFromBottom) {
+    if (!chatMessages) return;
+    const align = frames => {
+        if (distanceFromBottom < 72) {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        } else {
+            chatMessages.scrollTop = Math.max(
+                0,
+                chatMessages.scrollHeight - chatMessages.clientHeight - distanceFromBottom
+            );
+        }
+        if (frames > 0) requestAnimationFrame(() => align(frames - 1));
+    };
+    requestAnimationFrame(() => align(2));
+}
+
+function openChangeReview(result, initialPath = '') {
+    const panel = document.getElementById('changeReviewPanel');
+    const files = normalizeModifiedFiles(result);
+    if (!panel || !files.length) return;
+    const chatMessages = document.getElementById('chatMessages');
+    const distanceFromBottom = chatMessages
+        ? chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
+        : 0;
+    const selectedIndex = Math.max(0, files.findIndex(file => file.path === initialPath));
+    activeChangeReview = {
+        conversationId: String(result?.conversation_id || activeConversationId || ''),
+        messageId: Number(result?.message_id || 0),
+        files,
+        selectedIndex,
+        lastFocus: document.activeElement,
+    };
+    document.getElementById('changeReviewTotals').innerHTML = `
+        <b>+${files.reduce((total, file) => total + file.additions, 0)}</b>
+        <em>-${files.reduce((total, file) => total + file.deletions, 0)}</em>`;
+    panel.removeAttribute('aria-hidden');
+    document.body.classList.add('change-review-open');
+    syncDockedLayoutWidths();
+    renderChangeReviewFiles();
+    renderChangeReviewDiff();
+    requestAnimationFrame(() => panel.classList.add('is-open'));
+    restoreChatAfterReviewLayout(chatMessages, distanceFromBottom);
+}
+
+function closeChangeReview({restoreFocus = true} = {}) {
+    const panel = document.getElementById('changeReviewPanel');
+    if (!panel) return;
+    const chatMessages = document.getElementById('chatMessages');
+    const distanceFromBottom = chatMessages
+        ? chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
+        : 0;
+    const focusTarget = activeChangeReview?.lastFocus;
+    panel.classList.remove('is-open');
+    panel.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('change-review-open');
+    activeChangeReview = null;
+    setSidebarPanelWidth(getSavedSidebarPanelWidth(), {persist: false});
+    restoreChatAfterReviewLayout(chatMessages, distanceFromBottom);
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus();
+}
+
+function addModifiedFilesSummary(result, animate = true) {
+    const chatMessages = document.getElementById('chatMessages');
+    if (!chatMessages) return null;
+    const files = normalizeModifiedFiles(result);
+    if (!files.length) return null;
+
+    const additions = files.reduce((total, item) => total + item.additions, 0);
+    const deletions = files.reduce((total, item) => total + item.deletions, 0);
+    const reviewAvailable = files.some(file => (
+        file.reviewable || file.hunks.length || file.review_reason
+    ));
+    const messageId = Number(result?.message_id || 0);
+    const existing = messageId
+        ? chatMessages.querySelector(`.modified-files-summary[data-message-id="${messageId}"]`)
+        : null;
+    if (existing) {
+        if (!isRestoringConversation) pinChatToBottom(chatMessages);
+        return existing;
+    }
+
+    const summary = document.createElement('section');
+    summary.className = 'modified-files-summary';
+    if (messageId) summary.dataset.messageId = String(messageId);
+    const reviewResult = {...result, files};
+    summary._modifiedFilesResult = reviewResult;
+    summary.innerHTML = `
+        <div class="modified-files-header">
+            <span class="modified-files-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3h8l4 4v11a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3h1Z"/><path d="M14 3v5h5M12 10v6m-3-3h6"/></svg>
+            </span>
+            <div class="modified-files-title-block">
+                <strong>已编辑 ${files.length} 个文件</strong>
+                <span class="modified-files-total" aria-label="新增 ${additions} 行，删除 ${deletions} 行" title="新增 ${additions} 行，删除 ${deletions} 行"><b class="modified-files-added">+${additions}</b> <b class="modified-files-deleted">-${deletions}</b></span>
+            </div>
+            ${reviewAvailable ? '<button class="modified-files-review" type="button">审核</button>' : ''}
+        </div>
+        <div class="modified-files-list">
+            ${files.map((file, index) => `
+                <button class="modified-files-row" type="button" data-review-file-index="${index}" ${reviewAvailable ? '' : 'disabled'}>
+                    <code title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</code>
+                    <span class="modified-files-counts" aria-label="新增 ${file.additions} 行，删除 ${file.deletions} 行" title="新增 ${file.additions} 行，删除 ${file.deletions} 行"><b class="modified-files-added">+${file.additions}</b> <b class="modified-files-deleted">-${file.deletions}</b></span>
+                </button>`).join('')}
+        </div>`;
+    summary.querySelector('.modified-files-review')?.addEventListener('click', () => {
+        openChangeReview(reviewResult);
+    });
+    summary.querySelectorAll('.modified-files-row').forEach(row => {
+        row.addEventListener('click', () => {
+            const index = Number(row.dataset.reviewFileIndex || 0);
+            openChangeReview(reviewResult, files[index]?.path || '');
+        });
+    });
+    chatMessages.appendChild(summary);
+    if (animate) requestAnimationFrame(() => summary.classList.add('is-visible'));
+    else summary.classList.add('is-visible');
+    if (!isRestoringConversation) pinChatToBottom(chatMessages);
+    return summary;
 }
 
 function normalizeLocalPreviewUrl(value) {
@@ -3986,13 +6306,13 @@ function upsertProjectPreview(raw, animate = true) {
 
     if (activePreviewId === session.previewId) updateOpenPreviewSession(session);
     if (isNew && animate && !isRestoringConversation) {
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+        followChatOutput(chatMessages);
     }
     return card;
 }
 
 async function syncPreviewSessions(conversationId) {
-    if (!conversationId || typeof eel === 'undefined'
+    if (!conversationId || !canCallEel()
         || typeof eel.get_preview_sessions !== 'function') return;
     const generation = ++previewSyncGeneration;
     try {
@@ -4011,6 +6331,7 @@ async function syncPreviewSessions(conversationId) {
             conversation_id: session.conversation_id || conversationId,
         }, false));
     } catch (error) {
+        if (handleEelConnectionError(error)) return;
         console.error('Failed to sync preview sessions:', error);
     }
 }
@@ -4158,7 +6479,9 @@ async function openBrowserPreviewExternal() {
         || typeof eel === 'undefined'
         || typeof eel.open_preview_external !== 'function') return;
     try {
-        const result = await eel.open_preview_external(previewId)();
+        const result = await eel.open_preview_external(
+            previewId, activeConversationId || ''
+        )();
         if (result?.success === false) throw new Error(result.error || '打开失败');
     } catch (error) {
         showToast(`外部打开失败：${error.message}`, 'error');
@@ -4174,7 +6497,9 @@ async function stopBrowserPreview() {
     const button = document.getElementById('browserPreviewStop');
     if (button) button.disabled = true;
     try {
-        const result = await eel.stop_project_preview(previewId)();
+        const result = await eel.stop_project_preview(
+            previewId, activeConversationId || ''
+        )();
         if (result?.success === false) throw new Error(result.error || '停止失败');
         upsertProjectPreview({
             ...result,
@@ -4244,7 +6569,7 @@ function addKnowledgePanel(content, anchorElement = null) {
 
     wrapper.appendChild(panel);
     const chatMessages = document.getElementById('chatMessages');
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput(chatMessages);
 }
 
 function showThinking() {
@@ -4268,7 +6593,7 @@ function showThinking() {
     `;
     chatMessages.appendChild(thinkingDiv);
     requestAnimationFrame(() => thinkingDiv.classList.add('is-visible'));
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    followChatOutput(chatMessages);
 }
 
 function removeThinking() {
@@ -4600,57 +6925,177 @@ function hideQuickCommands() {
 }
 
 // Workspace Functions
-async function refreshWorkspace(folder) {
-    try {
-        const items = await eel.list_workspace_files(folder)();
-        const listEl = document.getElementById(folder + 'Files');
+function getWorkspaceTreeKey(folder, path = '') {
+    return `${folder}:${String(path || '')}`;
+}
 
-        if (!items || items.length === 0) {
-            listEl.innerHTML = '<div class="sidebar-empty">暂无文件</div>';
-            return;
+function getWorkspaceTreeId(folder, path = '') {
+    const value = `${String(folder)}:${String(path || 'root')}`;
+    return `workspaceTree-${Array.from(value)
+        .map(character => character.codePointAt(0).toString(36))
+        .join('-')}`;
+}
+
+function workspaceFolderIconMarkup() {
+    return `
+        <svg class="file-icon folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+    `;
+}
+
+function workspaceFileIconMarkup() {
+    return `
+        <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+        </svg>
+    `;
+}
+
+function renderWorkspaceTree(folder, path = '') {
+    const key = getWorkspaceTreeKey(folder, path);
+    const items = workspaceDirectoryItems.get(key);
+    const treeId = getWorkspaceTreeId(folder, path);
+    if (!items) {
+        return `<div class="workspace-tree-loading" id="${treeId}" role="status">加载中...</div>`;
+    }
+    if (!items.length) {
+        return path
+            ? `<div class="workspace-tree-empty" id="${treeId}" role="status">空文件夹</div>`
+            : `<div class="sidebar-empty" id="${treeId}" role="status">暂无文件</div>`;
+    }
+    return `<div class="workspace-tree" id="${treeId}" role="group">${items.map(item => {
+        const safeName = escapeHtml(item.name);
+        const itemPath = String(item.path || item.name || '');
+        if (item.type === 'folder') {
+            const itemKey = getWorkspaceTreeKey(folder, itemPath);
+            const isExpanded = workspaceExpandedDirectories.has(itemKey);
+            const childId = getWorkspaceTreeId(folder, itemPath);
+            return `
+                <div class="workspace-tree-node is-folder">
+                    <div class="workspace-tree-row">
+                        <button class="workspace-tree-toggle" type="button" data-workspace-toggle="${escapeHtml(itemPath)}" aria-label="${isExpanded ? '收起' : '展开'} ${safeName}" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="${childId}">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                        </button>
+                        <button class="workspace-tree-item" type="button" data-workspace-folder="${escapeHtml(itemPath)}" title="${safeName}">
+                            ${workspaceFolderIconMarkup()}
+                            <span class="file-name">${safeName}</span>
+                        </button>
+                        <button class="workspace-tree-open" type="button" data-workspace-open-folder="${escapeHtml(itemPath)}" title="在文件管理器中打开 ${safeName}" aria-label="在文件管理器中打开 ${safeName}">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg>
+                        </button>
+                    </div>
+                    <div class="workspace-tree-children" id="${childId}" ${isExpanded ? '' : 'hidden'}>${isExpanded ? renderWorkspaceTree(folder, itemPath) : ''}</div>
+                </div>
+            `;
         }
+        return `
+            <div class="workspace-tree-row is-file">
+                <button class="workspace-tree-item" type="button" data-workspace-file="${escapeHtml(itemPath)}" title="${safeName}">
+                    ${workspaceFileIconMarkup()}
+                    <span class="file-name">${safeName}</span>
+                    <span class="file-size">${formatFileSize(item.size)}</span>
+                </button>
+            </div>
+        `;
+    }).join('')}</div>`;
+}
 
-        listEl.innerHTML = items.map((item, index) => {
-            const safeName = escapeHtml(item.name);
-            if (item.type === 'folder') {
-                return `
-                    <button class="file-item folder" type="button" data-index="${index}">
-                        <svg class="file-icon folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                        </svg>
-                        <span class="file-name">${safeName}</span>
-                    </button>
-                `;
-            } else {
-                return `
-                    <button class="file-item" type="button" data-index="${index}">
-                        <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                            <polyline points="14 2 14 8 20 8"/>
-                        </svg>
-                        <span class="file-name">${safeName}</span>
-                        <span class="file-size">${formatFileSize(item.size)}</span>
-                    </button>
-                `;
-            }
-        }).join('');
-        listEl.querySelectorAll('.file-item').forEach((element) => {
-            const item = items[Number(element.dataset.index)];
-            element.addEventListener('click', () => {
-                if (item.type === 'folder') {
-                    openWorkspaceFolder(folder, item.name);
-                } else {
-                    openFile(folder, item.name);
-                }
-            });
-        });
+function bindWorkspaceTreeEvents(folder, rootElement) {
+    if (!rootElement || rootElement.dataset.workspaceTreeBound === 'true') return;
+    rootElement.dataset.workspaceTreeBound = 'true';
+    rootElement.addEventListener('click', event => {
+        const toggle = event.target.closest('[data-workspace-toggle]');
+        const folderItem = event.target.closest('[data-workspace-folder]');
+        const openFolder = event.target.closest('[data-workspace-open-folder]');
+        const fileItem = event.target.closest('[data-workspace-file]');
+        if (toggle || folderItem) {
+            event.preventDefault();
+            toggleWorkspaceDirectory(folder, (toggle || folderItem).dataset.workspaceToggle || folderItem.dataset.workspaceFolder);
+        } else if (openFolder) {
+            event.preventDefault();
+            openWorkspaceFolder(folder, openFolder.dataset.workspaceOpenFolder);
+        } else if (fileItem) {
+            event.preventDefault();
+            openFile(folder, fileItem.dataset.workspaceFile);
+        }
+    });
+    rootElement.addEventListener('dblclick', event => {
+        const folderItem = event.target.closest('[data-workspace-folder]');
+        if (!folderItem) return;
+        event.preventDefault();
+        openWorkspaceFolder(folder, folderItem.dataset.workspaceFolder);
+    });
+}
+
+function updateWorkspaceTree(folder) {
+    const listEl = document.getElementById(`${folder}Files`);
+    if (!listEl) return;
+    listEl.innerHTML = renderWorkspaceTree(folder);
+    bindWorkspaceTreeEvents(folder, listEl);
+}
+
+async function loadWorkspaceDirectory(folder, path = '', {force = false} = {}) {
+    const key = getWorkspaceTreeKey(folder, path);
+    if (!force && workspaceDirectoryItems.has(key)) return workspaceDirectoryItems.get(key);
+    if (workspaceDirectoryRequests.has(key)) return workspaceDirectoryRequests.get(key);
+    if (!canCallEel()) throw new Error('Eel connection is unavailable');
+    const request = eel.list_workspace_files(folder, path)()
+        .then(items => {
+            workspaceDirectoryItems.set(key, Array.isArray(items) ? items : []);
+            return workspaceDirectoryItems.get(key);
+        })
+        .finally(() => workspaceDirectoryRequests.delete(key));
+    workspaceDirectoryRequests.set(key, request);
+    return request;
+}
+
+async function refreshExpandedWorkspaceDirectories(folder) {
+    const prefix = `${folder}:`;
+    const paths = Array.from(workspaceExpandedDirectories)
+        .filter(key => key.startsWith(prefix))
+        .map(key => key.slice(prefix.length));
+    await Promise.all(paths.map(path => loadWorkspaceDirectory(folder, path, {force: true})));
+}
+
+async function refreshWorkspace(folder) {
+    if (!canCallEel()) return;
+    try {
+        await loadWorkspaceDirectory(folder, '', {force: true});
+        await refreshExpandedWorkspaceDirectories(folder);
+        updateWorkspaceTree(folder);
     } catch (e) {
+        if (handleEelConnectionError(e)) return;
         console.error('Failed to refresh workspace:', e);
+        const listEl = document.getElementById(`${folder}Files`);
+        if (listEl) listEl.innerHTML = '<div class="sidebar-empty">无法读取文件</div>';
     }
 }
 
+async function toggleWorkspaceDirectory(folder, path) {
+    const normalizedPath = String(path || '');
+    if (!normalizedPath) return;
+    const key = getWorkspaceTreeKey(folder, normalizedPath);
+    if (workspaceExpandedDirectories.has(key)) {
+        workspaceExpandedDirectories.delete(key);
+        updateWorkspaceTree(folder);
+        return;
+    }
+    workspaceExpandedDirectories.add(key);
+    updateWorkspaceTree(folder);
+    try {
+        await loadWorkspaceDirectory(folder, normalizedPath);
+    } catch (error) {
+        workspaceExpandedDirectories.delete(key);
+        showToast('无法展开文件夹', 'error');
+        console.error('Failed to load workspace directory:', error);
+    }
+    updateWorkspaceTree(folder);
+}
+
 async function refreshAllWorkspace() {
-    if (refreshInFlight || typeof eel === 'undefined') return;
+    if (refreshInFlight || !canCallEel()) return;
     refreshInFlight = true;
     try {
         await Promise.all([refreshWorkspace('output'), refreshWorkspace('temp')]);
@@ -4667,7 +7112,10 @@ function formatFileSize(bytes) {
 
 async function openFile(folder, fileName) {
     try {
-        await eel.open_workspace_file(folder, fileName)();
+        const result = await eel.open_workspace_file(folder, fileName)();
+        if (!result?.success) {
+            showToast(result?.error || '打开文件失败', 'error');
+        }
     } catch (e) {
         console.error('Failed to open file:', e);
         showToast('打开文件失败', 'error');
@@ -4676,9 +7124,13 @@ async function openFile(folder, fileName) {
 
 async function openWorkspaceFolder(folder, subFolder) {
     try {
-        await eel.open_workspace_subfolder(folder, subFolder)();
+        const result = await eel.open_workspace_subfolder(folder, subFolder)();
+        if (!result?.success) {
+            showToast(result?.error || '打开文件夹失败', 'error');
+        }
     } catch (e) {
         console.error('Failed to open folder:', e);
+        showToast('打开文件夹失败', 'error');
     }
 }
 
@@ -4695,6 +7147,9 @@ document.addEventListener('keydown', (e) => {
             closeInputDialog();
         } else if (document.getElementById('confirmDialog').classList.contains('active')) {
             closeConfirmDialog();
+        } else if (document.body.classList.contains('sidebar-open')) {
+            closeMobileSidebar();
+            document.getElementById('sidebarToggle')?.focus();
         } else {
             closeActiveModal();
         }
@@ -4730,11 +7185,8 @@ async function openSettings() {
         document.getElementById('settingTavilyKey').value = settings.tavily_api_key || '';
         document.getElementById('settingMaxSteps').value = settings.max_steps || '';
         document.getElementById('settingMaxTokens').value = settings.max_tokens || '';
-        document.getElementById('settingCompressAt').value = settings.compress_at || '';
+        document.getElementById('settingAutoCompactPercent').value = settings.auto_compact_threshold_percent || '85';
         document.getElementById('settingMaxWebSearches').value = settings.max_web_searches || '';
-        document.getElementById('settingShowKnowledgeAppendix').checked = String(
-            settings.show_knowledge_appendix ?? 'true'
-        ).toLowerCase() === 'true';
 
         // 加载配置列表
         await loadConfigList();
@@ -4789,6 +7241,7 @@ async function loadConfig(configName, showNotification = true) {
             document.getElementById('settingApiBaseUrl').value = result.config.api_base_url || '';
             document.getElementById('settingApiKey').value = result.config.api_key || '';
             document.getElementById('settingApiModel').value = result.config.api_model || '';
+            document.getElementById('configSelect').value = result.active || configName;
 
             if (showNotification) {
                 showToast(`已加载配置: ${configName}`, 'success');
@@ -4821,6 +7274,7 @@ async function saveCurrentConfig() {
         if (result.success) {
             showToast(`配置已保存: ${configName}`, 'success');
             await loadConfigList();
+            document.getElementById('configSelect').value = result.active || configName;
         } else {
             showToast(`保存失败: ${result.error}`, 'error');
         }
@@ -4868,11 +7322,10 @@ function collectSettingsFromForm(fallback = {}) {
         tavily_api_key: document.getElementById('settingTavilyKey').value.trim(),
         max_steps: document.getElementById('settingMaxSteps').value.trim() || fallback.max_steps || '20',
         max_tokens: document.getElementById('settingMaxTokens').value.trim() || fallback.max_tokens || '30000',
-        compress_at: document.getElementById('settingCompressAt').value.trim() || fallback.compress_at || '',
-        max_web_searches: document.getElementById('settingMaxWebSearches').value.trim() || fallback.max_web_searches || '3',
-        show_knowledge_appendix: document.getElementById('settingShowKnowledgeAppendix').checked
-            ? 'true'
-            : 'false'
+        auto_compact_threshold_percent: document.getElementById('settingAutoCompactPercent').value.trim()
+            || fallback.auto_compact_threshold_percent
+            || '85',
+        max_web_searches: document.getElementById('settingMaxWebSearches').value.trim() || fallback.max_web_searches || '3'
     };
 }
 
@@ -4897,13 +7350,8 @@ async function saveSettings() {
 
         if (result.success) {
             currentSettingsSnapshot = await eel.load_settings()();
-            showKnowledgeAppendix = String(
-                currentSettingsSnapshot.show_knowledge_appendix ?? 'true'
-            ).toLowerCase() === 'true';
-            if (!showKnowledgeAppendix) {
-                pendingKnowledgeByMessageId.clear();
-                document.querySelectorAll('.knowledge-panel').forEach(panel => panel.remove());
-            }
+            pendingKnowledgeByMessageId.clear();
+            document.querySelectorAll('.knowledge-panel').forEach(panel => panel.remove());
             await updateModelBadge();
 
             closeSettingsModal();
@@ -4923,7 +7371,7 @@ async function saveSettings() {
 
 // Token Indicator
 async function updateTokenIndicator() {
-    if (tokenRefreshInFlight || typeof eel === 'undefined') return;
+    if (tokenRefreshInFlight || !canCallEel()) return;
     tokenRefreshInFlight = true;
     try {
         const requestedConversationId = String(activeConversationId || '');
@@ -4931,6 +7379,7 @@ async function updateTokenIndicator() {
         if (requestedConversationId !== String(activeConversationId || '')) return;
         const tokens = Number(result.tokens || 0);
         const maxTokens = Math.max(Number(result.compress_at ?? result.max_tokens ?? 1), 1);
+        const thresholdPercent = Number(result.auto_compact_threshold_percent || 85);
         const percentage = Math.min((tokens / maxTokens) * 100, 100);
 
         const progressBar = document.getElementById('tokenProgressBar');
@@ -4949,7 +7398,7 @@ async function updateTokenIndicator() {
         // 更新 tooltip
         const tooltip = document.getElementById('tokenTooltip');
         if (tooltip) {
-            tooltip.innerHTML = `Memory usage. Auto-compress at ${maxK}k. <code>/compact</code> to compress.`;
+            tooltip.innerHTML = tokenTooltipMarkup(result, thresholdPercent, maxK);
         }
 
         // 颜色变化
@@ -4960,10 +7409,24 @@ async function updateTokenIndicator() {
             progressBar.classList.add('warning');
         }
     } catch (e) {
+        if (handleEelConnectionError(e)) return;
         console.error('Failed to update token indicator:', e);
     } finally {
         tokenRefreshInFlight = false;
     }
+}
+
+function tokenTooltipMarkup(result, thresholdPercent, maxK) {
+    const systemTokens = Number(result.system_tokens || 0);
+    const messageTokens = Number(result.message_tokens || 0);
+    const toolTokens = Number(result.tool_tokens || 0);
+    const sourceNote = result.source === 'graph_snapshot'
+        ? '与自动压缩使用同一份完整上下文快照'
+        : '等待首个模型回合后生成完整上下文快照';
+    return `自动压缩阈值 ${thresholdPercent}%（${maxK}k）。${sourceNote}。<br>`
+        + `系统 ${formatCompressionTokenCount(systemTokens)} · `
+        + `消息 ${formatCompressionTokenCount(messageTokens)} · `
+        + `工具 ${formatCompressionTokenCount(toolTokens)}`;
 }
 
 function formatTokenText(tokens, maxTokens) {
@@ -4985,12 +7448,13 @@ async function toggleTokenTooltip() {
     try {
         const result = await eel.get_token_count(activeConversationId || '')();
         const maxK = (result.compress_at ?? result.max_tokens) / 1000;
+        const thresholdPercent = Number(result.auto_compact_threshold_percent || 85);
 
         const indicator = document.getElementById('tokenIndicator');
         tooltip = document.createElement('div');
         tooltip.id = 'tokenTooltip';
         tooltip.className = 'token-tooltip';
-        tooltip.innerHTML = `Memory usage. Auto-compress at ${maxK}k. <code>/compact</code> to compress.`;
+        tooltip.innerHTML = tokenTooltipMarkup(result, thresholdPercent, maxK);
 
         indicator.style.position = 'relative';
         indicator.appendChild(tooltip);
@@ -5067,22 +7531,35 @@ async function refreshSkills() {
 }
 
 async function addSkill() {
-    try {
-        const result = await eel.select_skill_folder()();
+    document.getElementById('skillFolderInput')?.click();
+}
 
-        if (result.cancelled) {
+async function importSkillFolder(files) {
+    if (!files.length) return;
+    const button = document.getElementById('addSkillButton');
+    if (!canCallEel()) {
+        markEelConnectionLost();
+        return;
+    }
+    try {
+        if (button) button.disabled = true;
+        const payload = await Promise.all(files.map(async file => ({
+            path: file.webkitRelativePath || file.name,
+            data: await readFileAsDataUrl(file),
+        })));
+        const result = await eel.import_skill_folder(payload)();
+        if (!result?.success) {
+            showToast(`添加技能失败: ${result?.error || '无法导入文件夹'}`, 'error');
             return;
         }
-
-        if (result.success) {
-            showToast(`技能添加成功: ${result.name}`, 'success');
-            refreshSkills();
-        } else {
-            showToast(`添加技能失败: ${result.error}`, 'error');
-        }
-    } catch (e) {
-        console.error('Failed to add skill:', e);
-        showToast('添加技能失败', 'error');
+        showToast(`技能添加成功: ${result.name}`, 'success');
+        await refreshSkills();
+    } catch (error) {
+        if (handleEelConnectionError(error)) return;
+        console.error('Failed to import skill folder:', error);
+        showToast(`添加技能失败: ${error.message || '无法读取文件夹'}`, 'error');
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
@@ -5147,7 +7624,12 @@ async function openMemoryFile(fileType) {
         const titleEl = document.getElementById('fileModalTitle');
         const contentEl = document.getElementById('fileContent');
 
-        titleEl.textContent = fileType === 'execution_history' ? 'execution_history.md' : 'accumulated_compression.md';
+        const memoryFileNames = {
+            execution_history: 'execution_history.md',
+            accumulated_compression: 'accumulated_compression.md',
+            memory_context: 'memory_context.md',
+        };
+        titleEl.textContent = memoryFileNames[fileType] || 'memory.md';
         contentEl.textContent = result.content || '(empty)';
         modal.classList.add('active');
     } catch (e) {

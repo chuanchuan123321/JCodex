@@ -1,7 +1,6 @@
 """Shell execution tool"""
 
 import os
-import platform
 import signal
 import subprocess
 import time
@@ -35,30 +34,6 @@ class ShellTool:
     ) -> CommandResult:
         """Execute a shell command and stop its process group on cancellation."""
         try:
-            # Security: Prevent dangerous commands
-            dangerous_patterns = [
-                "rm -rf /",
-                "dd if=/dev/zero",
-                ":(){:|:&};:",  # fork bomb
-            ]
-
-            # Add Windows-specific dangerous patterns
-            if platform.system() == 'Windows':
-                dangerous_patterns.extend([
-                    "del /s /q C:\\",
-                    "format C:",
-                    "diskpart",
-                ])
-
-            for pattern in dangerous_patterns:
-                if pattern in command:
-                    return self._remember(CommandResult(
-                        returncode=1,
-                        stdout="",
-                        stderr=f"Dangerous command blocked: {pattern}",
-                        success=False
-                    ))
-
             if self._is_cancelled(cancel_event, cancelled):
                 return self._remember(CommandResult(
                     returncode=130,

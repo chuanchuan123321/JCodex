@@ -45,7 +45,7 @@ class CLIInterface:
         """Print welcome message"""
         self.console.print(
             Panel.fit(
-                "[bold]麒麟 OS-Agent[/bold]\n输入 [cyan]help[/cyan] 查看命令，输入 [cyan]exit[/cyan] 退出。",
+                "[bold]JCodex[/bold]\n输入 [cyan]help[/cyan] 查看命令，输入 [cyan]exit[/cyan] 退出。",
                 border_style="cyan",
             )
         )

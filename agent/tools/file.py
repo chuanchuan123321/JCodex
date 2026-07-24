@@ -10,10 +10,8 @@ import subprocess
 class FileTool:
     """Tool for file operations - aligned with OpenCode patterns"""
 
-    DEFAULT_READ_LIMIT = 2000
-    MAX_LINE_LENGTH = 2000
-    MAX_LINE_SUFFIX = "... (line truncated to 2000 chars)"
-    MAX_BYTES = 50 * 1024  # 50KB max per file read (OpenCode aligned)
+    DEFAULT_READ_LIMIT = 1000
+    MAX_READ_TOKENS = 25_000
 
     @staticmethod
     def expand_path(path: str) -> str:
@@ -32,21 +30,20 @@ class FileTool:
     def read_file(
         path: str, offset: Optional[int] = None, limit: Optional[int] = None
     ) -> Tuple[bool, str]:
-        """Read file contents with pagination - OpenCode aligned truncation strategy
+        """Read file contents with Grok Build-compatible pagination.
 
-        Implements OpenCode's smart truncation:
-        - Small files (<2000 lines, <50KB): Return full content
-        - Large files: Return first 2000 lines, save full content to cache
-        - Always show continuation hint with offset parameter
+        Non-skill reads are capped at 1000 lines. The complete selected window
+        must also fit Grok Build's 25,000-token estimate; otherwise the model
+        receives a range/search instruction instead of a partial file body.
 
         Args:
             path: File path to read
             offset: Line number to start from (1-indexed, default: 1)
-            limit: Maximum number of lines to read (default: 2000)
+            limit: Maximum number of lines to read (default and maximum: 1000)
 
         Returns:
             Tuple of (success, content)
-            Content is formatted with <path>, <type>, <content> tags like OpenCode
+            Content uses Grok Build-style sparse line-number anchors.
         """
         try:
             file_path = Path(FileTool.expand_path(path)).resolve()
@@ -60,6 +57,10 @@ class FileTool:
             # Defaults
             offset = offset if offset is not None else 1
             limit = limit if limit is not None else FileTool.DEFAULT_READ_LIMIT
+            try:
+                limit = max(1, min(int(limit), FileTool.DEFAULT_READ_LIMIT))
+            except (TypeError, ValueError):
+                return False, "limit must be a positive integer"
 
             if offset < 1:
                 offset = 1
@@ -81,32 +82,37 @@ class FileTool:
 
             selected_lines = lines[start_idx:end_idx]
 
-            # Build output in OpenCode format
-            output_parts = [
-                f"<path>{file_path}</path>",
-                f"<type>file</type>",
-                "<content>",
-            ]
-
-            # Add lines with line numbers
+            # Grok Build anchors the first line and every tenth line. It does
+            # not clip individual lines because that corrupts minified files.
+            output_parts = []
             for i, line in enumerate(selected_lines, start=offset):
-                # Truncate long lines
-                if len(line) > FileTool.MAX_LINE_LENGTH:
-                    line = line[: FileTool.MAX_LINE_LENGTH] + FileTool.MAX_LINE_SUFFIX
-                output_parts.append(f"{i}: {line.rstrip()}")
-
-            has_more = end_idx < total_lines
-
-            if has_more:
+                content = line.rstrip("\r\n")
                 output_parts.append(
-                    f"\n(Showing lines {offset}-{end_idx} of {total_lines}. Use offset={end_idx + 1} to continue.)"
+                    f"{i}\u2192{content}" if i == offset or i % 10 == 0 else content
                 )
-            else:
-                output_parts.append(f"\n(End of file - total {total_lines} lines)")
 
-            output_parts.append("</content>")
+            output = "\n".join(output_parts)
+            estimated_tokens = len(output.encode("utf-8")) // 4
+            if estimated_tokens > FileTool.MAX_READ_TOKENS:
+                range_specified = offset != 1 or limit != FileTool.DEFAULT_READ_LIMIT
+                if range_specified:
+                    message = (
+                        f"The requested line range (offset={offset}, limit={limit}) "
+                        f"contains {estimated_tokens} tokens, which exceeds the "
+                        f"maximum allowed tokens ({FileTool.MAX_READ_TOKENS} tokens). "
+                        "Try a smaller limit, a different starting offset, or use "
+                        "grep to search for specific content."
+                    )
+                else:
+                    message = (
+                        f"File content ({estimated_tokens} tokens) exceeds maximum "
+                        f"allowed tokens ({FileTool.MAX_READ_TOKENS} tokens). Please "
+                        "use offset and limit parameters to read a shorter range, or "
+                        "use grep to search for specific content."
+                    )
+                return False, message
 
-            return True, "\n".join(output_parts)
+            return True, output
 
         except FileNotFoundError:
             return False, f"File not found: {path}"

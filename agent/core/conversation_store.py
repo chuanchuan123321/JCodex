@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+_IMAGE_ATTACHMENT_SUFFIXES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+
+
 class ConversationStore:
     """Store desktop task metadata, UI events, and task-local memory paths."""
 
@@ -120,7 +127,7 @@ class ConversationStore:
     def save_attachment(
         self, conversation_id: str, message_id: int, mime_type: str, content: bytes
     ) -> str:
-        """Persist a binary attachment without exposing its path in chat history."""
+        """Persist a binary attachment in its private task attachment folder."""
         suffixes = {
             "image/png": ".png",
             "image/jpeg": ".jpg",
@@ -132,6 +139,7 @@ class ConversationStore:
         asset_id = f"{int(message_id)}-{uuid.uuid4().hex}{suffix}"
         path = self.attachment_path(conversation_id, asset_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
         temp_path = path.with_suffix(path.suffix + ".tmp")
         temp_path.write_bytes(content)
         temp_path.chmod(0o600)
@@ -145,6 +153,77 @@ class ConversationStore:
             raise ValueError("Attachment not found")
         return path.read_bytes()
 
+    def list_image_attachments(
+        self, conversation_id: str, limit: int = 24
+    ) -> List[Dict[str, Any]]:
+        """Return recent conversation images with store-derived canonical paths.
+
+        Paths embedded in old messages or memory are never trusted here.  The
+        persisted opaque asset ID is resolved back through ``attachment_path``
+        so callers can safely re-register images for a new task run.
+        """
+        try:
+            max_items = max(0, int(limit))
+        except (TypeError, ValueError):
+            max_items = 24
+        if max_items == 0:
+            return []
+
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            images: List[Dict[str, Any]] = []
+            seen_asset_ids = set()
+            for event in reversed(conversation.get("messages", [])):
+                if event.get("type") != "user":
+                    continue
+                attachments = event.get("attachments", [])
+                if not isinstance(attachments, list):
+                    continue
+                for attachment in reversed(attachments):
+                    if not isinstance(attachment, dict):
+                        continue
+                    asset_id = str(attachment.get("asset_id", "")).strip()
+                    mime_type = str(attachment.get("type", "")).strip().lower()
+                    if (
+                        not asset_id
+                        or asset_id in seen_asset_ids
+                        or mime_type not in _IMAGE_ATTACHMENT_SUFFIXES
+                        or attachment.get("success") is False
+                    ):
+                        continue
+                    try:
+                        path = self.attachment_path(conversation_id, asset_id)
+                        if (
+                            not path.is_file()
+                            or path.suffix.lower()
+                            != _IMAGE_ATTACHMENT_SUFFIXES[mime_type]
+                        ):
+                            continue
+                        size = path.stat().st_size
+                    except OSError:
+                        continue
+                    if size <= 0:
+                        continue
+                    seen_asset_ids.add(asset_id)
+                    images.append(
+                        {
+                            "asset_id": asset_id,
+                            "name": Path(
+                                str(attachment.get("name", path.name))
+                            ).name
+                            or path.name,
+                            "path": str(path),
+                            "type": mime_type,
+                            "size": size,
+                            "source_message_id": self._message_id(
+                                event.get("message_id")
+                            ),
+                        }
+                    )
+                    if len(images) >= max_items:
+                        return list(reversed(images))
+            return list(reversed(images))
+
     def delete_attachment(self, conversation_id: str, asset_id: str) -> None:
         """Remove one unreferenced attachment created by a failed upload."""
         path = self.attachment_path(conversation_id, asset_id)
@@ -154,11 +233,14 @@ class ConversationStore:
         if attachment_dir.exists() and not any(attachment_dir.iterdir()):
             attachment_dir.rmdir()
 
-    def _new_conversation(self, title: str) -> Dict[str, Any]:
+    def _new_conversation(
+        self, title: str, project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         now = self._now()
         conversation = {
             "id": str(uuid.uuid4()),
             "title": self._clean_title(title),
+            "project_id": self._clean_project_id(project_id),
             "created_at": now,
             "updated_at": now,
             "messages": [],
@@ -174,6 +256,15 @@ class ConversationStore:
     def _clean_title(title: str) -> str:
         title = " ".join(str(title or "新任务").split()).strip()
         return (title or "新任务")[:60]
+
+    @staticmethod
+    def _clean_project_id(project_id: Optional[str]) -> Optional[str]:
+        value = str(project_id or "").strip()
+        if not value:
+            return None
+        if any(char not in "0123456789abcdef-" for char in value):
+            raise ValueError("Invalid project id")
+        return value
 
     @staticmethod
     def _message_id(value: Any) -> int:
@@ -216,6 +307,9 @@ class ConversationStore:
         return {
             "id": conversation["id"],
             "title": conversation.get("title", "新任务"),
+            "project_id": ConversationStore._clean_project_id(
+                conversation.get("project_id")
+            ),
             "created_at": conversation.get("created_at", ""),
             "updated_at": conversation.get("updated_at", ""),
             "message_count": len(conversation.get("messages", [])),
@@ -255,9 +349,11 @@ class ConversationStore:
             items.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
             return {"active_id": index.get("active_id"), "conversations": items}
 
-    def create(self, title: str = "新任务") -> Dict[str, Any]:
+    def create(
+        self, title: str = "新任务", project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         with self._lock:
-            conversation = self._new_conversation(title)
+            conversation = self._new_conversation(title, project_id)
             index = self._read_index()
             index["active_id"] = conversation["id"]
             index.setdefault("conversations", []).append(self._metadata(conversation))
@@ -287,6 +383,50 @@ class ConversationStore:
             self._write_json(self._conversation_file(conversation_id), conversation)
             self._update_index_metadata(conversation)
             return conversation
+
+    def set_project(
+        self, conversation_id: str, project_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Move a task into a project or back to the ordinary task list."""
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            conversation["project_id"] = self._clean_project_id(project_id)
+            conversation["updated_at"] = self._now()
+            self._write_json(self._conversation_file(conversation_id), conversation)
+            self._update_index_metadata(conversation)
+            return conversation
+
+    def detach_project(self, project_id: str) -> List[str]:
+        """Move every task in a deleted project back to the ordinary task list."""
+        target_id = self._clean_project_id(project_id)
+        if not target_id:
+            return []
+        with self._lock:
+            index = self._read_index()
+            detached = []
+            metadata_items = []
+            for item in index.get("conversations", []):
+                conversation_id = str(item.get("id", ""))
+                conversation = self._read_json(
+                    self._conversation_file(conversation_id), None
+                )
+                if not isinstance(conversation, dict):
+                    metadata_items.append(item)
+                    continue
+                if self._clean_project_id(conversation.get("project_id")) == target_id:
+                    conversation["project_id"] = None
+                    conversation["updated_at"] = self._now()
+                    self._write_json(
+                        self._conversation_file(conversation_id), conversation
+                    )
+                    detached.append(conversation_id)
+                metadata_items.append(self._metadata(conversation))
+            metadata_items.sort(
+                key=lambda entry: entry.get("updated_at", ""), reverse=True
+            )
+            index["conversations"] = metadata_items
+            self._write_index(index)
+            return detached
 
     def delete(self, conversation_id: str) -> Dict[str, Any]:
         with self._lock:

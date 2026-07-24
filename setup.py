@@ -4,14 +4,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="qilin-os-agent",
+    name="jcodex",
     version="1.0.0",
     author="chuanchuan123321",
     author_email="2774421277@qq.com",
-    description="麒麟OS-Agent - 智能操作系统助手 for executing system commands, file operations, web search and more",
+    description="JCodex - coding and system automation agent with local tools, web search, and long-term memory",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/chuanchuan123321/qilin-os-agent",
+    url="https://github.com/chuanchuan123321/JCodex",
     packages=find_packages(),
     py_modules=["chat"],
     include_package_data=True,
@@ -53,7 +53,9 @@ setup(
         "PyPDF2>=3.0.0",
         "python-docx>=1.1.0",
         "openpyxl>=3.1.0",
+        "psutil>=5.9.0",
         "langchain==1.2.7",
+        "langchain-community==0.4.1",
         "langchain-openai==1.1.7",
         "langgraph==1.0.7",
         "langgraph-checkpoint-sqlite==3.1.0",
@@ -65,7 +67,7 @@ setup(
     },
     keywords="ai automation agent task execution",
     project_urls={
-        "Bug Reports": "https://github.com/chuanchuan123321/qilin-os-agent/issues",
-        "Source": "https://github.com/chuanchuan123321/qilin-os-agent",
+        "Bug Reports": "https://github.com/chuanchuan123321/JCodex/issues",
+        "Source": "https://github.com/chuanchuan123321/JCodex",
     },
 )

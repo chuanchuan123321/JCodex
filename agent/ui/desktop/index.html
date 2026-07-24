@@ -3,46 +3,112 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>麒麟OS-Agent</title>
+    <title>JCodex</title>
     <link rel="icon" type="image/svg+xml" href="assets/kylin-agent-mark-light.svg" id="appFavicon">
     <link rel="stylesheet" href="vendor/katex/katex.min.css">
-    <link rel="stylesheet" href="styles.css?v=20260713-32">
+    <link rel="stylesheet" href="styles.css?v=20260720-45">
 </head>
 <body class="theme-light">
     <a class="skip-link" href="#messageInput">跳转到输入框</a>
     <div class="app-container">
-        <aside class="sidebar">
+        <aside class="sidebar sidebar-shell" id="sidebarShell">
             <div class="sidebar-header">
                 <div class="logo">
                     <img class="logo-icon theme-asset-logo" src="assets/kylin-agent-mark-light.svg" alt="">
-                    <span class="logo-text">麒麟OS-Agent</span>
+                    <span class="logo-text">JCodex</span>
                 </div>
             </div>
 
-            <div class="sidebar-content">
-                <button class="new-task-button" id="newTaskButton" type="button">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <path d="M12 5v14M5 12h14"/>
-                    </svg>
-                    <span>新建任务</span>
-                </button>
+            <div class="sidebar-workbench">
+                <nav class="sidebar-nav" id="sidebarPrimaryNav" aria-label="工作台导航" role="tablist" aria-orientation="vertical">
+                    <button class="sidebar-nav-item is-active" id="sidebarTasksTab" type="button" role="tab" data-sidebar-panel="tasks" aria-controls="sidebarPanelTasks" aria-selected="true" tabindex="0" title="任务">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="M9 6h11M9 12h11M9 18h11"/>
+                            <path d="M4 6h.01M4 12h.01M4 18h.01" stroke-width="3" stroke-linecap="round"/>
+                        </svg>
+                        <span class="visually-hidden">任务</span>
+                    </button>
+                    <button class="sidebar-nav-item" id="sidebarFilesTab" type="button" role="tab" data-sidebar-panel="files" aria-controls="sidebarPanelFiles" aria-selected="false" tabindex="-1" title="文件">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                        </svg>
+                        <span class="visually-hidden">文件</span>
+                    </button>
+                    <button class="sidebar-nav-item" id="sidebarMemoryTab" type="button" role="tab" data-sidebar-panel="memory" aria-controls="sidebarPanelMemory" aria-selected="false" tabindex="-1" title="记忆">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="M12 5a7 7 0 0 0-7 7v5h14v-5a7 7 0 0 0-7-7z"/>
+                            <path d="M9 21h6M9 2h6M12 2v3"/>
+                        </svg>
+                        <span class="visually-hidden">记忆</span>
+                    </button>
+                    <button class="sidebar-nav-item" id="sidebarSkillsTab" type="button" role="tab" data-sidebar-panel="skills" aria-controls="sidebarPanelSkills" aria-selected="false" tabindex="-1" title="技能">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <path d="m14.7 6.3 1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                        </svg>
+                        <span class="visually-hidden">技能</span>
+                    </button>
+                    <div class="sidebar-nav-spacer"></div>
+                    <button class="sidebar-nav-item" id="sidebarSettingsTab" type="button" role="tab" data-sidebar-panel="settings" aria-controls="sidebarPanelSettings" aria-selected="false" tabindex="-1" title="设置">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09A1.65 1.65 0 0 0 20.91 10H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/>
+                        </svg>
+                        <span class="visually-hidden">设置</span>
+                    </button>
+                </nav>
+
+                <div class="sidebar-content">
+                    <section class="sidebar-panel is-active" id="sidebarPanelTasks" data-sidebar-panel-content="tasks" role="tabpanel" aria-labelledby="sidebarTasksTab">
+                <div class="task-create-actions">
+                    <button class="new-task-button" id="newTaskButton" type="button">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M12 5v14M5 12h14"/>
+                        </svg>
+                        <span>新建任务</span>
+                    </button>
+                    <button class="new-project-button" id="newProjectButton" type="button" title="绑定本地项目目录">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                            <path d="M12 10v6M9 13h6"/>
+                        </svg>
+                        <span>项目</span>
+                    </button>
+                </div>
+                <div class="project-history-section">
+                    <div class="sidebar-panel-heading">
+                        <div class="section-title">项目</div>
+                        <span class="sidebar-panel-meta" id="projectCount" aria-live="polite"></span>
+                    </div>
+                    <div class="project-list" id="projectList" aria-label="项目列表">
+                        <div class="sidebar-empty">正在加载项目...</div>
+                    </div>
+                </div>
                 <div class="task-history-section">
-                    <div class="section-title task-history-title">任务</div>
+                    <div class="sidebar-panel-heading">
+                        <div class="section-title task-history-title" id="sidebarTasksTitle">任务</div>
+                        <span class="sidebar-panel-meta" id="taskHistoryCount" aria-live="polite"></span>
+                    </div>
                     <div class="task-history-list" id="taskHistoryList" aria-label="任务历史">
                         <div class="sidebar-empty">正在加载任务...</div>
                     </div>
                 </div>
+                    </section>
 
-                <div class="sidebar-tools-section">
-                <div class="section-title">Workspace</div>
+                    <section class="sidebar-panel sidebar-tools-section" id="sidebarPanelFiles" data-sidebar-panel-content="files" role="tabpanel" aria-labelledby="sidebarFilesTab" hidden>
+                <div class="sidebar-panel-heading">
+                    <div class="section-title" id="sidebarFilesTitle">文件</div>
+                    <button class="sidebar-panel-action" type="button" onclick="refreshAllWorkspace()" title="刷新文件" aria-label="刷新文件">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                    </button>
+                </div>
                 <div class="workspace-section">
-                    <div class="workspace-folder" id="outputFolder">
-                        <div class="folder-header">
+                        <div class="workspace-folder" id="outputFolder">
+                        <div class="folder-header workspace-root-header">
                             <svg class="folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                             </svg>
                             <span>output</span>
-                            <button class="btn-refresh" onclick="refreshWorkspace('output')" title="Refresh">
+                            <button class="btn-refresh" type="button" onclick="refreshWorkspace('output')" title="刷新 output" aria-label="刷新 output">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -51,13 +117,13 @@
                         </div>
                         <div class="file-list" id="outputFiles"></div>
                     </div>
-                    <div class="workspace-folder" id="tempFolder">
-                        <div class="folder-header">
+                        <div class="workspace-folder" id="tempFolder">
+                        <div class="folder-header workspace-root-header">
                             <svg class="folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                             </svg>
                             <span>temp</span>
-                            <button class="btn-refresh" onclick="refreshWorkspace('temp')" title="Refresh">
+                            <button class="btn-refresh" type="button" onclick="refreshWorkspace('temp')" title="刷新 temp" aria-label="刷新 temp">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -67,8 +133,15 @@
                         <div class="file-list" id="tempFiles"></div>
                     </div>
                 </div>
+                    </section>
 
-                <div class="section-title" style="margin-top: 16px;">Memory</div>
+                    <section class="sidebar-panel" id="sidebarPanelMemory" data-sidebar-panel-content="memory" role="tabpanel" aria-labelledby="sidebarMemoryTab" hidden>
+                <div class="sidebar-panel-heading">
+                    <div class="section-title" id="sidebarMemoryTitle">记忆</div>
+                    <button class="sidebar-panel-action" type="button" onclick="refreshMemory()" title="刷新记忆" aria-label="刷新记忆">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                    </button>
+                </div>
                 <div class="workspace-section">
                     <div class="workspace-folder" id="memoryFolder">
                         <div class="folder-header">
@@ -102,11 +175,34 @@
                                 </svg>
                                 <span class="file-name">accumulated_compression.md</span>
                             </div>
+                            <div class="file-item" onclick="openMemoryFile('memory_context')">
+                                <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                    <polyline points="14 2 14 8 20 8"/>
+                                    <line x1="16" y1="13" x2="8" y2="13"/>
+                                    <line x1="16" y1="17" x2="8" y2="17"/>
+                                </svg>
+                                <span class="file-name">memory_context.md</span>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <div class="section-title" style="margin-top: 16px;">Skills</div>
+                    </section>
+
+                    <section class="sidebar-panel" id="sidebarPanelSkills" data-sidebar-panel-content="skills" role="tabpanel" aria-labelledby="sidebarSkillsTab" hidden>
+                <div class="sidebar-panel-heading">
+                    <div class="section-title" id="sidebarSkillsTitle">技能</div>
+                    <div class="sidebar-panel-actions">
+                        <input class="skill-folder-input" id="skillFolderInput" type="file" webkitdirectory directory multiple hidden aria-label="选择技能文件夹">
+                        <button class="sidebar-panel-action" id="addSkillButton" type="button" onclick="addSkill()" title="导入技能文件夹" aria-label="导入技能文件夹">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                        </button>
+                        <button class="sidebar-panel-action" type="button" onclick="refreshSkills()" title="刷新技能" aria-label="刷新技能">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                        </button>
+                    </div>
+                </div>
                 <div class="workspace-section">
                     <div class="workspace-folder" id="skillsFolder">
                         <div class="folder-header">
@@ -122,58 +218,33 @@
                             </button>
                         </div>
                         <div class="file-list" id="skillsList"></div>
-                        <button class="btn-add-skill" onclick="addSkill()">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M12 5v14M5 12h14"/>
-                            </svg>
-                            Add Skill Folder
-                        </button>
                     </div>
                 </div>
+                    </section>
+
+                    <section class="sidebar-panel" id="sidebarPanelSettings" data-sidebar-panel-content="settings" role="tabpanel" aria-labelledby="sidebarSettingsTab" hidden>
+                        <div class="sidebar-panel-heading"><div class="section-title" id="sidebarSettingsTitle">设置</div></div>
+                        <div class="sidebar-action-list" aria-label="设置与数据管理">
+                            <button class="sidebar-action-item" id="settingsBtn" type="button">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                                <span>运行设置</span><span class="sidebar-action-hint">›</span>
+                            </button>
+                            <button class="sidebar-action-item" id="dataBtn" type="button" onclick="openDataIntegration()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                                <span>数据</span><span class="sidebar-action-hint">›</span>
+                            </button>
+                        </div>
+                    </section>
                 </div>
             </div>
 
             <div class="sidebar-footer">
-                <button class="btn-settings" id="settingsBtn" title="Settings">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="3"/>
-                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                    </svg>
-                    <span>Settings</span>
-                </button>
-
-                <!-- 数据整合按钮 -->
-                <button class="btn-settings" id="dataBtn" title="数据整合" onclick="openDataIntegration()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
-                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
-                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
-                    </svg>
-                    <span>数据</span>
-                </button>
-
-                <!-- 偏好记忆按钮 -->
-                <button class="btn-settings" id="prefBtn" title="偏好记忆" onclick="openPreferences()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                        <circle cx="12" cy="7" r="4"/>
-                    </svg>
-                    <span>偏好</span>
-                </button>
-
-                <!-- 知识库按钮 -->
-                <button class="btn-settings" id="knowledgeBtn" title="知识库" onclick="openKnowledgeBase()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-                    </svg>
-                    <span>知识</span>
-                </button>
                 <div class="status-indicator" id="statusIndicator" role="status" aria-live="polite">
                     <span class="status-dot"></span>
                     <span class="status-text">正在初始化</span>
                 </div>
             </div>
+            <div class="sidebar-resize-handle" id="sidebarResizeHandle" role="separator" aria-label="调整侧边栏宽度" aria-orientation="vertical" aria-valuemin="258" aria-valuemax="480" aria-valuenow="264" tabindex="0"></div>
         </aside>
 
         <main class="main-content">
@@ -185,7 +256,7 @@
                         </svg>
                     </button>
                     <h1 class="chat-title" id="activeTaskTitle">新任务</h1>
-                    <span class="header-subtitle">OS-Agent</span>
+                    <span class="header-subtitle" id="activeProjectName">普通任务</span>
                 </div>
                 <div class="header-right">
                     <button class="embedding-badge" id="embeddingBadge" type="button" title="向量引擎状态" aria-label="查看向量引擎状态">
@@ -221,9 +292,9 @@
                         <img class="theme-asset-mark" src="assets/kylin-agent-mark-light.svg" alt="">
                         <span class="welcome-mark-glow"></span>
                     </div>
-                    <div class="welcome-kicker">Kylin Agent Workspace</div>
-                    <h2>今天想完成什么？</h2>
-                    <p>描述目标，麒麟 OS-Agent 会规划步骤、调用工具并持续汇报进度。</p>
+                    <div class="welcome-kicker">JCODEX WORKSPACE</div>
+                    <h2 id="welcomeTitle">今天想完成什么？</h2>
+                    <p>描述目标，JCodex 会规划步骤、调用工具并持续汇报进度。</p>
                     <div class="quick-actions">
                         <button class="quick-action" data-prompt="扫描当前项目并给出最值得优先修复的问题">
                             <span class="quick-action-copy"><strong>扫描当前项目</strong><small>发现风险与优化机会</small></span>
@@ -233,8 +304,8 @@
                             <span class="quick-action-copy"><strong>整理工作区</strong><small>归类文件并生成说明</small></span>
                             <span class="quick-action-arrow">↗</span>
                         </button>
-                        <button class="quick-action" data-prompt="查看当前偏好、知识库和向量引擎状态">
-                            <span class="quick-action-copy"><strong>查看记忆状态</strong><small>偏好、知识与向量引擎</small></span>
+                        <button class="quick-action" data-prompt="调研当前任务涉及的技术方案，核对可靠来源，并运行必要测试给出结论">
+                            <span class="quick-action-copy"><strong>调研与验证</strong><small>检索资料并运行测试</small></span>
                             <span class="quick-action-arrow">↗</span>
                         </button>
                     </div>
@@ -282,7 +353,7 @@
                                 <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>
                             </svg>
                         </span>
-                        <span>松开即可添加文件或图片</span>
+                        <span>松开即可添加文件、图片或参考文件夹</span>
                     </div>
                     <div class="composer-attachments" id="composerAttachments" aria-live="polite"></div>
                     <textarea
@@ -294,11 +365,36 @@
                     ></textarea>
                     <div class="input-toolbar">
                         <div class="input-tools-left">
-                            <button class="btn-input-tool" id="inputAddButton" type="button" title="添加文件或图片" aria-label="添加文件或图片">
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                                    <path d="M12 5v14M5 12h14"/>
-                                </svg>
-                            </button>
+                            <div class="composer-add-menu-anchor" id="composerAddMenuAnchor">
+                                <button class="btn-input-tool" id="inputAddButton" type="button" title="添加内容" aria-label="添加内容" aria-haspopup="menu" aria-expanded="false" aria-controls="composerAddMenu">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path d="M12 5v14M5 12h14"/>
+                                    </svg>
+                                </button>
+                                <div class="composer-add-menu" id="composerAddMenu" role="menu" aria-label="添加内容" hidden>
+                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="upload-attachment">
+                                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                            <path d="M12 16V4M7 9l5-5 5 5"/>
+                                            <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>
+                                        </svg>
+                                        <span>上传附件</span>
+                                    </button>
+                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="upload-folder">
+                                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                            <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                            <path d="M12 10v6M9 13h6"/>
+                                        </svg>
+                                        <span>上传文件夹</span>
+                                    </button>
+                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="enable-plan-mode">
+                                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                            <path d="M9 6h11M9 12h11M9 18h11"/>
+                                            <path d="M4 6h.01M4 12h.01M4 18h.01" stroke-width="3" stroke-linecap="round"/>
+                                        </svg>
+                                        <span>计划模式</span>
+                                    </button>
+                                </div>
+                            </div>
                             <input
                                 id="attachmentInput"
                                 class="visually-hidden-file-input"
@@ -316,8 +412,23 @@
                                     <path d="M6 9l6 6 6-6"/>
                                 </svg>
                             </button>
+                            <div class="plan-mode-pill" id="planModePill" aria-label="计划模式已开启" hidden>
+                                <button class="plan-mode-close" id="planModeToggle" type="button" aria-label="关闭计划模式" title="关闭计划模式">
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true">
+                                        <path d="M7 7l10 10M17 7 7 17"/>
+                                    </svg>
+                                </button>
+                                <span class="plan-mode-pill-label">计划</span>
+                            </div>
                         </div>
                         <div class="input-tools-right">
+                            <button class="btn-voice" id="voiceModeButton" type="button" title="语音对话" aria-label="打开语音对话模式" aria-describedby="voiceModeHint" aria-pressed="false">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                                    <rect x="9" y="3" width="6" height="11" rx="3"/>
+                                    <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/>
+                                </svg>
+                            </button>
+                            <span class="voice-mode-button-hint" id="voiceModeHint" role="status" aria-live="polite" hidden></span>
                             <button class="model-badge" id="modelBadge" type="button" title="当前模型">
                                 <span id="modelName">模型</span>
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -339,6 +450,46 @@
                 </div>
             </div>
         </main>
+        <section class="voice-mode-overlay" id="voiceModeOverlay" aria-hidden="true" aria-labelledby="voiceModeTitle" hidden>
+            <div class="voice-mode-backdrop"></div>
+            <div class="voice-mode-panel" role="dialog" aria-modal="true">
+                <div class="voice-mode-copy">
+                    <span class="voice-mode-kicker">VOICE CONVERSATION</span>
+                    <h2 id="voiceModeTitle">语音对话</h2>
+                    <p id="voiceModeStatus" role="status" aria-live="polite">按住空格键开始说话</p>
+                </div>
+                <button class="voice-orb" id="voiceHoldButton" type="button" aria-label="按住说话">
+                    <canvas class="voice-strands-canvas" id="voiceStrandsCanvas" aria-hidden="true"></canvas>
+                    <span class="voice-orb-glow"></span>
+                </button>
+                <p class="voice-transcript" id="voiceTranscript" aria-live="polite">我会把识别到的内容显示在这里</p>
+                <div class="voice-mode-hint"><kbd>Space</kbd><span>按住说话，松开发送</span></div>
+            </div>
+        </section>
+        <aside class="change-review-panel" id="changeReviewPanel" aria-hidden="true" aria-labelledby="changeReviewTitle">
+            <div class="change-review-resize-handle" id="changeReviewResizeHandle" role="separator" aria-label="调整审核栏宽度" aria-orientation="vertical" aria-valuemin="440" aria-valuemax="900" aria-valuenow="700" tabindex="0"></div>
+            <header class="change-review-toolbar">
+                <div class="change-review-heading">
+                    <strong id="changeReviewTitle">审核</strong>
+                    <span id="changeReviewTotals">+0 -0</span>
+                </div>
+                <button class="change-review-close" id="changeReviewClose" type="button" aria-label="关闭审核" title="关闭审核">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                        <path d="M6 6l12 12M18 6 6 18"/>
+                    </svg>
+                </button>
+            </header>
+            <div class="change-review-content">
+                <section class="change-review-editor" aria-label="代码差异">
+                    <div class="change-review-file-header" id="changeReviewFileHeader"></div>
+                    <div class="change-review-diff" id="changeReviewDiff" tabindex="0"></div>
+                </section>
+                <nav class="change-review-files" aria-label="修改的文件">
+                    <div class="change-review-files-label">修改的文件</div>
+                    <div class="change-review-file-list" id="changeReviewFileList"></div>
+                </nav>
+            </div>
+        </aside>
     </div>
     <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="关闭工作台导航"></button>
 
@@ -471,24 +622,12 @@
                     <input type="number" class="settings-input" id="settingMaxTokens" placeholder="30000" min="1000">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label" for="settingCompressAt">记忆压缩阈值 <span class="settings-optional">（默认 25000，可独立设置）</span></label>
-                    <input type="number" class="settings-input" id="settingCompressAt" placeholder="25000" min="1000">
+                    <label class="settings-label" for="settingAutoCompactPercent">自动压缩阈值 <span class="settings-optional">（上下文占用百分比，默认 85%）</span></label>
+                    <input type="number" class="settings-input" id="settingAutoCompactPercent" placeholder="85" min="1" max="100">
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 3）</span></label>
                     <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="3" min="0" max="10">
-                </div>
-                <div class="settings-divider"></div>
-                <div class="settings-section-label">回答显示</div>
-                <div class="settings-group settings-switch-row">
-                    <span class="settings-switch-copy">
-                        <strong>显示知识附录</strong>
-                        <small>在回答结尾显示本轮命中的知识库片段</small>
-                    </span>
-                    <label class="settings-switch" for="settingShowKnowledgeAppendix">
-                        <input type="checkbox" id="settingShowKnowledgeAppendix">
-                        <span class="settings-switch-track" aria-hidden="true"></span>
-                    </label>
                 </div>
             </div>
             <div class="settings-modal-footer">
@@ -515,6 +654,40 @@
             <div class="custom-dialog-footer">
                 <button class="btn-cancel" onclick="closeInputDialog()">取消</button>
                 <button class="btn-save" onclick="confirmInputDialog()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project Dialog -->
+    <div class="custom-dialog" id="projectDialog" aria-hidden="true">
+        <div class="custom-dialog-content project-dialog-content">
+            <div class="custom-dialog-header">
+                <span id="projectDialogTitle">添加项目</span>
+                <button class="btn-icon" id="projectDialogClose" type="button" aria-label="关闭项目对话框">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="custom-dialog-body project-dialog-body">
+                <label class="project-field">
+                    <span>项目名称</span>
+                    <input type="text" id="projectNameInput" class="settings-input" placeholder="例如 JCodex">
+                </label>
+                <label class="project-field">
+                    <span>本地目录</span>
+                    <span class="project-path-row">
+                        <input type="text" id="projectPathInput" class="settings-input" placeholder="/Users/name/Desktop/my-project">
+                        <button class="btn-small" id="projectBrowseButton" type="button">选择目录</button>
+                    </span>
+                    <small>绑定现有目录，不会复制或删除其中的代码。</small>
+                </label>
+                <label class="project-field">
+                    <span>项目长期说明（可选）</span>
+                    <textarea id="projectInstructionsInput" class="settings-input project-instructions-input" rows="5" placeholder="例如：优先使用 pytest；提交前运行 ruff；保持 Python 3.11 兼容。"></textarea>
+                </label>
+            </div>
+            <div class="custom-dialog-footer">
+                <button class="btn-cancel" id="projectDialogCancel" type="button">取消</button>
+                <button class="btn-save" id="projectDialogSave" type="button">添加并新建任务</button>
             </div>
         </div>
     </div>
@@ -574,7 +747,6 @@
             <div class="settings-modal-footer">
                 <button class="btn-cancel" onclick="closeDataModal()">关闭</button>
                 <button class="btn-cancel" onclick="clearAllData()">清空数据</button>
-                <button class="btn-save" id="extractPreferencesButton" onclick="extractPreferences(this)">AI 提取偏好</button>
                 <button class="btn-save" onclick="refreshDataStats()">刷新</button>
             </div>
         </div>
@@ -755,6 +927,6 @@
 
     <script src="/eel.js"></script>
     <script src="vendor/katex/katex.min.js"></script>
-    <script src="app.js?v=20260713-32"></script>
+    <script src="app.js?v=20260718-49"></script>
 </body>
 </html>

@@ -6,7 +6,7 @@ The following tools are available for you to use. Each tool has a specific purpo
 
 ### File Operations
 
-- **Read**: Read a file or directory from the local filesystem. Returns up to 2000 lines by default with line numbers. Use offset parameter to read specific sections.
+- **Read**: Read a file or directory from the local filesystem. Returns at most 1000 lines per call with sparse line-number anchors. For large files, use grep first, then read a focused offset and limit range.
 - **Glob**: Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts". Returns matching file paths sorted by modification time.
 - **Grep**: Fast content search using regular expressions. Supports full regex syntax. Returns file paths and line numbers with at least one match.
 
