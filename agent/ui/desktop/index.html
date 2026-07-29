@@ -6,7 +6,7 @@
     <title>JCodex</title>
     <link rel="icon" type="image/svg+xml" href="assets/kylin-agent-mark-light.svg" id="appFavicon">
     <link rel="stylesheet" href="vendor/katex/katex.min.css">
-    <link rel="stylesheet" href="styles.css?v=20260720-45">
+    <link rel="stylesheet" href="styles.css?v=20260728-65">
 </head>
 <body class="theme-light">
     <a class="skip-link" href="#messageInput">跳转到输入框</a>
@@ -17,6 +17,11 @@
                     <img class="logo-icon theme-asset-logo" src="assets/kylin-agent-mark-light.svg" alt="">
                     <span class="logo-text">JCodex</span>
                 </div>
+                <button class="sidebar-collapse-button" id="sidebarCollapseButton" type="button" aria-label="收起工作台导航" aria-expanded="true" title="收起工作台导航">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <path d="m15 18-6-6 6-6"/>
+                    </svg>
+                </button>
             </div>
 
             <div class="sidebar-workbench">
@@ -269,6 +274,12 @@
                         </div>
                         <span class="token-text" id="tokenText">0/30k</span>
                     </button>
+                    <button class="btn-icon split-task-button" id="splitTaskButton" type="button" title="分屏打开子任务" aria-label="分屏打开子任务">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                            <rect x="3.5" y="4" width="17" height="16" rx="2"/>
+                            <path d="M12 4v16M15.5 9.5v5M13 12h5"/>
+                        </svg>
+                    </button>
                     <button class="btn-icon" id="themeToggle" title="切换主题" aria-label="切换明暗主题">
                         <svg class="theme-icon theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -393,6 +404,16 @@
                                         </svg>
                                         <span>计划模式</span>
                                     </button>
+                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="enable-multi-agent-mode">
+                                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                                            <circle cx="7" cy="7" r="2.4"/>
+                                            <circle cx="17" cy="7" r="2.4"/>
+                                            <circle cx="7" cy="17" r="2.4"/>
+                                            <circle cx="17" cy="17" r="2.4"/>
+                                            <path d="M9.4 7h5.2M7 9.4v5.2M17 9.4v5.2M9.4 17h5.2"/>
+                                        </svg>
+                                        <span>多智能体协作</span>
+                                    </button>
                                 </div>
                             </div>
                             <input
@@ -419,6 +440,14 @@
                                     </svg>
                                 </button>
                                 <span class="plan-mode-pill-label">计划</span>
+                            </div>
+                            <div class="plan-mode-pill multi-agent-mode-pill" id="multiAgentModePill" aria-label="多智能体协作已开启" hidden>
+                                <button class="plan-mode-close" id="multiAgentModeToggle" type="button" aria-label="关闭多智能体协作" title="关闭多智能体协作">
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true">
+                                        <path d="M7 7l10 10M17 7 7 17"/>
+                                    </svg>
+                                </button>
+                                <span class="plan-mode-pill-label">多智能体</span>
                             </div>
                         </div>
                         <div class="input-tools-right">
@@ -450,6 +479,19 @@
                 </div>
             </div>
         </main>
+        <section class="split-workspace" id="splitWorkspace" aria-label="分屏子任务" hidden>
+            <div class="split-resize-handle" id="splitResizeHandle" role="separator" aria-label="调整子任务宽度" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="1200" aria-valuenow="0" tabindex="0"></div>
+            <div class="split-pane-toolbar">
+                <span>子任务</span>
+                <button class="btn-icon split-pane-collapse" id="splitTaskCollapse" type="button" title="收起子任务侧栏" aria-label="收起子任务侧栏">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 18 6-6-6-6"/><path d="M19 5v14"/></svg>
+                </button>
+                <button class="btn-icon split-pane-close" id="splitTaskClose" type="button" title="删除子任务" aria-label="删除子任务">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+                </button>
+            </div>
+            <iframe class="split-task-frame" id="splitTaskFrame" title="JCodex 子任务" loading="lazy"></iframe>
+        </section>
         <section class="voice-mode-overlay" id="voiceModeOverlay" aria-hidden="true" aria-labelledby="voiceModeTitle" hidden>
             <div class="voice-mode-backdrop"></div>
             <div class="voice-mode-panel" role="dialog" aria-modal="true">
@@ -466,6 +508,71 @@
                 <div class="voice-mode-hint"><kbd>Space</kbd><span>按住说话，松开发送</span></div>
             </div>
         </section>
+        <aside class="agent-detail-panel" id="agentDetailPanel" aria-hidden="true" aria-labelledby="agentDetailPanelTitle">
+            <div class="agent-detail-resize-handle" id="agentDetailResizeHandle" role="separator" aria-label="调整子智能体侧栏宽度" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="760" aria-valuenow="420" tabindex="0"></div>
+            <header class="agent-detail-toolbar">
+                <div class="agent-detail-heading">
+                    <span class="agent-network-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                    <div>
+                        <span>多智能体协作</span>
+                        <strong id="agentDetailPanelTitle">子智能体</strong>
+                    </div>
+                </div>
+                <button class="agent-detail-close" id="agentDetailClose" type="button" aria-label="关闭子智能体详情" title="关闭子智能体详情">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                        <path d="M6 6l12 12M18 6 6 18"/>
+                    </svg>
+                </button>
+            </header>
+            <div class="agent-detail-scroll" id="agentDetailScroll">
+                <section class="agent-detail-profile" aria-labelledby="agentDetailName">
+                    <div class="agent-detail-badges">
+                        <span class="agent-detail-status" id="agentDetailStatus">等待开始</span>
+                        <span class="agent-detail-access" id="agentDetailAccess">隔离上下文</span>
+                    </div>
+                    <h2 id="agentDetailName">选择一个子智能体</h2>
+                    <p id="agentDetailRole">点击主界面中的智能体组件查看公开工作内容。</p>
+                </section>
+                <section class="agent-detail-section">
+                    <h3>负责的任务</h3>
+                    <p class="agent-detail-task" id="agentDetailTask">尚未选择子智能体</p>
+                </section>
+                <section class="agent-detail-section agent-context-section">
+                    <div class="agent-detail-section-title">
+                        <h3>上下文边界</h3>
+                        <span>已隔离</span>
+                    </div>
+                    <p class="agent-context-note">仅接收主智能体分配的任务与必要项目资料，不继承主对话、兄弟智能体上下文或任何私有思考。</p>
+                    <div class="agent-context-scope" id="agentDetailContextScope"></div>
+                </section>
+                <section class="agent-detail-section agent-collaboration-section" aria-labelledby="agentCollaborationTitle">
+                    <div class="agent-detail-section-title">
+                        <h3 id="agentCollaborationTitle">协作黑板</h3>
+                        <span id="agentCollaborationCount">0 项</span>
+                    </div>
+                    <div class="agent-collaboration-list" id="agentCollaborationList">
+                        <p class="agent-activity-empty">暂无定向消息、交接或共享工件</p>
+                    </div>
+                </section>
+                <section class="agent-detail-section agent-activity-section">
+                    <div class="agent-detail-section-title">
+                    <h3>工作输出</h3>
+                        <span id="agentDetailActivityCount">0 条</span>
+                    </div>
+                    <div class="agent-activity-list" id="agentActivityList">
+                        <p class="agent-activity-empty">等待子智能体开始输出</p>
+                    </div>
+                </section>
+                <section class="agent-detail-section agent-result-section" id="agentResultSection" hidden>
+                    <h3>交付结果</h3>
+                    <div class="agent-result-content markdown-body" id="agentDetailResult"></div>
+                </section>
+                <section class="agent-detail-section agent-error-section" id="agentErrorSection" hidden>
+                    <h3>异常说明</h3>
+                    <p id="agentDetailError"></p>
+                </section>
+            </div>
+        </aside>
         <aside class="change-review-panel" id="changeReviewPanel" aria-hidden="true" aria-labelledby="changeReviewTitle">
             <div class="change-review-resize-handle" id="changeReviewResizeHandle" role="separator" aria-label="调整审核栏宽度" aria-orientation="vertical" aria-valuemin="440" aria-valuemax="900" aria-valuenow="700" tabindex="0"></div>
             <header class="change-review-toolbar">
@@ -614,20 +721,20 @@
                 </div>
                 <div class="settings-divider"></div>
                 <div class="settings-group">
-                    <label class="settings-label" for="settingMaxSteps">最大步骤 <span class="settings-optional">（默认 20）</span></label>
-                    <input type="number" class="settings-input" id="settingMaxSteps" placeholder="20" min="1" max="50">
+                    <label class="settings-label" for="settingMaxSteps">最大步骤 <span class="settings-optional">（默认 100）</span></label>
+                    <input type="number" class="settings-input" id="settingMaxSteps" placeholder="100" min="1" max="200">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label" for="settingMaxTokens">单次回答最大 Token <span class="settings-optional">（默认 30000）</span></label>
-                    <input type="number" class="settings-input" id="settingMaxTokens" placeholder="30000" min="1000">
+                    <label class="settings-label" for="settingMaxTokens">单次回答最大 Token <span class="settings-optional">（默认 50000）</span></label>
+                    <input type="number" class="settings-input" id="settingMaxTokens" placeholder="50000" min="1000">
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingAutoCompactPercent">自动压缩阈值 <span class="settings-optional">（上下文占用百分比，默认 85%）</span></label>
                     <input type="number" class="settings-input" id="settingAutoCompactPercent" placeholder="85" min="1" max="100">
                 </div>
                 <div class="settings-group">
-                    <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 3）</span></label>
-                    <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="3" min="0" max="10">
+                    <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 8）</span></label>
+                    <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="8" min="0" max="100">
                 </div>
             </div>
             <div class="settings-modal-footer">
@@ -927,6 +1034,6 @@
 
     <script src="/eel.js"></script>
     <script src="vendor/katex/katex.min.js"></script>
-    <script src="app.js?v=20260718-49"></script>
+    <script src="app.js?v=20260728-68"></script>
 </body>
 </html>

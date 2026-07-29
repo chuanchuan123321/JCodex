@@ -83,7 +83,7 @@ class AIEngine:
         self.api_base_url = os.getenv("API_BASE_URL", "https://yunwu.ai")
         self.api_key = os.getenv("API_KEY")
         self.model = os.getenv("API_MODEL", "gpt-4")
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
         self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
 
         self.api_base_url = self.normalize_api_base_url(self.api_base_url)

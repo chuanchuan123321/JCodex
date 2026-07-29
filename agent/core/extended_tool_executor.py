@@ -29,11 +29,35 @@ from agent.tools.websearch import execute_websearch, get_websearch_tool_definiti
 from agent.tools.codesearch import execute_codesearch, get_codesearch_tool_definition
 from agent.tools.preview import PreviewManager
 from agent.tools.plan import PlanTool
+from agent.core.multi_agent import MULTI_AGENT_TOOL_NAMES
 from agent.core.tool_result import ToolExecutionResult
 
 
 MAX_TASK_IMAGE_BYTES = 12 * 1024 * 1024
 _TASK_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+# A scoped child may use these file tools only when every mutation target stays
+# beneath one of its coordinator-assigned roots. Each inner tuple represents
+# alternative parameter spellings for one required target.
+_SCOPED_MUTATION_TARGETS = {
+    "write": (("path",),),
+    "file_write": (("path",),),
+    "create_file": (("path",),),
+    "edit": (("filePath", "file_path", "path"),),
+    "search_replace": (("filePath", "file_path", "path"),),
+    "file_delete": (("path",),),
+    "dir_create": (("path",),),
+    "copy_file": (("destination",),),
+    "move_file": (("source",), ("destination",)),
+    "generate_pdf": (("output_path",),),
+}
+
+# Shell commands cannot be constrained reliably with path preflight checks: a
+# command can write through redirection, child processes, scripts, or utilities.
+_SCOPED_COMMAND_TOOLS = frozenset(
+    {"bash", "shell", "run_terminal_cmd", "monitor"}
+)
+_MUTATION_SCOPE_UNSET = object()
 
 
 def _detect_supported_image_mime(content: bytes) -> Optional[str]:
@@ -527,6 +551,7 @@ class ExtendedToolExecutor:
                 }
             )
         tools.extend(self._grok_compatible_tool_definitions())
+        tools.extend(self._multi_agent_tool_definitions())
         return tools
 
     def _grok_compatible_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -540,10 +565,6 @@ class ExtendedToolExecutor:
             "web_fetch": (
                 "read_url",
                 "Fetch a specific public URL and return its content as markdown or text.",
-            ),
-            "ask_user_question": (
-                "question",
-                "Pause and ask one or more selectable questions when user input is required.",
             ),
         }
         by_name = {
@@ -890,6 +911,203 @@ class ExtendedToolExecutor:
             },
         }
 
+    @staticmethod
+    def _multi_agent_tool_definitions() -> List[Dict[str, Any]]:
+        """Return tools dispatched by the active desktop collaboration runtime."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "spawn_agent",
+                    "description": (
+                        "Create one isolated child agent for a concrete independent "
+                        "subtask. Give it a short visible name and role. The child "
+                        "receives only the explicit task and context supplied here."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Short name displayed in the collaboration UI",
+                            },
+                            "role": {
+                                "type": "string",
+                                "description": "The child's specialization and responsibility",
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "One bounded deliverable for this child",
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Only the background and constraints this child needs",
+                            },
+                            "write_access": {
+                                "type": "boolean",
+                                "description": (
+                                    "Set true for an implementation child that must "
+                                    "create or modify files. Keep false for research "
+                                    "or review-only work. Requires non-overlapping "
+                                    "write_paths."
+                                ),
+                            },
+                            "write_paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Required when write_access is true. Use explicit "
+                                    "project-relative files or directories owned only by "
+                                    "this child, such as src/api/ or tests/. The child "
+                                    "may modify only these paths. Directory ownership "
+                                    "is recursive; do not append glob markers such as "
+                                    "* or **."
+                                ),
+                            },
+                            "workdir": {
+                                "type": "string",
+                                "description": (
+                                    "Working directory used to resolve relative "
+                                    "write_paths and child file-tool paths. Set this "
+                                    "for generated projects outside the active project, "
+                                    "for example workspace/output/my-app. The "
+                                    "coordinator creates this directory before the "
+                                    "child starts."
+                                ),
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Existing child-agent IDs that must finish before this task starts",
+                            },
+                        },
+                        "required": ["name", "role", "task"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_agent_message",
+                    "description": (
+                        "Send a concise follow-up or correction to one running child agent."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_id": {"type": "string"},
+                            "message": {"type": "string"},
+                            "kind": {
+                                "type": "string",
+                                "enum": ["message", "question", "decision", "handoff", "blocker"],
+                                "description": "Purpose of this concise collaboration message",
+                            },
+                            "references": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Relevant paths, artifact IDs, or interface names",
+                            },
+                        },
+                        "required": ["agent_id", "message"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "publish_agent_artifact",
+                    "description": (
+                        "Publish a concise, reusable implementation handoff to the "
+                        "team blackboard. This shares only the stated summary and "
+                        "references, never private reasoning or full history."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "recipient_agent_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Only recipients that need an immediate notification",
+                            },
+                        },
+                        "required": ["title", "summary"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_agent_collaboration",
+                    "description": "Read the bounded public team blackboard: messages, handoffs, artifacts, dependencies, and file ownership.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "wait_agents",
+                    "description": (
+                        "Wait for selected child agents and return the latest complete "
+                        "team snapshot. Omit agent_ids to wait for every child."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "timeout_ms": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 600000,
+                                "description": "Maximum wait in milliseconds",
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_agents",
+                    "description": "Return the current complete child-agent team snapshot.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "cancel_agent",
+                    "description": "Request cooperative cancellation of one child agent.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"agent_id": {"type": "string"}},
+                        "required": ["agent_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+
     def execute(
         self,
         tool_call: Dict[str, Any],
@@ -900,6 +1118,13 @@ class ExtendedToolExecutor:
         """Execute a tool call"""
         tool_name = tool_call.get("tool")
         params = tool_call.get("params", {})
+
+        scope_error = self._mutation_scope_error(tool_name, params, runtime)
+        if scope_error:
+            return scope_error
+
+        if tool_name in MULTI_AGENT_TOOL_NAMES:
+            return self._execute_multi_agent_tool(tool_name, params, runtime)
 
         if tool_name not in self.tools:
             return f"Error: Unknown tool '{tool_name}'"
@@ -950,6 +1175,8 @@ class ExtendedToolExecutor:
                 )
             if tool_name in {"bash", "shell"}:
                 return self.execute_shell(params, runtime=runtime)
+            if tool_name == "use_tool":
+                return self.execute_use_tool(params, runtime=runtime)
             if tool_name in {"read", "file_read"}:
                 return self.execute_file_read(
                     params,
@@ -972,6 +1199,137 @@ class ExtendedToolExecutor:
             return result
         except Exception as e:
             return f"Error executing {tool_name}: {str(e)}"
+
+    def _mutation_scope_error(
+        self,
+        tool_name: object,
+        params: object,
+        runtime: Optional[Dict[str, Any]],
+    ) -> str:
+        """Reject mutations that escape a child agent's assigned write roots.
+
+        Root task executors do not define a mutation scope and retain their
+        existing behavior. Desktop child executors currently persist the scope
+        on the executor instance, while other callers may provide the same
+        policy in the per-call runtime.
+        """
+        raw_roots: object = _MUTATION_SCOPE_UNSET
+        if isinstance(runtime, dict) and "mutation_scope_roots" in runtime:
+            raw_roots = runtime["mutation_scope_roots"]
+        elif hasattr(self, "mutation_scope_roots"):
+            raw_roots = getattr(self, "mutation_scope_roots")
+        if raw_roots is _MUTATION_SCOPE_UNSET:
+            return ""
+
+        normalized_name = str(tool_name or "").strip()
+        if normalized_name in _SCOPED_COMMAND_TOOLS:
+            return (
+                "Error: command execution is unavailable while this agent has "
+                "restricted write paths"
+            )
+        if normalized_name == "project_preview" and isinstance(params, dict):
+            if str(params.get("action", "")).strip().lower() == "start":
+                return (
+                    "Error: starting a project preview is unavailable while this "
+                    "agent has restricted write paths"
+                )
+
+        target_groups = _SCOPED_MUTATION_TARGETS.get(normalized_name)
+        if target_groups is None:
+            return ""
+
+        roots = self._normalize_mutation_scope_roots(raw_roots)
+        if not roots:
+            return "Error: this agent has no allowed write paths"
+
+        normalized_params = params if isinstance(params, dict) else {}
+        targets = []
+        for aliases in target_groups:
+            target = next(
+                (
+                    normalized_params.get(key)
+                    for key in aliases
+                    if normalized_params.get(key) not in {None, ""}
+                ),
+                None,
+            )
+            if target is not None:
+                targets.append(target)
+
+        for target in targets:
+            lexical_target, resolved_target = self._mutation_scope_paths(target)
+            if not any(
+                self._is_within_directory(lexical_target, lexical_root)
+                and self._is_within_directory(resolved_target, resolved_root)
+                for lexical_root, resolved_root in roots
+            ):
+                return (
+                    "Error: mutation target is outside this agent's allowed "
+                    f"write paths: {target}"
+                )
+        return ""
+
+    def _normalize_mutation_scope_roots(
+        self, raw_roots: object
+    ) -> tuple[tuple[Path, Path], ...]:
+        """Return distinct lexical/resolved path pairs for one write scope."""
+        if isinstance(raw_roots, (str, os.PathLike)):
+            candidates = (raw_roots,)
+        else:
+            try:
+                candidates = tuple(raw_roots)  # type: ignore[arg-type]
+            except TypeError:
+                candidates = ()
+
+        roots = []
+        seen = set()
+        for candidate in candidates:
+            if candidate in {None, ""}:
+                continue
+            candidate_path = Path(candidate)
+            while candidate_path.name in {"*", "**"}:
+                candidate_path = candidate_path.parent
+            if any(marker in str(candidate_path) for marker in ("*", "?", "[")):
+                continue
+            lexical_path, resolved_path = self._mutation_scope_paths(candidate_path)
+            pair = (lexical_path, resolved_path)
+            if pair not in seen:
+                seen.add(pair)
+                roots.append(pair)
+        return tuple(roots)
+
+    def _mutation_scope_paths(self, path: object) -> tuple[Path, Path]:
+        """Resolve one path lexically and through any existing symlinks."""
+        value = str(path).strip()
+        value = value.replace("桌面", "Desktop")
+        value = value.replace("文档", "Documents")
+        value = value.replace("下载", "Downloads")
+        candidate = Path(os.path.expanduser(value))
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+        lexical_path = Path(os.path.abspath(str(candidate)))
+        return lexical_path, candidate.resolve(strict=False)
+
+    @staticmethod
+    def _execute_multi_agent_tool(
+        tool_name: str,
+        params: Dict[str, Any],
+        runtime: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Dispatch collaboration tools only through the active graph runtime."""
+        dispatch = (runtime or {}).get("multi_agent_dispatch")
+        if not callable(dispatch):
+            return (
+                f"Error: {tool_name} is unavailable because Multi-Agent Mode "
+                "is not active"
+            )
+        try:
+            result = dispatch(tool_name, dict(params or {}))
+        except Exception as exc:
+            return f"Error executing {tool_name}: {exc}"
+        if isinstance(result, (str, ToolExecutionResult)):
+            return result
+        return json.dumps(result, ensure_ascii=False, default=str)
 
     @staticmethod
     def _plan_key(
@@ -1833,7 +2191,12 @@ class ExtendedToolExecutor:
             {"status": "complete", "tools": matches[:12]}, ensure_ascii=False
         )
 
-    def execute_use_tool(self, params: Dict[str, Any]) -> Any:
+    def execute_use_tool(
+        self,
+        params: Dict[str, Any],
+        runtime: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Invoke one tool while preserving the caller's runtime policy."""
         tool_name = str(params.get("tool_name", "")).strip()
         tool_input = params.get("tool_input", {})
         if tool_name in {"use_tool", "search_tool"}:
@@ -1842,7 +2205,9 @@ class ExtendedToolExecutor:
             return f"Error: Tool not found: {tool_name}"
         if not isinstance(tool_input, dict):
             return "Error: tool_input must be an object"
-        return self.execute({"tool": tool_name, "params": tool_input})
+        return self.execute(
+            {"tool": tool_name, "params": tool_input}, runtime=runtime
+        )
 
     @staticmethod
     def _parse_scheduler_interval(value: str) -> int:

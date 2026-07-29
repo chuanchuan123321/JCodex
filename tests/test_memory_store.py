@@ -218,6 +218,32 @@ def test_deleting_one_conversation_record_keeps_sibling_session_memory(tmp_path)
     assert memory.search("second fact", min_score=0.0)
 
 
+def test_prune_orphaned_scopes_preserves_valid_and_unknown_directories(tmp_path):
+    root = tmp_path / "memory"
+    valid_path = tmp_path / "conversations" / "valid" / "memory"
+    orphan_path = tmp_path / "conversations" / "deleted" / "memory"
+    valid = MemoryStore(root, valid_path, embedding_provider=DisabledEmbeddingProvider())
+    orphan = MemoryStore(root, orphan_path, embedding_provider=DisabledEmbeddingProvider())
+    valid.upsert_conversation_record(
+        session_id="valid-task", title="Valid", user_requests=["keep this"]
+    )
+    orphan.upsert_conversation_record(
+        session_id="old-task", title="Old", user_requests=["remove this"]
+    )
+    unknown = root / "user-owned-folder"
+    unknown.mkdir()
+    (unknown / "note.txt").write_text("keep", encoding="utf-8")
+
+    result = MemoryStore.prune_orphaned_scopes(root, [valid_path])
+
+    assert valid.workspace_dir.is_dir()
+    assert not orphan.workspace_dir.exists()
+    assert unknown.is_dir()
+    assert result["removed_scopes"] == [orphan.workspace_dir.name]
+    assert result["removed_bytes"] > 0
+    assert result["errors"] == []
+
+
 def test_flush_selects_recent_window_and_expands_to_user_boundary():
     messages = [{"role": "user", "content": "first"}]
     for index in range(12):

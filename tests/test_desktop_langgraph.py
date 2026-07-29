@@ -13,6 +13,8 @@ from langchain_core.outputs import ChatGenerationChunk
 from agent.core.langgraph_runner import LangGraphRunner
 from agent.core.memory_manager import MemoryManager
 from agent.core.conversation_store import ConversationStore
+from agent.core.memory_store import MemoryStore
+from agent.core.project_store import ProjectStore
 from agent.ui.desktop import main as desktop
 
 
@@ -368,6 +370,42 @@ def test_desktop_conversation_memory_store_is_task_scoped(monkeypatch, tmp_path)
     assert second_memory.include_global is False
 
 
+def test_desktop_memory_cleanup_preserves_tasks_projects_and_cli_scope(
+    monkeypatch, tmp_path
+) -> None:
+    conversation_store = ConversationStore(tmp_path / "workspace" / "conversations")
+    project_store = ProjectStore(tmp_path / "workspace" / "projects")
+    project_root = tmp_path / "bound-project"
+    project_root.mkdir()
+    project_store.create("Bound", str(project_root))
+    conversation_id = conversation_store.active_id()
+    conversation_scope = conversation_store.memory_dir(conversation_id)
+    memory_root = tmp_path / "workspace" / "memory"
+    task_memory = MemoryStore(memory_root, conversation_scope)
+    project_memory = MemoryStore(memory_root, project_root)
+    cli_memory = MemoryStore(memory_root, tmp_path)
+    orphan_memory = MemoryStore(memory_root, tmp_path / "deleted-task" / "memory")
+    for index, memory in enumerate(
+        (task_memory, project_memory, cli_memory, orphan_memory), 1
+    ):
+        memory.upsert_conversation_record(
+            session_id=f"scope-{index}",
+            title=f"Scope {index}",
+            user_requests=[f"memory {index}"],
+        )
+    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(desktop, "conversation_store", conversation_store)
+    monkeypatch.setattr(desktop, "project_store", project_store)
+
+    result = desktop._cleanup_orphaned_long_term_memory()
+
+    assert task_memory.workspace_dir.is_dir()
+    assert project_memory.workspace_dir.is_dir()
+    assert cli_memory.workspace_dir.is_dir()
+    assert not orphan_memory.workspace_dir.exists()
+    assert result["removed_scopes"] == [orphan_memory.workspace_dir.name]
+
+
 def test_desktop_project_memory_store_is_shared_between_project_tasks(
     monkeypatch, tmp_path
 ) -> None:
@@ -389,6 +427,131 @@ def test_desktop_project_memory_store_is_shared_between_project_tasks(
 
     assert first_memory.workspace_dir == second_memory.workspace_dir
     assert first_memory.include_global is False
+
+
+def test_desktop_split_task_long_term_store_is_isolated_for_ordinary_tasks(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(desktop, "conversation_store", store)
+
+    parent_memory = desktop._memory_store_for_conversation(store.load(parent["id"]))
+    child_memory = desktop._memory_store_for_conversation(store.load(child["id"]))
+
+    assert parent_memory.workspace_dir != child_memory.workspace_dir
+    assert parent_memory.workspace_path == store.memory_dir(parent["id"])
+    assert child_memory.workspace_path == store.memory_dir(child["id"])
+    assert store.short_term_memory_dir(parent["id"]) != store.short_term_memory_dir(
+        child["id"]
+    )
+
+
+def test_desktop_lists_primary_and_split_tasks_in_separate_views(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+    monkeypatch.setattr(desktop, "conversation_store", store)
+
+    primary = desktop.list_conversations()
+    split = desktop.list_conversations(child["id"])
+
+    assert parent["id"] in {item["id"] for item in primary["conversations"]}
+    assert child["id"] not in {item["id"] for item in primary["conversations"]}
+    assert [item["id"] for item in split["conversations"]] == [child["id"]]
+    assert split["active_id"] == child["id"]
+
+    store.set_active(parent["id"])
+    monkeypatch.setattr(desktop, "_executor_for_conversation", lambda _id: object())
+    activated = desktop.set_active_conversation(child["id"])
+    assert activated["success"] is True
+    assert store.active_id() == parent["id"]
+
+
+def test_desktop_delete_split_routes_to_exact_internal_child(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+    monkeypatch.setattr(desktop, "conversation_store", store)
+    deleted = []
+    monkeypatch.setattr(
+        desktop,
+        "delete_conversation",
+        lambda conversation_id: deleted.append(conversation_id) or {"success": True},
+    )
+
+    result = desktop.delete_split_conversation(parent["id"])
+
+    assert result["success"] is True
+    assert deleted == [child["id"]]
+
+
+def test_desktop_split_response_distinguishes_create_from_restore(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop, "_executor_for_conversation", lambda _id: object())
+
+    created = desktop.create_split_conversation(parent["id"])
+    child_id = created["conversation"]["id"]
+    child_history = store.short_term_memory_dir(child_id) / "execution_history.md"
+    child_history.write_text("keep child branch\n", encoding="utf-8")
+    store.set_split_state(parent["id"], is_open=False)
+    restored = desktop.create_split_conversation(parent["id"])
+
+    assert created["created"] is True
+    assert restored["created"] is False
+    assert restored["conversation"]["id"] == child_id
+    assert child_history.read_text(encoding="utf-8") == "keep child branch\n"
+
+
+def test_desktop_security_headers_allow_only_same_origin_split_tasks(
+    monkeypatch,
+) -> None:
+    class _Response:
+        def __init__(self) -> None:
+            self.headers = {}
+
+        def add_header(self, name, value) -> None:
+            self.headers[name] = value
+
+        def set_header(self, name, value) -> None:
+            self.headers[name] = value
+
+    original_routes = dict(desktop.eel.BOTTLE_ROUTES)
+    try:
+        monkeypatch.setattr(
+            desktop.eel,
+            "BOTTLE_ROUTES",
+            {
+                "/eel.js": (lambda: "websocket_addr += ('?page=' + page);", {}),
+                "/eel": (lambda _ws: None, {}),
+            },
+        )
+        app, _token = desktop._create_secured_eel_app(8123)
+        after_request = next(
+            callback
+            for callback in app._hooks["after_request"]
+            if callback.__name__ == "add_security_headers"
+        )
+        response = _Response()
+        monkeypatch.setattr(desktop.bottle, "response", response)
+        after_request()
+
+        assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
+        assert "frame-ancestors 'self'" in response.headers[
+            "Content-Security-Policy"
+        ]
+    finally:
+        desktop.eel.BOTTLE_ROUTES = original_routes
 
 
 def test_desktop_task_switch_discards_stale_retrieval_cache(monkeypatch, tmp_path) -> None:
@@ -724,6 +887,55 @@ def test_desktop_emits_one_persisted_modified_files_summary_at_task_end(
     assert persisted[0]["files"] == summaries[0]["files"]
     desktop._finish_execution(run, "complete")
     assert not desktop.get_next_results(conversation["id"], 901, 64)
+
+
+def test_subagent_edits_are_included_in_the_parent_task_review(
+    monkeypatch, tmp_path
+) -> None:
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *_args: ""),
+    )
+    executor.project_root = tmp_path
+    run = desktop.DesktopRunContext(
+        "subagent-review", 907, 1, executor, multi_agent_enabled=True
+    )
+    first_path = tmp_path / "src" / "first.py"
+    second_path = tmp_path / "src" / "second.py"
+    first_path.parent.mkdir()
+    first_path.write_text("old_first\n", encoding="utf-8")
+    second_path.write_text("old_second\n", encoding="utf-8")
+
+    def edit_from(agent_id, path, content):
+        publish = desktop._subagent_event_publisher(
+            lambda *_args, **_kwargs: None,
+            lambda event: desktop._track_subagent_file_mutation(run, agent_id, event),
+        )
+        # Child runners can generate matching call ids independently. The
+        # per-agent mutation scope keeps their pre-edit snapshots separate.
+        event = {
+            "tool": "edit",
+            "params": {"filePath": str(path)},
+            "tool_call_id": "child-edit-1",
+        }
+        publish({"type": "tool_start", **event})
+        path.write_text(content, encoding="utf-8")
+        publish({"type": "tool_end", "result": "Edit applied", **event})
+
+    edit_from("first", first_path, "new_first\n")
+    edit_from("second", second_path, "new_second\n")
+
+    summary = desktop._modified_files_payload(run)
+
+    assert summary is not None
+    assert summary["additions"] == 2
+    assert summary["deletions"] == 2
+    assert [file["path"] for file in summary["files"]] == [
+        "src/first.py",
+        "src/second.py",
+    ]
+    assert all(file["reviewable"] and file["hunks"] for file in summary["files"])
 
 
 def test_modified_file_totals_count_created_and_deleted_text_lines(tmp_path) -> None:
@@ -1243,6 +1455,412 @@ def test_plan_mode_prompt_requires_a_plan_only_when_enabled(
     assert "{plan_mode_instruction}" not in disabled_prompt
     assert "{runtime_mode_instruction}" not in enabled_prompt
     assert "running locally in the desktop app" in enabled_prompt
+
+
+def test_multi_agent_prompt_and_runtime_tools_are_task_scoped(
+    monkeypatch, tmp_path
+) -> None:
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+    )
+
+    enabled_prompt, _ = executor.build_system_prompt(
+        "并行检查项目", multi_agent_enabled=True
+    )
+    disabled_prompt, _ = executor.build_system_prompt(
+        "检查项目", multi_agent_enabled=False
+    )
+
+    assert "Multi-Agent Mode was explicitly selected by the user." in enabled_prompt
+    assert "isolated model history" in enabled_prompt
+    assert "do not use primary-agent tools to duplicate or replace work" in enabled_prompt
+    assert "integration, conflict resolution, and final verification" in enabled_prompt
+    assert "Do not finish while a required child" in enabled_prompt
+    assert "MUST assign one or more implementation children scoped write access" in enabled_prompt
+    assert "write_access: true" in enabled_prompt
+    assert "Do not make all children read-only" in enabled_prompt
+    assert "Project contract v1" in enabled_prompt
+    assert "single source of truth for shared state/configuration" in enabled_prompt
+    assert "change proposal" in enabled_prompt
+    assert "Multi-Agent Mode is off for this task." in disabled_prompt
+    assert "{multi_agent_mode_instruction}" not in enabled_prompt
+    assert "{multi_agent_mode_instruction}" not in disabled_prompt
+
+    collaboration_tools = desktop.ExtendedToolExecutor._multi_agent_tool_definitions()
+    monkeypatch.setattr(
+        executor,
+        "get_available_tools",
+        lambda: [_simple_tool("read"), *collaboration_tools],
+    )
+    disabled_names = {
+        tool["function"]["name"]
+        for tool in executor.get_runtime_tools(multi_agent_enabled=False)
+    }
+    enabled_names = {
+        tool["function"]["name"]
+        for tool in executor.get_runtime_tools(multi_agent_enabled=True)
+    }
+
+    assert disabled_names == {"read"}
+    assert desktop._MULTI_AGENT_TOOL_NAMES.issubset(enabled_names)
+
+    _register_executor("multi-runtime", executor)
+    run = desktop._begin_execution(
+        1201,
+        "multi-runtime",
+        multi_agent_enabled=True,
+    )
+    assert run is not None
+    runtime = desktop._graph_runtime(run)
+    assert runtime["multi_agent_enabled"] is True
+    assert callable(runtime["multi_agent_dispatch"])
+    assert callable(runtime["finish_guard"])
+    assert runtime["multi_agent_dispatch"]("list_agents", {}) == {
+        "team_id": "",
+        "version": 0,
+        "status": "idle",
+        "active_count": 0,
+        "agents": [],
+    }
+
+
+def test_primary_tool_events_are_explicitly_attributed(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    conversation = store.create("primary tool attribution")
+    monkeypatch.setattr(desktop, "conversation_store", store)
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+        persist_steps=True,
+    )
+    _register_executor(conversation["id"], executor)
+    run = desktop._begin_execution(1203, conversation["id"], multi_agent_enabled=True)
+    assert run is not None
+    publish = desktop._graph_event_publisher(run)
+
+    publish(
+        {
+            "type": "tool_preparing",
+            "tool": "read",
+            "prepared_tool_call_id": "read-primary",
+        }
+    )
+    publish(
+        {
+            "type": "tool_start",
+            "tool": "read",
+            "params": {"path": "README.md"},
+            "tool_call_id": "read-primary",
+        }
+    )
+    publish(
+        {
+            "type": "tool_end",
+            "tool": "read",
+            "params": {"path": "README.md"},
+            "result": "contents",
+            "failed": False,
+            "tool_call_id": "read-primary",
+        }
+    )
+
+    events = desktop.get_next_results(conversation["id"], 1203, 64)
+    tool_events = [
+        event
+        for event in events
+        if event["type"] in {"tool_preparing", "tool_start", "tool"}
+    ]
+    assert [event["type"] for event in tool_events] == [
+        "tool_preparing",
+        "tool_start",
+        "tool",
+    ]
+    assert all(event["actor"] == "primary" for event in tool_events)
+    persisted = [
+        event
+        for event in store.load(conversation["id"])["messages"]
+        if event["type"] == "tool"
+    ]
+    assert len(persisted) == 1
+    assert persisted[0]["actor"] == "primary"
+
+
+def test_message_access_mode_is_captured_atomically_for_the_task(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    conversation_id = store.active_id()
+    assert conversation_id
+    monkeypatch.setattr(desktop, "conversation_store", store)
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+    )
+    executor.auto_allow_all_commands = False
+    executor.allow_all_commands = False
+    _register_executor(conversation_id, executor)
+
+    class _DormantThread:
+        def __init__(self, *, target, daemon=False) -> None:
+            self.target = target
+            self.daemon = daemon
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(desktop.threading, "Thread", _DormantThread)
+
+    result = desktop.send_message(
+        "delegate an implementation task",
+        message_id=1202,
+        conversation_id=conversation_id,
+        multi_agent_mode=True,
+        allow_all=True,
+    )
+
+    assert result == {"status": "processing"}
+    run = desktop._run_for(conversation_id)
+    assert run is not None
+    assert run.executor.allow_all_commands is True
+    assert desktop._graph_runtime(run)["allow_all"] is True
+
+
+def test_subagent_runtime_has_private_memory_prompt_and_tool_context(
+    monkeypatch, tmp_path
+) -> None:
+    class _Engine:
+        def clear_history(self) -> None:
+            pass
+
+    monkeypatch.setattr(desktop, "AIEngine", _Engine)
+    monkeypatch.setattr(desktop, "AIEngineChatModel", lambda engine: object())
+    monkeypatch.setattr(
+        "agent.core.data_integrator.DataIntegrator",
+        lambda **_kwargs: _DataIntegrator(),
+    )
+
+    parent = desktop.DesktopTaskExecutor()
+    parent.ai_engine = _Engine()
+    parent.tool_executor = object()
+    parent.memory_manager = MemoryManager(str(tmp_path / "parent-memory"))
+    parent.memory_store = None
+    parent.preview_manager = object()
+    parent.langgraph_checkpointer = object()
+    parent.project_root = tmp_path / "project"
+    parent.project_root.mkdir()
+    parent.conversation_id = "parent-conversation"
+    parent.current_user_request = "PUBLIC_PARENT_GOAL_71D4"
+    parent.memory_manager.append_execution_step("PRIVATE_PARENT_TRACE_8A31")
+
+    first = desktop.DesktopTaskExecutor(shared_from=parent)
+    first.initialize_subagent_runtime(
+        parent,
+        team_id="team-isolation",
+        agent_id="first-agent",
+    )
+    second = desktop.DesktopTaskExecutor(shared_from=parent)
+    second.initialize_subagent_runtime(
+        parent,
+        team_id="team-isolation",
+        agent_id="second-agent",
+    )
+    first.memory_manager.append_execution_step("FIRST_AGENT_ONLY_42B7")
+    second.memory_manager.append_execution_step("SECOND_AGENT_ONLY_99C2")
+
+    run = desktop.DesktopRunContext(
+        "parent-conversation",
+        1202,
+        1,
+        parent,
+        multi_agent_enabled=True,
+    )
+    contract = desktop._dispatch_multi_agent_tool(
+        run,
+        "publish_agent_artifact",
+        {
+            "title": "Project contract v1",
+            "summary": "CONTRACT_PACKET_5C72: config.py owns shared state and API v1.",
+            "paths": ["src/config.py"],
+        },
+    )
+    assert contract["success"] is True
+    assert run.agent_team is not None
+    claimed = run.agent_team.spawn(
+        "Contract consumer",
+        "API implementer",
+        "Use the published contract",
+        write_access=True,
+        write_paths=["src/consumer.py"],
+    )
+    system_prompt, user_message = desktop._subagent_prompt(
+        run,
+        first,
+        {
+            "agent_id": claimed["agent_id"],
+            "name": "Reviewer",
+            "role": "Read-only reviewer",
+            "task": "Inspect the API boundary",
+            "context": "Only inspect authentication code",
+        },
+        "Inspect the API boundary",
+    )
+    combined_prompt = f"{system_prompt}\n{user_message}"
+
+    assert first.ai_engine is not parent.ai_engine
+    assert first.tool_executor is not parent.tool_executor
+    assert first.tool_executor is not second.tool_executor
+    assert first.tool_loop_guard is not second.tool_loop_guard
+    assert first.memory_manager.memory_dir != parent.memory_manager.memory_dir
+    assert first.memory_manager.memory_dir != second.memory_manager.memory_dir
+    assert first.memory_manager.memory_dir == (
+        parent.memory_manager.memory_dir
+        / "agents"
+        / "team-isolation"
+        / "first-agent"
+    )
+    assert parent.memory_manager.load_execution_history() == [
+        "PRIVATE_PARENT_TRACE_8A31"
+    ]
+    assert first.memory_manager.load_execution_history() == [
+        "FIRST_AGENT_ONLY_42B7"
+    ]
+    assert second.memory_manager.load_execution_history() == [
+        "SECOND_AGENT_ONLY_99C2"
+    ]
+    assert "PUBLIC_PARENT_GOAL_71D4" in combined_prompt
+    assert "Inspect the API boundary" in combined_prompt
+    assert "Only inspect authentication code" in combined_prompt
+    assert "Project contract v1" in combined_prompt
+    assert "CONTRACT_PACKET_5C72" in combined_prompt
+    assert "Active file ownership" in combined_prompt
+    assert "src/consumer.py" in combined_prompt
+    assert "change proposal" in combined_prompt
+    assert "FIRST_AGENT_ONLY_42B7" in combined_prompt
+    assert "PRIVATE_PARENT_TRACE_8A31" not in combined_prompt
+    assert "SECOND_AGENT_ONLY_99C2" not in combined_prompt
+
+    read_only_names = {
+        tool["function"]["name"]
+        for tool in first.get_subagent_tools(write_access=False)
+    }
+    writable_names = {
+        tool["function"]["name"]
+        for tool in first.get_subagent_tools(write_access=True)
+    }
+    assert {"read", "glob", "grep"}.issubset(read_only_names)
+    assert {"edit", "write"}.isdisjoint(read_only_names)
+    assert {"edit", "write"}.issubset(writable_names)
+    assert desktop._SUBAGENT_COLLABORATION_TOOLS.issubset(writable_names)
+    assert {"spawn_agent", "wait_agents", "list_agents", "cancel_agent"}.isdisjoint(
+        writable_names
+    )
+    assert {"bash", "question", "todo_write"}.isdisjoint(writable_names)
+
+
+def test_subagent_workdir_binds_relative_writes_to_generated_project(
+    monkeypatch, tmp_path
+) -> None:
+    class _Engine:
+        def clear_history(self) -> None:
+            pass
+
+    monkeypatch.setattr(desktop, "AIEngine", _Engine)
+    monkeypatch.setattr(desktop, "AIEngineChatModel", lambda engine: object())
+    monkeypatch.setattr(
+        "agent.core.data_integrator.DataIntegrator",
+        lambda **_kwargs: _DataIntegrator(),
+    )
+
+    parent = desktop.DesktopTaskExecutor()
+    parent.ai_engine = _Engine()
+    parent.tool_executor = object()
+    parent.memory_manager = MemoryManager(str(tmp_path / "parent-memory"))
+    parent.memory_store = None
+    parent.preview_manager = object()
+    parent.project_root = tmp_path / "jcodex-root"
+    parent.project_root.mkdir()
+    parent.conversation_id = "parent-workdir"
+
+    generated_project = tmp_path / "workspace" / "output" / "ski-safari"
+    child = desktop.DesktopTaskExecutor(shared_from=parent)
+    child.initialize_subagent_runtime(
+        parent,
+        team_id="team-workdir",
+        agent_id="engine-agent",
+        write_access=True,
+        write_paths=["src/engine"],
+        workdir=str(generated_project),
+    )
+
+    inside = child.tool_executor.execute(
+        {
+            "tool": "write",
+            "params": {"path": "src/engine/core.js", "content": "export const ok = true;\n"},
+        }
+    )
+    outside = child.tool_executor.execute(
+        {
+            "tool": "write",
+            "params": {"path": "src/ui/view.js", "content": "not allowed\n"},
+        }
+    )
+
+    assert child.project_root == generated_project
+    assert "Error:" not in inside
+    assert (generated_project / "src" / "engine" / "core.js").is_file()
+    assert "outside this agent's allowed write paths" in outside
+    assert not (generated_project / "src" / "ui" / "view.js").exists()
+
+
+def test_subagent_scope_prepares_generated_project_root_before_spawn(tmp_path) -> None:
+    executor = SimpleNamespace(project_root=tmp_path / "jcodex-root")
+    executor.project_root.mkdir()
+    generated_project = executor.project_root / "workspace" / "output" / "new-app"
+
+    workdir, write_paths = desktop._prepare_subagent_write_scope(
+        executor,
+        str(generated_project),
+        ["src/engine/", "src/ui/"],
+        True,
+    )
+
+    assert workdir == generated_project
+    assert generated_project.is_dir()
+    assert write_paths == [
+        str(generated_project / "src" / "engine"),
+        str(generated_project / "src" / "ui"),
+    ]
+
+    _, prefixed_write_paths = desktop._prepare_subagent_write_scope(
+        executor,
+        str(generated_project),
+        ["workspace/output/new-app/src/ui.js", "new-app/src/game.js"],
+        True,
+    )
+    assert prefixed_write_paths == [
+        str(generated_project / "src" / "ui.js"),
+        str(generated_project / "src" / "game.js"),
+    ]
+    assert desktop._display_subagent_paths(
+        prefixed_write_paths, generated_project
+    ) == ["src/ui.js", "src/game.js"]
+
+    _, wildcard_directory_paths = desktop._prepare_subagent_write_scope(
+        executor,
+        str(generated_project),
+        ["src/world/**", "src/engine/**/*"],
+        True,
+    )
+    assert wildcard_directory_paths == [
+        str(generated_project / "src" / "world"),
+        str(generated_project / "src" / "engine"),
+    ]
 
 
 def test_voice_mode_prompt_is_scoped_to_spoken_tasks(monkeypatch, tmp_path) -> None:
@@ -1825,6 +2443,41 @@ def test_desktop_stop_allows_immediate_new_run_while_old_worker_unwinds(
     assert desktop.get_execution_status("conversation", 622)["running"] is True
 
 
+def test_desktop_stop_cascades_to_the_active_agent_team(
+    monkeypatch, tmp_path
+) -> None:
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+    )
+    _register_executor("multi-stop", executor)
+    run = desktop._begin_execution(
+        623,
+        "multi-stop",
+        multi_agent_enabled=True,
+    )
+    assert run is not None
+
+    class _Team:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def cancel_all(self) -> dict:
+            self.cancel_calls += 1
+            return {"all_terminal": False, "active_count": 1}
+
+    team = _Team()
+    run.agent_team = team
+
+    stopped = desktop.stop_execution("multi-stop", 623)
+
+    assert stopped["success"] is True
+    assert stopped["running"] is False
+    assert run.cancel_event.is_set()
+    assert team.cancel_calls == 1
+
+
 def test_desktop_suppresses_late_events_from_an_old_generation(
     monkeypatch, tmp_path
 ) -> None:
@@ -1902,6 +2555,106 @@ def test_deleting_a_completed_desktop_task_reclaims_existing_free_pages(
     assert result["success"] is True
     assert runner.prefixes == [f"{conversation['id']}:"]
     assert runner.vacuum_calls == 1
+
+
+def test_deleting_primary_desktop_task_cleans_internal_split_runtime_state(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+    monkeypatch.setattr(desktop, "conversation_store", store)
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.prefixes = []
+
+        def delete_threads_with_prefix(self, prefix):
+            self.prefixes.append(prefix)
+            return 1
+
+        def vacuum_checkpoint_store(self):
+            return True
+
+    class _PreviewManager:
+        def __init__(self) -> None:
+            self.cleared = []
+
+        def clear_conversation(self, conversation_id):
+            self.cleared.append(conversation_id)
+
+    runner = _Runner()
+    preview = _PreviewManager()
+    monkeypatch.setattr(desktop.os_agent, "preview_manager", preview)
+    monkeypatch.setattr(desktop.os_agent, "langgraph_runner", runner)
+    desktop.conversation_runs.clear()
+    desktop.conversation_executors.clear()
+    desktop.conversation_generations.clear()
+    desktop.conversation_generations[parent["id"]] = 1
+    desktop.conversation_generations[child["id"]] = 1
+    monkeypatch.setattr(desktop, "_executor_for_conversation", lambda _id: object())
+
+    result = desktop.delete_conversation(parent["id"])
+
+    assert result["success"] is True
+    assert result["deleted_conversation_ids"] == sorted([parent["id"], child["id"]])
+    assert sorted(preview.cleared) == sorted([parent["id"], child["id"]])
+    assert sorted(runner.prefixes) == sorted(
+        [f"{parent['id']}:", f"{child['id']}:"]
+    )
+    assert parent["id"] not in desktop.conversation_generations
+    assert child["id"] not in desktop.conversation_generations
+
+
+def test_initialize_ignores_deleted_base_executor_conversation(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    deleted = store.create("deleted")
+    store.set_active(deleted["id"])
+    replacement_id = store.delete(deleted["id"])["active_id"]
+    monkeypatch.setattr(desktop, "conversation_store", store)
+
+    class _BaseExecutor:
+        conversation_id = deleted["id"]
+
+        @staticmethod
+        def initialize():
+            return True, "Already initialized"
+
+    requested = []
+    monkeypatch.setattr(desktop, "os_agent", _BaseExecutor())
+    monkeypatch.setattr(
+        desktop,
+        "_executor_for_conversation",
+        lambda conversation_id: requested.append(conversation_id),
+    )
+
+    result = desktop.initialize()
+
+    assert result == (True, "Already initialized")
+    assert requested == [replacement_id]
+
+
+def test_initialize_returns_stale_split_as_normal_failure(
+    monkeypatch, tmp_path
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+    store.delete(parent["id"])
+    monkeypatch.setattr(desktop, "conversation_store", store)
+
+    class _BaseExecutor:
+        conversation_id = parent["id"]
+
+        @staticmethod
+        def initialize():
+            return True, "Already initialized"
+
+    monkeypatch.setattr(desktop, "os_agent", _BaseExecutor())
+
+    assert desktop.initialize(child["id"]) == (False, "Conversation not found")
 
 
 def test_clear_command_cleans_the_active_task_graph_checkpoints(

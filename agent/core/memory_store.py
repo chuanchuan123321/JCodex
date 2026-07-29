@@ -171,6 +171,70 @@ class MemoryStore:
         digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:8]
         return f"{slug}-{digest}"
 
+    @classmethod
+    def prune_orphaned_scopes(
+        cls,
+        root_dir: str | Path,
+        valid_workspace_paths: Iterable[str | Path],
+    ) -> dict:
+        """Remove managed scope indexes with no remaining task/project owner.
+
+        Scope directory names are derived from absolute paths and cannot be
+        reversed.  Callers therefore provide every durable path that is still
+        valid; unknown directories and symlinks are never removed.
+        """
+        root = Path(root_dir).expanduser().resolve()
+        if not root.is_dir():
+            return {
+                "removed_scopes": [],
+                "removed_bytes": 0,
+                "preserved_scopes": [],
+                "errors": [],
+            }
+        valid_names = {
+            cls._workspace_key(Path(path).expanduser().resolve())
+            for path in valid_workspace_paths
+            if str(path or "").strip()
+        }
+        removed_scopes: list[str] = []
+        preserved_scopes: list[str] = []
+        errors: list[dict[str, str]] = []
+        removed_bytes = 0
+        for candidate in sorted(root.iterdir(), key=lambda path: path.name):
+            if candidate.name in valid_names:
+                preserved_scopes.append(candidate.name)
+                continue
+            if (
+                candidate.is_symlink()
+                or not candidate.is_dir()
+                or not re.fullmatch(r".+-[0-9a-f]{8}", candidate.name)
+            ):
+                continue
+            managed_scope = (
+                (candidate / "index.sqlite").is_file()
+                or (candidate / "sessions").is_dir()
+                or (candidate / "MEMORY.md").is_file()
+            )
+            if not managed_scope:
+                continue
+            try:
+                scope_bytes = sum(
+                    path.stat().st_size
+                    for path in candidate.rglob("*")
+                    if path.is_file() and not path.is_symlink()
+                )
+                shutil.rmtree(candidate)
+                removed_scopes.append(candidate.name)
+                removed_bytes += scope_bytes
+            except OSError as exc:
+                errors.append({"scope": candidate.name, "error": str(exc)})
+        return {
+            "removed_scopes": removed_scopes,
+            "removed_bytes": removed_bytes,
+            "preserved_scopes": preserved_scopes,
+            "errors": errors,
+        }
+
     @staticmethod
     def is_greeting(text: str) -> bool:
         greetings = {

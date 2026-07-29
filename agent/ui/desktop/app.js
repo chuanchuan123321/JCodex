@@ -12,6 +12,7 @@ let currentSettingsSnapshot = null;
 let showKnowledgeAppendix = false;
 let autoAllowAll = localStorage.getItem('minibot-auto-allow-all') === 'true';
 let planModeEnabled = localStorage.getItem('minibot-plan-mode-enabled') === 'true';
+let multiAgentModeEnabled = localStorage.getItem('minibot-multi-agent-mode-enabled') === 'true';
 let refreshInFlight = false;
 let tokenRefreshInFlight = false;
 let statusRefreshInFlight = false;
@@ -75,9 +76,22 @@ let previewSyncGeneration = 0;
 let previewLastFocusedElement = null;
 let activeChangeReview = null;
 const activePlanProgress = new Map();
+const activeAgentTeams = new Map();
+let activeAgentDetail = null;
+let agentDetailScrollFrame = 0;
+const splitPaneMode = new URLSearchParams(window.location.search).get('split_child') === '1';
+const splitTaskIdFromUrl = String(
+    new URLSearchParams(window.location.search).get('split_task') || ''
+).trim();
+const SPLIT_PANE_DEFAULT_WIDTH = 560;
+const SPLIT_PANE_MIN_WIDTH = 300;
+const SPLIT_MAIN_MIN_WIDTH = 300;
+const SPLIT_PANE_WIDTH_STEP = 24;
+let splitStateGeneration = 0;
 const SIDEBAR_PANEL_STORAGE_KEY = 'minibot-sidebar-panel';
 const SIDEBAR_PANEL_NAMES = new Set(['tasks', 'files', 'memory', 'skills', 'settings']);
 const SIDEBAR_PANEL_WIDTH_STORAGE_KEY = 'minibot-sidebar-panel-width';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'minibot-sidebar-collapsed';
 const SIDEBAR_PANEL_MIN_WIDTH = 210;
 const SIDEBAR_PANEL_MAX_WIDTH = 432;
 const SIDEBAR_RAIL_WIDTH = 48;
@@ -87,6 +101,11 @@ const CHANGE_REVIEW_MIN_WIDTH = 440;
 const CHANGE_REVIEW_MAX_WIDTH = 900;
 const CHANGE_REVIEW_WIDTH_STEP = 24;
 const DOCKED_MAIN_MIN_WIDTH = 380;
+const AGENT_DETAIL_WIDTH_STORAGE_KEY = 'minibot-agent-detail-width';
+const AGENT_DETAIL_DEFAULT_WIDTH = 420;
+const AGENT_DETAIL_MIN_WIDTH = 300;
+const AGENT_DETAIL_MAX_WIDTH = 760;
+const AGENT_DETAIL_WIDTH_STEP = 24;
 const workspaceExpandedDirectories = new Set();
 const workspaceDirectoryItems = new Map();
 const workspaceDirectoryRequests = new Map();
@@ -95,6 +114,22 @@ const CHAT_BOTTOM_VIEWPORT_RATIO = 0.25;
 const STREAM_RENDER_INTERVAL_MS = 50;
 const STREAM_RENDER_MAX_INTERVAL_MS = 120;
 const VOICE_RECOGNITION_LANGUAGE = 'zh-CN';
+const AGENT_TEAM_MAX_MEMBERS = 12;
+const AGENT_TEAM_MAX_SNAPSHOTS = 64;
+const AGENT_ACTIVITY_MAX_ITEMS = 80;
+const AGENT_PUBLIC_ACTIVITY_KINDS = new Set([
+    'progress', 'tool', 'tool_event', 'stream', 'artifact', 'result', 'error', 'status', 'message', 'handoff',
+]);
+const AGENT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const AGENT_STATUS_LABELS = Object.freeze({
+    queued: '等待开始',
+    running: '正在工作',
+    waiting: '等待协作',
+    completed: '已完成',
+    failed: '执行失败',
+    cancelled: '已停止',
+});
+const QUESTION_TOOL_NAMES = new Set(['question', 'ask_user_question']);
 
 const THEME_ASSETS = {
     light: {
@@ -139,7 +174,7 @@ function resetComposerInput(input) {
     input.closest('.input-container')?.classList.remove('is-multiline');
 }
 
-function applyTheme(theme) {
+function applyTheme(theme, {syncSplitPane = true} = {}) {
     const resolvedTheme = theme === 'dark' ? 'dark' : 'light';
     document.body.classList.toggle('theme-dark', resolvedTheme === 'dark');
     document.body.classList.toggle('theme-light', resolvedTheme === 'light');
@@ -150,6 +185,43 @@ function applyTheme(theme) {
         'aria-label',
         resolvedTheme === 'dark' ? '切换到浅色主题' : '切换到深色主题'
     );
+    if (syncSplitPane) syncSplitTaskTheme(resolvedTheme);
+}
+
+function syncSplitTaskTheme(theme = getCurrentTheme()) {
+    if (splitPaneMode) return;
+    const frame = document.getElementById('splitTaskFrame');
+    if (!frame?.contentWindow) return;
+    frame.contentWindow.postMessage(
+        {type: 'jcodex-theme-change', theme: theme === 'dark' ? 'dark' : 'light'},
+        window.location.origin
+    );
+}
+
+function notifyParentAgentDetail(open) {
+    if (!splitPaneMode || window.parent === window) return;
+    window.parent.postMessage(
+        {type: 'jcodex-split-agent-detail', open: Boolean(open)},
+        window.location.origin
+    );
+}
+
+function notifyParentBrowserPreview(open) {
+    if (!splitPaneMode || window.parent === window) return;
+    window.parent.postMessage(
+        {type: 'jcodex-split-browser-preview', open: Boolean(open)},
+        window.location.origin
+    );
+}
+
+function setSplitChildAgentDetailOpen(open) {
+    if (splitPaneMode) return;
+    document.body.classList.toggle('split-child-agent-detail-open', Boolean(open));
+}
+
+function setSplitChildBrowserPreviewOpen(open) {
+    if (splitPaneMode) return;
+    document.body.classList.toggle('split-child-browser-preview-open', Boolean(open));
 }
 
 function applyThemeAssets(theme) {
@@ -1263,6 +1335,885 @@ function markPlanProgressTerminal(
     }
 }
 
+function agentTeamKey(conversationId, messageId, teamId) {
+    return `${String(conversationId || '')}:${Number(messageId || 0)}:${String(teamId || '')}`;
+}
+
+function boundedAgentPublicText(value, limit = 500) {
+    return String(value || '')
+        .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
+        .replace(/<think\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<\/?think\b[^>]*>/gi, '')
+        .replace(/\u0000/g, '')
+        .trim()
+        .slice(0, Math.max(0, Number(limit || 0)));
+}
+
+function normalizeAgentStatus(value, fallback = 'queued') {
+    const aliases = {
+        pending: 'queued',
+        in_progress: 'running',
+        active: 'running',
+        complete: 'completed',
+        success: 'completed',
+        error: 'failed',
+        stopped: 'cancelled',
+        canceled: 'cancelled',
+        cancelling: 'waiting',
+    };
+    const status = String(value || '').trim().toLowerCase();
+    const normalized = aliases[status] || status;
+    return Object.prototype.hasOwnProperty.call(AGENT_STATUS_LABELS, normalized)
+        ? normalized
+        : fallback;
+}
+
+function normalizeAgentScope(scope, limit = 8) {
+    const privateKeys = /(?:reason|analysis|chain|prompt|system|transcript|messages?|private_content)/i;
+    const entries = [];
+    const add = (value, prefix = '') => {
+        if (entries.length >= limit) return;
+        if (Array.isArray(value)) {
+            value.slice(0, limit - entries.length).forEach(item => add(item, prefix));
+            return;
+        }
+        if (value && typeof value === 'object') {
+            Object.entries(value).slice(0, limit * 2).forEach(([key, item]) => {
+                if (entries.length >= limit || privateKeys.test(key)) return;
+                const label = boundedAgentPublicText(key.replace(/[_-]+/g, ' '), 40);
+                add(item, label ? `${label}：` : prefix);
+            });
+            return;
+        }
+        const text = boundedAgentPublicText(value, 180);
+        if (!text) return;
+        entries.push(`${prefix}${text}`.slice(0, 220));
+    };
+    add(scope);
+    return entries;
+}
+
+function normalizeAgentActivities(rawActivities) {
+    if (!Array.isArray(rawActivities)) return [];
+    const bySequence = new Map();
+    rawActivities.slice(-(AGENT_ACTIVITY_MAX_ITEMS * 2)).forEach((raw, index) => {
+        if (!raw || typeof raw !== 'object') return;
+        const kind = String(raw.kind || 'progress').trim().toLowerCase();
+        if (!AGENT_PUBLIC_ACTIVITY_KINDS.has(kind)) return;
+        const fallbackSequence = index + 1;
+        const numericSequence = Number(raw.seq ?? raw.sequence);
+        const seq = Number.isFinite(numericSequence) && numericSequence >= 0
+            ? numericSequence
+            : fallbackSequence;
+        const title = boundedAgentPublicText(raw.title, 120);
+        const content = boundedAgentPublicText(raw.content, kind === 'stream' ? 20000 : 4000);
+        const metadata = raw.metadata && typeof raw.metadata === 'object'
+            ? raw.metadata
+            : {};
+        if (!title && !content) return;
+        bySequence.set(seq, {
+            seq,
+            kind,
+            title: title || '工作进展',
+            content,
+            createdAt: boundedAgentPublicText(raw.created_at || raw.timestamp, 80),
+            metadata,
+        });
+    });
+    return Array.from(bySequence.values())
+        .sort((left, right) => left.seq - right.seq)
+        .slice(-AGENT_ACTIVITY_MAX_ITEMS);
+}
+
+function normalizeAgentCollaboration(source, agentIds) {
+    const knownAgentIds = new Set(agentIds);
+    const normalizeReferences = values => (Array.isArray(values) ? values : [])
+        .map(value => boundedAgentPublicText(value, 240))
+        .filter(Boolean)
+        .slice(0, 12);
+    const artifacts = (Array.isArray(source.artifacts) ? source.artifacts : [])
+        .slice(-40)
+        .flatMap(raw => {
+            if (!raw || typeof raw !== 'object') return [];
+            const senderId = boundedAgentPublicText(raw.sender_id || raw.sender_agent_id, 80);
+            const recipientIds = (Array.isArray(raw.recipient_ids)
+                ? raw.recipient_ids
+                : raw.recipient_agent_ids || [])
+                .map(value => boundedAgentPublicText(value, 80))
+                .filter(value => knownAgentIds.has(value));
+            if (!knownAgentIds.has(senderId) && senderId !== 'primary') return [];
+            return [{
+                id: boundedAgentPublicText(raw.id, 96),
+                seq: Number(raw.seq ?? raw.sequence) || 0,
+                createdAt: boundedAgentPublicText(raw.created_at || raw.timestamp, 80),
+                senderId,
+                senderName: boundedAgentPublicText(raw.sender_name, 80),
+                title: boundedAgentPublicText(raw.title, 160),
+                content: boundedAgentPublicText(raw.summary, 4000),
+                recipientIds,
+                references: normalizeReferences(raw.paths),
+            }];
+        });
+    const events = (Array.isArray(source.collaboration_events) ? source.collaboration_events : [])
+        .slice(-120)
+        .flatMap(raw => {
+            if (!raw || typeof raw !== 'object') return [];
+            const senderId = boundedAgentPublicText(raw.sender_id || raw.sender_agent_id, 80);
+            const recipientId = boundedAgentPublicText(raw.recipient_id || raw.recipient_agent_id, 80);
+            if (!knownAgentIds.has(senderId) && !knownAgentIds.has(recipientId)) return [];
+            return [{
+                seq: Number(raw.seq ?? raw.sequence) || 0,
+                createdAt: boundedAgentPublicText(raw.created_at || raw.timestamp, 80),
+                type: boundedAgentPublicText(raw.type, 32) || 'message',
+                kind: boundedAgentPublicText(raw.kind, 32) || 'message',
+                senderId,
+                senderName: boundedAgentPublicText(raw.sender_name, 80),
+                recipientId,
+                recipientName: boundedAgentPublicText(raw.recipient_name, 80),
+                title: boundedAgentPublicText(raw.title, 160),
+                content: boundedAgentPublicText(raw.content, 4000),
+                references: normalizeReferences(raw.references),
+            }];
+        });
+    const fileClaims = (Array.isArray(source.file_claims) ? source.file_claims : [])
+        .slice(0, 40)
+        .flatMap(raw => {
+            if (!raw || typeof raw !== 'object') return [];
+            const agentId = boundedAgentPublicText(raw.agent_id, 80);
+            if (!knownAgentIds.has(agentId)) return [];
+            return [{
+                agentId,
+                agentName: boundedAgentPublicText(raw.agent_name, 80),
+                paths: normalizeReferences(raw.paths),
+                active: Boolean(raw.active),
+            }];
+        });
+    return {artifacts, events, fileClaims};
+}
+
+function deriveAgentTeamStatus(agents, requestedStatus = '') {
+    const requested = normalizeAgentStatus(requestedStatus, '');
+    if (requested) return requested;
+    if (agents.some(agent => agent.status === 'running')) return 'running';
+    if (agents.some(agent => agent.status === 'waiting')) return 'waiting';
+    if (agents.some(agent => agent.status === 'failed')) return 'failed';
+    if (agents.length && agents.every(agent => AGENT_TERMINAL_STATUSES.has(agent.status))) {
+        return agents.every(agent => agent.status === 'cancelled') ? 'cancelled' : 'completed';
+    }
+    return 'queued';
+}
+
+function normalizeAgentTeamSnapshot(
+    raw,
+    conversationId = activeConversationId,
+    messageId = 0
+) {
+    const source = raw?.team && typeof raw.team === 'object' ? raw.team : raw;
+    if (!source || !Array.isArray(source.agents)) return null;
+    const normalizedConversationId = String(
+        raw.conversation_id || conversationId || ''
+    );
+    const normalizedMessageId = Number(raw.message_id || messageId || 0);
+    const teamId = boundedAgentPublicText(
+        source.team_id || `team-${normalizedMessageId || 'current'}`,
+        80
+    );
+    if (!normalizedConversationId || !normalizedMessageId || !teamId) return null;
+
+    const agentIds = new Set();
+    const agents = source.agents.slice(0, AGENT_TEAM_MAX_MEMBERS).flatMap((agent, index) => {
+        if (!agent || typeof agent !== 'object') return [];
+        const id = boundedAgentPublicText(
+            agent.id || agent.agent_id || `agent-${index + 1}`,
+            80
+        );
+        if (!id || agentIds.has(id)) return [];
+        agentIds.add(id);
+        const name = boundedAgentPublicText(agent.name, 48) || `子智能体 ${index + 1}`;
+        return [{
+            id,
+            name,
+            role: boundedAgentPublicText(agent.role, 120) || '协作任务执行',
+            task: boundedAgentPublicText(agent.task, 1200) || '等待主智能体分配任务',
+            status: normalizeAgentStatus(agent.status),
+            currentActivity: boundedAgentPublicText(agent.current_activity, 600),
+            summary: boundedAgentPublicText(agent.summary, 2000),
+            result: boundedAgentPublicText(agent.result, 8000),
+            error: boundedAgentPublicText(agent.error, 1600),
+            startedAt: boundedAgentPublicText(agent.started_at, 80),
+            endedAt: boundedAgentPublicText(agent.ended_at || agent.completed_at, 80),
+            accessScope: normalizeAgentScope(
+                agent.access_scope || (
+                    agent.write_access
+                        ? ['可写', ...(agent.write_paths || [])]
+                        : '只读协作'
+                )
+            ),
+            contextScope: normalizeAgentScope(agent.context_scope || agent.context),
+            dependsOn: (Array.isArray(agent.depends_on) ? agent.depends_on : [])
+                .map(value => boundedAgentPublicText(value, 80))
+                .filter(Boolean)
+                .slice(0, 12),
+            activities: normalizeAgentActivities(agent.activities),
+        }];
+    });
+    if (!agents.length) return null;
+
+    const numericVersion = Number(source.version || 0);
+    return {
+        key: agentTeamKey(normalizedConversationId, normalizedMessageId, teamId),
+        conversationId: normalizedConversationId,
+        messageId: normalizedMessageId,
+        teamId,
+        version: Number.isFinite(numericVersion) ? Math.max(0, numericVersion) : 0,
+        status: deriveAgentTeamStatus(agents, source.status),
+        agents,
+        collaboration: normalizeAgentCollaboration(source, Array.from(agentIds)),
+        element: null,
+        receivedAt: Date.now(),
+    };
+}
+
+function getAgentTeamSnapshot(teamKey) {
+    return activeAgentTeams.get(String(teamKey || '')) || null;
+}
+
+function pruneAgentTeamSnapshots() {
+    if (activeAgentTeams.size <= AGENT_TEAM_MAX_SNAPSHOTS) return;
+    for (const [key, snapshot] of activeAgentTeams) {
+        if (activeAgentTeams.size <= AGENT_TEAM_MAX_SNAPSHOTS) break;
+        const selected = activeAgentDetail?.teamKey === key;
+        const visible = snapshot.element?.isConnected;
+        if (!selected && !visible && AGENT_TERMINAL_STATUSES.has(snapshot.status)) {
+            activeAgentTeams.delete(key);
+        }
+    }
+}
+
+function agentNetworkMarkMarkup() {
+    return '<span class="agent-network-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>';
+}
+
+function getAgentTeamStatusCopy(snapshot) {
+    const running = snapshot.agents.filter(agent => agent.status === 'running').length;
+    const waiting = snapshot.agents.filter(agent => agent.status === 'waiting').length;
+    const completed = snapshot.agents.filter(agent => agent.status === 'completed').length;
+    if (running) return `${running} 个正在工作`;
+    if (waiting) return `${waiting} 个等待协作`;
+    if (completed === snapshot.agents.length) return '协作已完成';
+    return AGENT_STATUS_LABELS[snapshot.status] || '等待开始';
+}
+
+function setAgentStatusClass(element, status) {
+    Object.keys(AGENT_STATUS_LABELS).forEach(candidate => {
+        element.classList.toggle(`is-${candidate}`, candidate === status);
+    });
+}
+
+function createAgentChip() {
+    const chip = document.createElement('button');
+    chip.className = 'agent-chip';
+    chip.type = 'button';
+    chip.setAttribute('role', 'listitem');
+    chip.setAttribute('aria-controls', 'agentDetailPanel');
+    chip.innerHTML = `
+        ${agentNetworkMarkMarkup()}
+        <span class="agent-chip-copy"><strong></strong></span>
+        <span class="agent-chip-status"><span aria-hidden="true"></span></span>`;
+    return chip;
+}
+
+function updateAgentChip(chip, snapshot, agent, selected) {
+    const statusLabel = AGENT_STATUS_LABELS[agent.status] || agent.status;
+    const activity = agent.currentActivity || agent.task;
+    const titleParts = [agent.role, activity].filter(Boolean);
+    chip.dataset.agentTeamKey = snapshot.key;
+    chip.dataset.agentId = agent.id;
+    chip.classList.toggle('is-selected', selected);
+    setAgentStatusClass(chip, agent.status);
+    chip.setAttribute('aria-expanded', selected ? 'true' : 'false');
+    chip.setAttribute(
+        'aria-label',
+        [agent.name, agent.role, statusLabel, activity].filter(Boolean).join('，')
+    );
+    chip.title = titleParts.join(' · ');
+    chip.querySelector('.agent-chip-copy strong').textContent = agent.name;
+    chip.querySelector('.agent-chip-status').setAttribute('aria-label', statusLabel);
+}
+
+function renderAgentTeamCard(snapshot, animate = true) {
+    if (!snapshot || snapshot.conversationId !== String(activeConversationId || '')) {
+        return null;
+    }
+    const chatMessages = document.getElementById('chatMessages');
+    if (!chatMessages) return null;
+    let card = snapshot.element?.isConnected ? snapshot.element : null;
+    const isNew = !card;
+    if (!card) {
+        card = document.createElement('section');
+        card.className = 'agent-team-card';
+        card.dataset.teamKey = snapshot.key;
+        card.dataset.teamId = snapshot.teamId;
+        card.dataset.messageId = String(snapshot.messageId);
+        const chipList = document.createElement('div');
+        chipList.className = 'agent-chip-list';
+        chipList.setAttribute('role', 'list');
+        chipList.setAttribute('aria-label', '参与协作的子智能体');
+        const status = document.createElement('span');
+        status.className = 'agent-team-card-status';
+        status.setAttribute('aria-live', 'polite');
+        card.append(chipList, status);
+        const thinking = chatMessages.querySelector('#thinking');
+        if (thinking) chatMessages.insertBefore(card, thinking);
+        else chatMessages.appendChild(card);
+        snapshot.element = card;
+    }
+    setAgentStatusClass(card, snapshot.status);
+    const selectedAgentId = activeAgentDetail?.teamKey === snapshot.key
+        ? activeAgentDetail.agentId
+        : '';
+    const chipList = card.querySelector('.agent-chip-list');
+    const existingChips = new Map(
+        Array.from(chipList.querySelectorAll('.agent-chip[data-agent-id]'))
+            .map(chip => [chip.dataset.agentId, chip])
+    );
+    const currentAgentIds = new Set(snapshot.agents.map(agent => agent.id));
+    existingChips.forEach((chip, agentId) => {
+        if (!currentAgentIds.has(agentId)) chip.remove();
+    });
+    snapshot.agents.forEach((agent, index) => {
+        const chip = existingChips.get(agent.id) || createAgentChip();
+        updateAgentChip(chip, snapshot, agent, selectedAgentId === agent.id);
+        const currentAtIndex = chipList.children[index];
+        if (currentAtIndex !== chip) {
+            chipList.insertBefore(chip, currentAtIndex || null);
+        }
+    });
+    card.querySelector('.agent-team-card-status').textContent = (
+        getAgentTeamStatusCopy(snapshot)
+    );
+    if (isNew) {
+        if (animate) requestAnimationFrame(() => card.classList.add('is-visible'));
+        else card.classList.add('is-visible');
+        if (!isRestoringConversation) followChatOutput(chatMessages);
+    } else {
+        card.classList.add('is-visible');
+    }
+    return card;
+}
+
+function updateAgentTeamSnapshot(
+    raw,
+    conversationId = activeConversationId,
+    messageId = 0,
+    {animate = true} = {}
+) {
+    const normalized = normalizeAgentTeamSnapshot(raw, conversationId, messageId);
+    if (!normalized) return null;
+    const previous = activeAgentTeams.get(normalized.key);
+    if (previous && normalized.version <= previous.version) {
+        if (
+            previous.conversationId === String(activeConversationId || '')
+            && !previous.element?.isConnected
+        ) {
+            renderAgentTeamCard(previous, false);
+        }
+        return previous;
+    }
+    normalized.element = previous?.element || null;
+    activeAgentTeams.set(normalized.key, normalized);
+    pruneAgentTeamSnapshots();
+    renderAgentTeamCard(normalized, animate);
+    if (activeAgentDetail?.teamKey === normalized.key) {
+        if (normalized.agents.some(agent => agent.id === activeAgentDetail.agentId)) {
+            renderAgentDetail(normalized, activeAgentDetail.agentId);
+        } else {
+            closeAgentDetail({restoreFocus: false});
+        }
+    }
+    return normalized;
+}
+
+function detachAgentTeamCardsForConversation(conversationId) {
+    const id = String(conversationId || '');
+    activeAgentTeams.forEach(snapshot => {
+        if (snapshot.conversationId === id) snapshot.element = null;
+    });
+}
+
+function clearConversationAgentTeams(conversationId) {
+    const id = String(conversationId || '');
+    for (const [key, snapshot] of activeAgentTeams) {
+        if (snapshot.conversationId === id) activeAgentTeams.delete(key);
+    }
+    if (activeAgentDetail) {
+        const selected = getAgentTeamSnapshot(activeAgentDetail.teamKey);
+        if (!selected || selected.conversationId === id) {
+            closeAgentDetail({restoreFocus: false});
+        }
+    }
+}
+
+function formatAgentActivityTime(value) {
+    const source = String(value || '').trim();
+    if (!source) return '';
+    const date = new Date(source);
+    if (Number.isNaN(date.getTime())) return boundedAgentPublicText(source, 24);
+    return date.toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+}
+
+function createAgentOutputMessage(host, content, {commentary = false, error = false} = {}) {
+    const message = document.createElement('div');
+    message.className = `message ai${error ? ' error' : ''}`;
+    message.innerHTML = `
+        <div class="message-avatar">A</div>
+        <div class="message-wrapper">
+            <div class="message-bubble">${renderMarkdown(content)}</div>
+        </div>`;
+    if (commentary) decorateCommentaryMessage(message);
+    host.appendChild(message);
+    message.classList.add('is-visible');
+    return message;
+}
+
+function createAgentStreamState(host, streamId) {
+    return {
+        host,
+        element: null,
+        bubble: null,
+        thinkingCard: null,
+        thinkingBody: null,
+        content: '',
+        streamId,
+        thinkingCondensed: false,
+        thinkingStartedAt: Date.now(),
+        thinkingDurationMs: null,
+        thinkingTimer: null,
+        thinkingClosed: false,
+        isCommentary: false,
+        thinkingDetectionComplete: false,
+        voiceDisabled: true,
+    };
+}
+
+function finalizeAgentStream(state, target, durationMs = null) {
+    const content = state.content || '';
+    if (target === 'discard') {
+        state.element?.remove();
+        state.thinkingCard?.remove();
+        return;
+    }
+    const {thoughts, answer} = splitThinkingContent(content);
+    if (target === 'thinking') {
+        state.element?.remove();
+        const thought = thoughts[thoughts.length - 1] || answer || content;
+        if (state.thinkingCard) {
+            state.thinkingBody.innerHTML = renderMarkdown(thought);
+            state.thinkingDurationMs = durationMs;
+            completeStreamingThinking(state);
+            condenseThinkingCard(state.thinkingCard, true);
+        } else if (thought.trim()) {
+            addThinkingCard(thought, null, false, false, true, durationMs, state.host);
+        }
+        return;
+    }
+    if (state.thinkingCard) {
+        const thought = thoughts[thoughts.length - 1] || '';
+        if (thought) state.thinkingBody.innerHTML = renderMarkdown(thought);
+        state.thinkingDurationMs = durationMs;
+        completeStreamingThinking(state);
+        condenseThinkingCard(state.thinkingCard, true);
+    }
+    const visible = answer.trim() || (thoughts.length ? '' : content.trim());
+    if (!state.element && visible) createStreamingResponse(state.streamId, state);
+    if (state.element) {
+        state.element.classList.remove('streaming-response');
+        state.bubble.innerHTML = visible ? renderMarkdown(visible) : '';
+        if (target === 'commentary') decorateCommentaryMessage(state.element);
+    }
+}
+
+function renderAgentStream(outputState, activity) {
+    const metadata = activity.metadata || {};
+    const streamId = String(metadata.stream_id || `activity-${activity.seq}`);
+    let state = outputState.streams.get(streamId);
+    if (!state) {
+        state = createAgentStreamState(outputState.host, streamId);
+        outputState.streams.set(streamId, state);
+    }
+    state.content = activity.content;
+    state.thinkingDurationMs = Number.isFinite(Number(metadata.thinking_duration_ms))
+        ? Number(metadata.thinking_duration_ms)
+        : state.thinkingDurationMs;
+    state.thinkingClosed = metadata.phase === 'end';
+    renderStreamingState(state);
+    if (metadata.phase === 'end') {
+        finalizeAgentStream(state, String(metadata.target || 'final'), state.thinkingDurationMs);
+    }
+}
+
+function renderAgentTool(outputState, activity) {
+    const metadata = activity.metadata || {};
+    const key = String(metadata.prepared_tool_call_id || metadata.tool_call_id || activity.seq);
+    const phase = String(metadata.phase || 'end');
+    let execution = outputState.tools.get(key);
+    const event = {
+        tool: String(metadata.tool || activity.title || 'Tool'),
+        params: metadata.params || {},
+        target: String(metadata.target || ''),
+        result: String(metadata.result || activity.content || ''),
+        duration_ms: Number(metadata.duration_ms || 0),
+    };
+    if (phase !== 'end') {
+        if (!execution) {
+            const element = document.createElement('div');
+            element.className = 'tool-execution tool-execution-running';
+            element.innerHTML = `
+                <div class="tool-card tool-card-running" role="status" aria-live="polite">
+                    <div class="tool-header tool-header-running">
+                        <span class="tool-progress-spinner" aria-hidden="true"><span></span></span>
+                        <span class="tool-name"></span>
+                        <span class="tool-summary tool-live-summary"></span>
+                        <span class="tool-elapsed">进行中</span>
+                    </div>
+                    <div class="tool-progress-track" aria-hidden="true"><span></span></div>
+                </div>`;
+            outputState.host.appendChild(element);
+            element.classList.add('is-visible');
+            execution = {element, event};
+            outputState.tools.set(key, execution);
+        }
+        execution.event = event;
+        execution.element.querySelector('.tool-name').textContent = event.tool;
+        execution.element.querySelector('.tool-live-summary').textContent = primaryToolSummary(
+            phase === 'preparing' ? getToolPreparingCopy(event.tool) : getToolProgressCopy(event.tool, event.params),
+            getToolTarget(event.tool, event.params, event.target)
+        );
+        return;
+    }
+    const failed = Boolean(metadata.failed) || toolResultFailed(event.result);
+    const target = getToolTarget(event.tool, event.params, event.target);
+    const element = execution?.element || document.createElement('div');
+    element.classList.remove(
+        'tool-execution-running',
+        'tool-execution-error',
+        'tool-execution-complete'
+    );
+    element.classList.add(
+        'tool-execution',
+        failed ? 'tool-execution-error' : 'tool-execution-complete'
+    );
+    element.innerHTML = `
+        <details class="tool-card">
+            <summary class="tool-header">
+                <span class="tool-status-icon" aria-hidden="true">${failed ? '!' : '✓'}</span>
+                <span class="tool-name">${escapeHtml(event.tool)}</span>
+                <span class="tool-summary">${escapeHtml(primaryToolSummary(
+                    `${failed ? '工具调用失败' : '工具调用完成'}${event.duration_ms > 0 ? ` · ${formatToolDuration(event.duration_ms)}` : ''}`,
+                    target
+                ))}</span>
+                <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </summary>
+            <div class="tool-result">${formatContent(event.result.substring(0, 1600))}</div>
+        </details>`;
+    if (!execution) {
+        outputState.host.appendChild(element);
+        element.classList.add('is-visible');
+    }
+    outputState.tools.set(key, {element, event});
+}
+
+function updateAgentActivityList(activityList, snapshot, agent) {
+    const owner = `${snapshot.key}:${agent.id}`;
+    if (activityList.dataset.agentOwner !== owner) {
+        activityList.replaceChildren();
+        activityList.dataset.agentOwner = owner;
+        activityList._agentOutputState = {
+            host: activityList,
+            streams: new Map(),
+            tools: new Map(),
+            signatures: new Map(),
+        };
+    }
+    const outputState = activityList._agentOutputState;
+    if (!agent.activities.length) {
+        if (!activityList.querySelector('.agent-activity-empty')) {
+            const empty = document.createElement('p');
+            empty.className = 'agent-activity-empty';
+            empty.textContent = '等待子智能体开始输出';
+            activityList.replaceChildren(empty);
+        }
+        return false;
+    }
+
+    activityList.querySelector('.agent-activity-empty')?.remove();
+    let changed = false;
+    agent.activities.forEach(activity => {
+        const seq = String(activity.seq);
+        const signature = JSON.stringify([
+            activity.kind,
+            activity.title,
+            activity.content,
+            activity.createdAt,
+            activity.metadata,
+        ]);
+        if (outputState.signatures.get(seq) === signature) return;
+        outputState.signatures.set(seq, signature);
+        if (activity.kind === 'stream') renderAgentStream(outputState, activity);
+        else if (activity.kind === 'tool_event') renderAgentTool(outputState, activity);
+        else if (activity.kind === 'error') {
+            createAgentOutputMessage(activityList, activity.content, {error: true});
+        } else if (activity.content) {
+            createAgentOutputMessage(activityList, activity.content, {commentary: true});
+        }
+        changed = true;
+    });
+    const hasFinalStream = agent.activities.some(activity => (
+        activity.kind === 'stream'
+        && activity.metadata?.phase === 'end'
+        && ['final', 'commentary'].includes(String(activity.metadata?.target || ''))
+    ));
+    if (agent.result && !hasFinalStream) {
+        const resultSignature = `result:${agent.result}`;
+        if (outputState.signatures.get('__result__') !== resultSignature) {
+            outputState.signatures.set('__result__', resultSignature);
+            createAgentOutputMessage(activityList, agent.result);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+function syncSelectedAgentChip() {
+    document.querySelectorAll('.agent-chip[data-agent-team-key][data-agent-id]').forEach(chip => {
+        const selected = Boolean(
+            activeAgentDetail
+            && chip.dataset.agentTeamKey === activeAgentDetail.teamKey
+            && chip.dataset.agentId === activeAgentDetail.agentId
+        );
+        chip.classList.toggle('is-selected', selected);
+        chip.setAttribute('aria-expanded', selected ? 'true' : 'false');
+    });
+}
+
+function renderAgentCollaboration(snapshot, agent) {
+    const list = document.getElementById('agentCollaborationList');
+    const count = document.getElementById('agentCollaborationCount');
+    if (!list || !count) return false;
+    const collaboration = snapshot.collaboration || {artifacts: [], events: [], fileClaims: []};
+    const entries = [
+        ...collaboration.events
+            .filter(event => event.senderId === agent.id || event.recipientId === agent.id)
+            .map(event => ({...event, entryType: 'message'})),
+        ...collaboration.artifacts
+            .filter(artifact => artifact.senderId === agent.id || artifact.recipientIds.includes(agent.id))
+            .map(artifact => ({...artifact, entryType: 'artifact'})),
+    ].sort((left, right) => (left.seq || 0) - (right.seq || 0)).slice(-24);
+    const ownClaim = collaboration.fileClaims.find(claim => claim.agentId === agent.id);
+    const signature = JSON.stringify({entries, claim: ownClaim || null, dependsOn: agent.dependsOn});
+    count.textContent = `${entries.length + (ownClaim ? 1 : 0)} 项`;
+    if (list.dataset.renderSignature === signature) return false;
+    list.replaceChildren();
+    if (agent.dependsOn.length) {
+        const dependency = document.createElement('div');
+        dependency.className = 'agent-collaboration-item is-dependency';
+        dependency.innerHTML = '<strong>等待依赖</strong>';
+        const copy = document.createElement('p');
+        copy.textContent = agent.dependsOn.join('、');
+        dependency.append(copy);
+        list.appendChild(dependency);
+    }
+    if (ownClaim?.paths.length) {
+        const claim = document.createElement('div');
+        claim.className = 'agent-collaboration-item is-claim';
+        claim.innerHTML = `<strong>${ownClaim.active ? '已占用文件范围' : '已释放文件范围'}</strong>`;
+        const copy = document.createElement('p');
+        copy.textContent = ownClaim.paths.join('、');
+        claim.append(copy);
+        list.appendChild(claim);
+    }
+    entries.forEach(entry => {
+        const item = document.createElement('div');
+        item.className = `agent-collaboration-item is-${entry.entryType}`;
+        const isArtifact = entry.entryType === 'artifact';
+        const direction = isArtifact
+            ? `${entry.senderName || '协作成员'} 发布工件`
+            : entry.senderId === agent.id
+                ? `发送给 ${entry.recipientName || '协作成员'}`
+                : `${entry.senderName || '协作成员'} 发来${entry.kind === 'handoff' ? '交接' : '消息'}`;
+        const heading = document.createElement('strong');
+        heading.textContent = isArtifact ? (entry.title || '共享工件') : direction;
+        const content = document.createElement('p');
+        content.textContent = entry.content || entry.title || '协作更新';
+        item.append(heading, content);
+        if (entry.references?.length) {
+            const references = document.createElement('span');
+            references.textContent = entry.references.join('、');
+            item.append(references);
+        }
+        list.appendChild(item);
+    });
+    if (!list.childElementCount) {
+        const empty = document.createElement('p');
+        empty.className = 'agent-activity-empty';
+        empty.textContent = '暂无定向消息、交接或共享工件';
+        list.appendChild(empty);
+    }
+    list.dataset.renderSignature = signature;
+    return true;
+}
+
+function renderAgentDetail(snapshot, agentId) {
+    const agent = snapshot?.agents.find(item => item.id === String(agentId || ''));
+    if (!snapshot || !agent) return false;
+    const scroll = document.getElementById('agentDetailScroll');
+    const previousScrollTop = Number(scroll?.scrollTop || 0);
+    const distanceFromBottom = scroll
+        ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight
+        : 0;
+    const status = document.getElementById('agentDetailStatus');
+    status.textContent = AGENT_STATUS_LABELS[agent.status] || agent.status;
+    status.className = `agent-detail-status is-${agent.status}`;
+    document.getElementById('agentDetailAccess').textContent = (
+        agent.accessScope[0] || '隔离上下文'
+    );
+    document.getElementById('agentDetailPanelTitle').textContent = agent.name;
+    document.getElementById('agentDetailName').textContent = agent.name;
+    document.getElementById('agentDetailRole').textContent = agent.currentActivity
+        ? `${agent.role} · ${agent.currentActivity}`
+        : agent.role;
+    document.getElementById('agentDetailTask').textContent = agent.task;
+
+    const contextScope = document.getElementById('agentDetailContextScope');
+    const scopeItems = [
+        ...(agent.contextScope.length
+            ? agent.contextScope.map(item => ({label: '可见上下文', value: item}))
+            : [{label: '可见上下文', value: '主智能体分配说明与必要项目资料'}]),
+        ...(agent.accessScope.length
+            ? agent.accessScope.map(item => ({label: '工具范围', value: item}))
+            : [{label: '工具范围', value: '仅使用本任务明确授权的能力'}]),
+        ...(agent.dependsOn.length
+            ? [{label: '任务依赖', value: agent.dependsOn.join('、')}]
+            : []),
+        {label: '隔离规则', value: '不共享主对话历史与兄弟智能体工作记忆'},
+    ].slice(0, 12);
+    const contextSignature = JSON.stringify(scopeItems);
+    if (contextScope.dataset.renderSignature !== contextSignature) {
+        contextScope.replaceChildren(...scopeItems.map(scopeItem => {
+            const item = document.createElement('div');
+            item.className = 'agent-context-item';
+            const label = document.createElement('span');
+            label.textContent = scopeItem.label;
+            const value = document.createElement('strong');
+            value.textContent = scopeItem.value;
+            item.append(label, value);
+            return item;
+        }));
+        contextScope.dataset.renderSignature = contextSignature;
+    }
+
+    const activityList = document.getElementById('agentActivityList');
+    const collaborationChanged = renderAgentCollaboration(snapshot, agent);
+    document.getElementById('agentDetailActivityCount').textContent = `${agent.activities.length} 条`;
+    const activityChanged = updateAgentActivityList(activityList, snapshot, agent);
+
+    const resultSection = document.getElementById('agentResultSection');
+    resultSection.hidden = true;
+    const resultChanged = false;
+    const errorSection = document.getElementById('agentErrorSection');
+    errorSection.hidden = true;
+
+    if (scroll && (activityChanged || collaborationChanged || resultChanged)) {
+        if (agentDetailScrollFrame) cancelAnimationFrame(agentDetailScrollFrame);
+        agentDetailScrollFrame = requestAnimationFrame(() => {
+            agentDetailScrollFrame = 0;
+            if (distanceFromBottom < 48) scroll.scrollTop = scroll.scrollHeight;
+            else scroll.scrollTop = previousScrollTop;
+        });
+    }
+    return true;
+}
+
+function openAgentDetail(teamKey, agentId, trigger = null) {
+    const snapshot = getAgentTeamSnapshot(teamKey);
+    if (!snapshot || !snapshot.agents.some(agent => agent.id === String(agentId || ''))) {
+        return;
+    }
+    closeChangeReview({restoreFocus: false});
+    const panel = document.getElementById('agentDetailPanel');
+    if (!panel) return;
+    const chatMessages = document.getElementById('chatMessages');
+    const distanceFromBottom = chatMessages
+        ? chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
+        : 0;
+    const previousFocus = activeAgentDetail?.lastFocus;
+    activeAgentDetail = {
+        teamKey: snapshot.key,
+        agentId: String(agentId),
+        lastFocus: previousFocus?.isConnected ? previousFocus : trigger || document.activeElement,
+    };
+    renderAgentDetail(snapshot, agentId);
+    syncSelectedAgentChip();
+    panel.removeAttribute('aria-hidden');
+    document.body.classList.add('agent-detail-open');
+    notifyParentAgentDetail(true);
+    setSidebarPanelWidth(getSavedSidebarPanelWidth(), {persist: false});
+    setAgentDetailPanelWidth(getSavedAgentDetailPanelWidth(), {persist: false});
+    requestAnimationFrame(() => panel.classList.add('is-open'));
+    restoreChatAfterReviewLayout(chatMessages, distanceFromBottom);
+}
+
+function closeAgentDetail({restoreFocus = true} = {}) {
+    const panel = document.getElementById('agentDetailPanel');
+    const chatMessages = document.getElementById('chatMessages');
+    const distanceFromBottom = chatMessages
+        ? chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
+        : 0;
+    const focusTarget = activeAgentDetail?.lastFocus;
+    if (agentDetailScrollFrame) cancelAnimationFrame(agentDetailScrollFrame);
+    agentDetailScrollFrame = 0;
+    panel?.classList.remove('is-open');
+    panel?.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('agent-detail-open');
+    notifyParentAgentDetail(false);
+    activeAgentDetail = null;
+    syncSelectedAgentChip();
+    setSidebarPanelWidth(getSavedSidebarPanelWidth(), {persist: false});
+    restoreChatAfterReviewLayout(chatMessages, distanceFromBottom);
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({preventScroll: true});
+}
+
+function handleAgentTeamClick(event) {
+    const chip = event.target.closest('.agent-chip[data-agent-team-key][data-agent-id]');
+    if (!chip) return false;
+    openAgentDetail(chip.dataset.agentTeamKey, chip.dataset.agentId, chip);
+    return true;
+}
+
+function markAgentTeamsTerminal(conversationId, messageId, status) {
+    const normalizedStatus = normalizeAgentStatus(status, 'cancelled');
+    if (!AGENT_TERMINAL_STATUSES.has(normalizedStatus)) return;
+    const id = String(conversationId || '');
+    const targetMessageId = Number(messageId || 0);
+    activeAgentTeams.forEach(snapshot => {
+        if (snapshot.conversationId !== id || snapshot.messageId !== targetMessageId) return;
+        snapshot.status = normalizedStatus;
+        snapshot.agents = snapshot.agents.map(agent => (
+            AGENT_TERMINAL_STATUSES.has(agent.status)
+                ? agent
+                : {
+                    ...agent,
+                    status: normalizedStatus,
+                    currentActivity: normalizedStatus === 'failed' ? '协作已中断' : '任务已停止',
+                }
+        ));
+        renderAgentTeamCard(snapshot, false);
+        if (activeAgentDetail?.teamKey === snapshot.key) {
+            renderAgentDetail(snapshot, activeAgentDetail.agentId);
+        }
+    });
+}
+
 function getExecutionStateText(state) {
     if (!state) return '正在执行';
     if (state.awaitingQuestion) return '等待回答';
@@ -1346,6 +2297,22 @@ function trackExecutionResult(state, result) {
     } else if (result.type === 'question_answered') {
         state.awaitingQuestion = false;
     }
+}
+
+function normalizeToolActor(result) {
+    return String(result?.actor || 'primary').trim().toLowerCase() || 'primary';
+}
+
+function isPrimaryToolEvent(result) {
+    return normalizeToolActor(result) === 'primary';
+}
+
+function primaryToolSummary(copy, target = '') {
+    return [copy, target].filter(Boolean).join(' · ');
+}
+
+function isQuestionToolName(toolName) {
+    return QUESTION_TOOL_NAMES.has(String(toolName || '').trim().toLowerCase());
 }
 
 function syncActiveConversationProcessingUI({showPlaceholder = false} = {}) {
@@ -1872,15 +2839,18 @@ function init() {
         markEelConnectionLost();
     });
     initializeUI();
+    setSidebarCollapsed(getSavedSidebarCollapsed(), {persist: false});
     initializeSidebarWidth();
     setSidebarPanel(getSavedSidebarPanel());
     initializeOSAgent();
-    refreshAllWorkspace();
-    refreshSkills();
+    if (!splitPaneMode) {
+        refreshAllWorkspace();
+        refreshSkills();
+    }
     updateTokenIndicator();
     updateEmbeddingStatus();
     setInterval(() => {
-        if (!document.hidden && canCallEel()) refreshAllWorkspace();
+        if (!splitPaneMode && !document.hidden && canCallEel()) refreshAllWorkspace();
     }, 5000);
     setInterval(() => {
         if (!document.hidden && canCallEel()) updateTokenIndicator();
@@ -1895,7 +2865,9 @@ function init() {
     }, 4000);
     setInterval(() => {
         if (!document.hidden && !refreshInFlight && canCallEel()) {
-            refreshConversations(activeConversationId).catch(error => {
+            refreshConversations(
+                splitPaneMode ? splitTaskIdFromUrl : activeConversationId
+            ).catch(error => {
                 if (handleEelConnectionError(error)) return;
                 console.error('Failed to sync task activity:', error);
             });
@@ -1905,7 +2877,36 @@ function init() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeTheme();
+    if (splitPaneMode) document.body.classList.add('split-pane-mode');
     init();
+});
+
+window.addEventListener('message', event => {
+    if (event.origin !== window.location.origin) return;
+    if (
+        splitPaneMode
+        && event.source === window.parent
+        && event.data?.type === 'jcodex-theme-change'
+    ) {
+        applyTheme(event.data.theme, {syncSplitPane: false});
+        return;
+    }
+    const splitFrame = document.getElementById('splitTaskFrame');
+    if (
+        !splitPaneMode
+        && event.source === splitFrame?.contentWindow
+        && event.data?.type === 'jcodex-split-agent-detail'
+    ) {
+        setSplitChildAgentDetailOpen(event.data.open);
+        return;
+    }
+    if (
+        !splitPaneMode
+        && event.source === splitFrame?.contentWindow
+        && event.data?.type === 'jcodex-split-browser-preview'
+    ) {
+        setSplitChildBrowserPreviewOpen(event.data.open);
+    }
 });
 
 function initializeUI() {
@@ -1918,6 +2919,7 @@ function initializeUI() {
     const tokenIndicator = document.getElementById('tokenIndicator');
     const accessToggle = document.getElementById('accessToggle');
     const planModeToggle = document.getElementById('planModeToggle');
+    const multiAgentModeToggle = document.getElementById('multiAgentModeToggle');
     const modelBadge = document.getElementById('modelBadge');
     const voiceModeButton = document.getElementById('voiceModeButton');
     const voiceHoldButton = document.getElementById('voiceHoldButton');
@@ -1929,9 +2931,15 @@ function initializeUI() {
     const clearQueueButton = document.getElementById('clearQueueButton');
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+    const sidebarCollapseButton = document.getElementById('sidebarCollapseButton');
     const sidebarResizeHandle = document.getElementById('sidebarResizeHandle');
     const newTaskButton = document.getElementById('newTaskButton');
     const newProjectButton = document.getElementById('newProjectButton');
+    const splitTaskButton = document.getElementById('splitTaskButton');
+    const splitTaskCollapse = document.getElementById('splitTaskCollapse');
+    const splitTaskClose = document.getElementById('splitTaskClose');
+    const splitResizeHandle = document.getElementById('splitResizeHandle');
+    const splitTaskFrame = document.getElementById('splitTaskFrame');
     const sidebarNav = document.querySelector('.sidebar-nav');
     const planProgress = document.getElementById('planProgress');
     const planProgressTrigger = document.getElementById('planProgressTrigger');
@@ -1942,10 +2950,12 @@ function initializeUI() {
     const voiceInputArea = document.querySelector('.main-content .input-area');
     const voiceMainContent = document.querySelector('.main-content');
     const changeReviewResizeHandle = document.getElementById('changeReviewResizeHandle');
+    const agentDetailResizeHandle = document.getElementById('agentDetailResizeHandle');
     let composerDragDepth = 0;
 
     applyAccessToggleState(autoAllowAll);
     applyPlanModeToggleState(planModeEnabled);
+    applyMultiAgentModeToggleState(multiAgentModeEnabled);
     initializeVoiceSpeechVoices();
     syncAutoAllowAll(autoAllowAll);
     updateModelBadge();
@@ -2006,6 +3016,12 @@ function initializeUI() {
     if (planModeToggle) {
         planModeToggle.addEventListener('click', () => {
             setPlanModeEnabled(false);
+            inputAddButton?.focus();
+        });
+    }
+    if (multiAgentModeToggle) {
+        multiAgentModeToggle.addEventListener('click', () => {
+            setMultiAgentModeEnabled(false);
             inputAddButton?.focus();
         });
     }
@@ -2093,6 +3109,11 @@ function initializeUI() {
         if (action === 'enable-plan-mode') {
             setPlanModeEnabled(true);
             messageInput.focus();
+            return;
+        }
+        if (action === 'enable-multi-agent-mode') {
+            setMultiAgentModeEnabled(true);
+            messageInput.focus();
         }
     });
     composerAddMenu?.addEventListener('keydown', event => {
@@ -2159,6 +3180,9 @@ function initializeUI() {
             document.querySelector('.sidebar-nav-item.is-active')?.focus();
         }
     });
+    sidebarCollapseButton?.addEventListener('click', () => {
+        setSidebarCollapsed(!isSidebarCollapsed());
+    });
     sidebarBackdrop?.addEventListener('click', closeMobileSidebar);
     const mobileSidebarQuery = window.matchMedia('(max-width: 780px)');
     const handleSidebarBreakpointChange = (event) => {
@@ -2180,8 +3204,18 @@ function initializeUI() {
     }
     initializeSidebarResizeHandle(sidebarResizeHandle, mobileSidebarQuery);
     initializeChangeReviewResizeHandle(changeReviewResizeHandle);
+    initializeAgentDetailResizeHandle(agentDetailResizeHandle);
+    initializeSplitResizeHandle(splitResizeHandle);
     window.addEventListener('resize', syncDockedLayoutWidths);
     newTaskButton?.addEventListener('click', () => createNewConversation());
+    splitTaskButton?.addEventListener('click', openSplitTask);
+    splitTaskCollapse?.addEventListener('click', closeSplitTask);
+    splitTaskClose?.addEventListener('click', deleteSplitTask);
+    splitTaskFrame?.addEventListener('load', () => {
+        setSplitChildAgentDetailOpen(false);
+        setSplitChildBrowserPreviewOpen(false);
+        syncSplitTaskTheme();
+    });
     newProjectButton?.addEventListener('click', () => openProjectDialog());
     document.getElementById('projectDialogClose')?.addEventListener('click', closeProjectDialog);
     document.getElementById('projectDialogCancel')?.addEventListener('click', closeProjectDialog);
@@ -2231,6 +3265,7 @@ function initializeUI() {
         items[nextIndex].focus();
         setSidebarPanel(items[nextIndex].dataset.sidebarPanel, {focus: false});
     });
+    chatMessages?.addEventListener('click', handleAgentTeamClick);
     chatMessages?.addEventListener('click', handlePreviewLinkClick);
     chatMessages?.addEventListener('scroll', () => {
         updateChatAutoFollow(chatMessages);
@@ -2240,6 +3275,9 @@ function initializeUI() {
     }, {passive: true});
     document.getElementById('changeReviewClose')?.addEventListener('click', () => {
         closeChangeReview();
+    });
+    document.getElementById('agentDetailClose')?.addEventListener('click', () => {
+        closeAgentDetail();
     });
     document.getElementById('changeReviewFileList')?.addEventListener('click', event => {
         const file = event.target.closest('[data-review-file-index]');
@@ -2317,6 +3355,14 @@ function initializeUI() {
             pendingStopRequests.set(conversationId, request);
             const result = await request;
             if (!result?.success) throw new Error(result?.error || '停止失败');
+            if (result?.agent_team) {
+                updateAgentTeamSnapshot(
+                    result.agent_team,
+                    conversationId,
+                    messageId,
+                    {animate: false}
+                );
+            }
             const modifiedFiles = result?.modified_files;
             if (
                 modifiedFiles
@@ -2332,6 +3378,7 @@ function initializeUI() {
             markPlanProgressTerminal(
                 conversationId, messageId, 'stopped', '任务已停止'
             );
+            markAgentTeamsTerminal(conversationId, messageId, 'cancelled');
             showToast('已停止输出，可以继续发送消息', 'success', 1800);
             refreshConversations(activeConversationId).catch(console.error);
             dispatchNextQueuedMessage();
@@ -2394,6 +3441,10 @@ function initializeUI() {
             }
             if (activeChangeReview) {
                 closeChangeReview();
+                return;
+            }
+            if (activeAgentDetail) {
+                closeAgentDetail();
                 return;
             }
             closePlanProgress();
@@ -2502,6 +3553,48 @@ function closeMobileSidebar() {
     toggle?.setAttribute('aria-label', '打开工作台导航');
 }
 
+function getSavedSidebarCollapsed() {
+    try {
+        return localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true';
+    } catch (_error) {
+        return false;
+    }
+}
+
+function isSidebarCollapsed() {
+    return document.getElementById('sidebarShell')?.classList.contains('is-collapsed') || false;
+}
+
+function setSidebarCollapsed(collapsed, {persist = true} = {}) {
+    const next = Boolean(collapsed);
+    const sidebar = document.getElementById('sidebarShell');
+    const button = document.getElementById('sidebarCollapseButton');
+    const handle = document.getElementById('sidebarResizeHandle');
+    sidebar?.classList.toggle('is-collapsed', next);
+    button?.setAttribute('aria-expanded', next ? 'false' : 'true');
+    button?.setAttribute(
+        'aria-label',
+        next ? '展开工作台导航' : '收起工作台导航'
+    );
+    button?.setAttribute(
+        'title',
+        next ? '展开工作台导航' : '收起工作台导航'
+    );
+    if (handle) {
+        handle.tabIndex = next ? -1 : 0;
+        handle.setAttribute('aria-hidden', next ? 'true' : 'false');
+    }
+    if (persist) {
+        try {
+            localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(next));
+        } catch (_error) {
+            // The current layout remains usable when browser storage is unavailable.
+        }
+    }
+    requestAnimationFrame(syncDockedLayoutWidths);
+    return next;
+}
+
 function getStoredSidebarPanelWidth() {
     try {
         const value = Number(localStorage.getItem(SIDEBAR_PANEL_WIDTH_STORAGE_KEY) || 216);
@@ -2518,7 +3611,9 @@ function getCurrentSidebarTotalWidth() {
     const sidebar = document.getElementById('sidebarShell');
     const measuredWidth = sidebar?.getBoundingClientRect().width;
     if (Number.isFinite(measuredWidth) && measuredWidth > 0) return measuredWidth;
-    return SIDEBAR_RAIL_WIDTH + getStoredSidebarPanelWidth();
+    return isSidebarCollapsed()
+        ? SIDEBAR_RAIL_WIDTH
+        : SIDEBAR_RAIL_WIDTH + getStoredSidebarPanelWidth();
 }
 
 function isDockedReviewLayout() {
@@ -2578,17 +3673,79 @@ function setChangeReviewPanelWidth(
     return panelWidth;
 }
 
+function getAgentDetailPanelWidthLimit(sidebarWidth = getCurrentSidebarTotalWidth()) {
+    if (!isDockedReviewLayout()) return AGENT_DETAIL_MAX_WIDTH;
+    return Math.max(
+        AGENT_DETAIL_MIN_WIDTH,
+        Math.min(
+            AGENT_DETAIL_MAX_WIDTH,
+            window.innerWidth - sidebarWidth - DOCKED_MAIN_MIN_WIDTH
+        )
+    );
+}
+
+function clampAgentDetailPanelWidth(value, sidebarWidth = getCurrentSidebarTotalWidth()) {
+    const numericValue = Number(value);
+    const fallback = Math.min(
+        AGENT_DETAIL_DEFAULT_WIDTH,
+        getAgentDetailPanelWidthLimit(sidebarWidth)
+    );
+    if (!Number.isFinite(numericValue)) return fallback;
+    return Math.round(Math.min(
+        getAgentDetailPanelWidthLimit(sidebarWidth),
+        Math.max(AGENT_DETAIL_MIN_WIDTH, numericValue)
+    ));
+}
+
+function getSavedAgentDetailPanelWidth() {
+    try {
+        return clampAgentDetailPanelWidth(
+            localStorage.getItem(AGENT_DETAIL_WIDTH_STORAGE_KEY) || AGENT_DETAIL_DEFAULT_WIDTH
+        );
+    } catch (_error) {
+        return clampAgentDetailPanelWidth(AGENT_DETAIL_DEFAULT_WIDTH);
+    }
+}
+
+function setAgentDetailPanelWidth(
+    width,
+    {persist = true, sidebarWidth = getCurrentSidebarTotalWidth()} = {}
+) {
+    const panelWidth = clampAgentDetailPanelWidth(width, sidebarWidth);
+    document.documentElement.style.setProperty('--agent-detail-width', `${panelWidth}px`);
+    const handle = document.getElementById('agentDetailResizeHandle');
+    handle?.setAttribute('aria-valuenow', String(panelWidth));
+    handle?.setAttribute(
+        'aria-valuemax',
+        String(getAgentDetailPanelWidthLimit(sidebarWidth))
+    );
+    if (persist) {
+        try {
+            localStorage.setItem(AGENT_DETAIL_WIDTH_STORAGE_KEY, String(panelWidth));
+        } catch (_error) {
+            // Width remains usable if browser storage is unavailable.
+        }
+    }
+    return panelWidth;
+}
+
 function clampSidebarPanelWidth(value) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) return SIDEBAR_PANEL_MIN_WIDTH;
-    const reservesDockedReview = isDockedReviewLayout()
-        && document.body.classList.contains('change-review-open');
-    const viewportLimit = reservesDockedReview
+    const reservesDockedPanel = isDockedReviewLayout()
+        && !document.body.classList.contains('split-workspace-open') && (
+        document.body.classList.contains('change-review-open')
+        || document.body.classList.contains('agent-detail-open')
+    );
+    const dockedPanelWidth = document.body.classList.contains('change-review-open')
+        ? CHANGE_REVIEW_MIN_WIDTH
+        : AGENT_DETAIL_MIN_WIDTH;
+    const viewportLimit = reservesDockedPanel
         ? Math.max(
             SIDEBAR_PANEL_MIN_WIDTH,
             window.innerWidth
                 - SIDEBAR_RAIL_WIDTH
-                - CHANGE_REVIEW_MIN_WIDTH
+                - dockedPanelWidth
                 - DOCKED_MAIN_MIN_WIDTH
         )
         : SIDEBAR_PANEL_MAX_WIDTH;
@@ -2621,13 +3778,29 @@ function setSidebarPanelWidth(width, {persist = true} = {}) {
     ) {
         setChangeReviewPanelWidth(getSavedChangeReviewPanelWidth(), {
             persist: false,
-            sidebarWidth: SIDEBAR_RAIL_WIDTH + panelWidth,
+            sidebarWidth: getCurrentSidebarTotalWidth(),
+        });
+    }
+    if (
+        isDockedReviewLayout()
+        && document.body.classList.contains('agent-detail-open')
+    ) {
+        setAgentDetailPanelWidth(getSavedAgentDetailPanelWidth(), {
+            persist: false,
+            sidebarWidth: getCurrentSidebarTotalWidth(),
         });
     }
     return panelWidth;
 }
 
 function syncDockedLayoutWidths() {
+    if (document.body.classList.contains('split-workspace-open')) {
+        const workspace = document.getElementById('splitWorkspace');
+        const current = parseFloat(
+            workspace?.style.getPropertyValue('--split-pane-width')
+        ) || SPLIT_PANE_DEFAULT_WIDTH;
+        setSplitPaneWidth(current, {persist: false});
+    }
     if (!isDockedReviewLayout()) return;
     setSidebarPanelWidth(
         getSavedSidebarPanelWidth(),
@@ -2642,11 +3815,21 @@ function syncDockedLayoutWidths() {
             }
         );
     }
+    if (document.body.classList.contains('agent-detail-open')) {
+        setAgentDetailPanelWidth(
+            getSavedAgentDetailPanelWidth(),
+            {
+                persist: false,
+                sidebarWidth: getCurrentSidebarTotalWidth(),
+            }
+        );
+    }
 }
 
 function initializeSidebarWidth() {
     setSidebarPanelWidth(getSavedSidebarPanelWidth(), {persist: false});
     setChangeReviewPanelWidth(getSavedChangeReviewPanelWidth(), {persist: false});
+    setAgentDetailPanelWidth(getSavedAgentDetailPanelWidth(), {persist: false});
 }
 
 function installPointerResizeCleanup(handle, finishResize) {
@@ -2759,6 +3942,57 @@ function initializeChangeReviewResizeHandle(handle) {
     });
 }
 
+function initializeAgentDetailResizeHandle(handle) {
+    if (!handle) return;
+    let pointerId = null;
+
+    const finishResize = () => {
+        document.body.classList.remove('is-resizing-agent-detail');
+        if (pointerId === null) return;
+        const capturedPointerId = pointerId;
+        pointerId = null;
+        try {
+            if (handle.hasPointerCapture(capturedPointerId)) {
+                handle.releasePointerCapture(capturedPointerId);
+            }
+        } catch (_error) {
+            // Capture may already be gone after a fast cross-window drag.
+        }
+    };
+    const updateFromPointer = event => {
+        if (pointerId === null || !isDockedReviewLayout()) return;
+        setAgentDetailPanelWidth(window.innerWidth - event.clientX);
+    };
+
+    handle.addEventListener('pointerdown', event => {
+        if (!isDockedReviewLayout() || event.button !== 0) return;
+        event.preventDefault();
+        pointerId = event.pointerId;
+        handle.setPointerCapture(pointerId);
+        document.body.classList.add('is-resizing-agent-detail');
+        updateFromPointer(event);
+    });
+    handle.addEventListener('pointermove', updateFromPointer);
+    installPointerResizeCleanup(handle, finishResize);
+    handle.addEventListener('keydown', event => {
+        if (!isDockedReviewLayout()) return;
+        const currentWidth = getSavedAgentDetailPanelWidth();
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            setAgentDetailPanelWidth(currentWidth + AGENT_DETAIL_WIDTH_STEP);
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            setAgentDetailPanelWidth(currentWidth - AGENT_DETAIL_WIDTH_STEP);
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            setAgentDetailPanelWidth(AGENT_DETAIL_MIN_WIDTH);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            setAgentDetailPanelWidth(getAgentDetailPanelWidthLimit());
+        }
+    });
+}
+
 function getSidebarPanelButtons() {
     return Array.from(document.querySelectorAll('.sidebar-nav-item[data-sidebar-panel]'));
 }
@@ -2843,6 +4077,7 @@ function bindQuickActions() {
 
 function resetConversationView(conversation = getActiveConversation()) {
     if (voiceModeActive) cancelVoiceSpeech();
+    closeAgentDetail({restoreFocus: false});
     closeChangeReview({restoreFocus: false});
     closeBrowserPreview(false);
     previewSessions.clear();
@@ -2856,6 +4091,7 @@ function resetConversationView(conversation = getActiveConversation()) {
     clearCompressionActivities();
     closePlanProgress();
     document.getElementById('planProgress')?.setAttribute('hidden', '');
+    detachAgentTeamCardsForConversation(conversation?.id || activeConversationId);
     const chatMessages = document.getElementById('chatMessages');
     setChatAutoFollow(true);
     chatMessages.classList.add('is-welcome');
@@ -2945,7 +4181,10 @@ function renderProjectList() {
 
     projects.forEach(project => {
         const projectId = String(project.id || '');
-        const projectTasks = conversations.filter(item => String(item.project_id || '') === projectId);
+        const projectTasks = conversations.filter(
+            item => !item.is_split_task
+                && String(item.project_id || '') === projectId
+        );
         const activeInside = projectTasks.some(item => String(item.id || '') === String(activeConversationId || ''));
         if (activeInside) expandedProjectIds.add(projectId);
         const expanded = expandedProjectIds.has(projectId);
@@ -3052,7 +4291,9 @@ function renderConversationList() {
     const list = document.getElementById('taskHistoryList');
     const count = document.getElementById('taskHistoryCount');
     if (!list) return;
-    const ordinaryConversations = conversations.filter(item => !item.project_id);
+    const ordinaryConversations = conversations.filter(
+        item => !item.project_id && !item.is_split_task
+    );
     if (count) count.textContent = ordinaryConversations.length ? `${ordinaryConversations.length}` : '';
     if (!ordinaryConversations.length) {
         if (!list.querySelector('.sidebar-empty')) {
@@ -3100,7 +4341,9 @@ async function refreshConversations(preferredId = null) {
     const generation = ++conversationRefreshGeneration;
     let result;
     try {
-        result = await eel.list_conversations()();
+        result = await eel.list_conversations(
+            splitPaneMode ? splitTaskIdFromUrl : ''
+        )();
     } catch (error) {
         if (handleEelConnectionError(error)) return activeConversationId;
         throw error;
@@ -3109,9 +4352,14 @@ async function refreshConversations(preferredId = null) {
     if (generation !== conversationRefreshGeneration) return activeConversationId;
     conversations = result.conversations || [];
     syncExecutionStatesFromConversations(conversations);
+    const pinnedConversationExists = splitPaneMode
+        && splitTaskIdFromUrl
+        && conversations.some(item => String(item.id) === splitTaskIdFromUrl);
     const preferredExists = preferredId
         && conversations.some(item => String(item.id) === String(preferredId));
-    activeConversationId = preferredExists
+    activeConversationId = pinnedConversationExists
+        ? splitTaskIdFromUrl
+        : preferredExists
         ? preferredId
         : result.active_id || conversations[0]?.id || null;
     const active = conversations.find(item => item.id === activeConversationId);
@@ -3135,6 +4383,7 @@ async function createNewConversation(projectId = '') {
         markConversationReadLocally(activeConversationId);
         resetConversationView(result.conversation);
         updateActiveTaskTitle(result.conversation.title);
+        await restoreSplitTaskForConversation(activeConversationId);
         if (projectId) expandedProjectIds.add(String(projectId));
         await refreshConversations(activeConversationId);
         await refreshProjects();
@@ -3162,12 +4411,15 @@ async function switchConversation(conversationId) {
         return;
     }
     try {
+        splitStateGeneration += 1;
+        hideSplitTaskPane();
         conversationRefreshGeneration += 1;
         const result = await eel.set_active_conversation(conversationId)();
         if (!result?.success) throw new Error(result?.error || '切换失败');
         activeConversationId = conversationId;
         markConversationReadLocally(conversationId);
         renderConversation(result.conversation);
+        await restoreSplitTaskForConversation(conversationId);
         const execution = getConversationExecutionState(conversationId, false);
         if (execution?.running) execution.liveRenderSuppressed = false;
         await refreshConversations(conversationId);
@@ -3227,18 +4479,35 @@ function openConversationMenu(event, conversationId) {
         const confirmed = await showConfirmDialog(`删除任务“${item.title}”？此操作不可撤销。`);
         if (!confirmed) return;
         const deletedWasActive = String(conversationId) === String(activeConversationId || '');
+        const splitWasOpen = deletedWasActive
+            && document.body.classList.contains('split-workspace-open');
+        if (deletedWasActive) {
+            splitStateGeneration += 1;
+            hideSplitTaskPane();
+        }
         const result = await eel.delete_conversation(conversationId)();
-        if (!result?.success) return showToast(result?.error || '删除失败', 'error');
-        conversationExecutionStates.delete(String(conversationId));
-        clearConversationPlanProgress(conversationId);
+        if (!result?.success) {
+            if (splitWasOpen) await restoreSplitTaskForConversation(conversationId);
+            return showToast(result?.error || '删除失败', 'error');
+        }
+        const deletedConversationIds = Array.from(new Set(
+            (result.deleted_conversation_ids || [conversationId]).map(String)
+        ));
+        deletedConversationIds.forEach(deletedId => {
+            conversationExecutionStates.delete(deletedId);
+            clearConversationPlanProgress(deletedId);
+            clearConversationAgentTeams(deletedId);
+        });
         const nextActiveId = await refreshConversations(
             deletedWasActive ? result.active_id : activeConversationId
         );
         // Redrawing a live task clears its streaming cards, so preserve it when
         // the deleted item was only a different sidebar task.
         if (!deletedWasActive) return;
+        if (!nextActiveId) return;
         const loaded = await eel.load_conversation(nextActiveId)();
         if (loaded?.success) renderConversation(loaded.conversation);
+        await restoreSplitTaskForConversation(nextActiveId);
     };
     setTimeout(() => document.addEventListener('click', () => menu.remove(), {once: true}), 0);
 }
@@ -3390,6 +4659,31 @@ function setPlanModeEnabled(enabled) {
     showToast(planModeEnabled ? '计划模式已开启' : '计划模式已关闭', 'info', 1600);
 }
 
+function applyMultiAgentModeToggleState(enabled) {
+    const pill = document.getElementById('multiAgentModePill');
+    if (!pill) return;
+    const isEnabled = Boolean(enabled);
+    pill.hidden = !isEnabled;
+    pill.setAttribute(
+        'aria-label',
+        isEnabled ? '多智能体协作已开启' : '多智能体协作已关闭'
+    );
+}
+
+function setMultiAgentModeEnabled(enabled) {
+    multiAgentModeEnabled = Boolean(enabled);
+    localStorage.setItem(
+        'minibot-multi-agent-mode-enabled',
+        multiAgentModeEnabled ? 'true' : 'false'
+    );
+    applyMultiAgentModeToggleState(multiAgentModeEnabled);
+    showToast(
+        multiAgentModeEnabled ? '多智能体协作已开启' : '多智能体协作已关闭',
+        'info',
+        1600
+    );
+}
+
 function getComposerAddMenuItems() {
     return Array.from(
         document.querySelectorAll('#composerAddMenu [role="menuitem"]:not(:disabled)')
@@ -3472,21 +4766,34 @@ async function updateEmbeddingStatus() {
 
 async function initializeOSAgent() {
     try {
-        const result = await eel.initialize()();
+        const result = await eel.initialize(
+            splitPaneMode ? splitTaskIdFromUrl : ''
+        )();
 
         if (result[0]) {
             isInitialized = true;
             await eel.load_settings()();
             await refreshProjects();
             const conversationId = await refreshConversations();
-            if (conversationId) {
-                const loaded = await eel.set_active_conversation(conversationId)();
+            const initialConversationId = splitPaneMode && splitTaskIdFromUrl
+                ? splitTaskIdFromUrl
+                : conversationId;
+            if (!splitPaneMode && initialConversationId && initialConversationId !== conversationId) {
+                await switchConversation(initialConversationId);
+            }
+            if (initialConversationId) {
+                const loaded = splitPaneMode
+                    ? await eel.load_conversation(initialConversationId)()
+                    : await eel.set_active_conversation(initialConversationId)();
                 if (loaded?.success) {
                     renderConversation(loaded.conversation);
                 } else {
-                    const current = await eel.load_conversation(conversationId)();
+                    const current = await eel.load_conversation(initialConversationId)();
                     if (current?.success) renderConversation(current.conversation);
                 }
+            }
+            if (!splitPaneMode && initialConversationId) {
+                await restoreSplitTaskForConversation(initialConversationId);
             }
             await restoreExecutionState();
             if (!isProcessing) setAppStatus('ready', '就绪');
@@ -3498,6 +4805,226 @@ async function initializeOSAgent() {
     } catch (error) {
         setAppStatus('error', '初始化失败');
         showError('初始化失败：' + error.message);
+    }
+}
+
+function splitTaskUrl(conversationId) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('split_child', '1');
+    url.searchParams.set('split_task', String(conversationId || ''));
+    return url.toString();
+}
+
+function getSplitPaneWidthLimit() {
+    const workspace = document.getElementById('splitWorkspace');
+    const mainContent = document.querySelector('.main-content');
+    if (!workspace || !mainContent) return SPLIT_PANE_DEFAULT_WIDTH;
+    const container = mainContent.parentElement;
+    if (!container) return SPLIT_PANE_DEFAULT_WIDTH;
+    const containerRect = container.getBoundingClientRect();
+    const mainRect = mainContent.getBoundingClientRect();
+    const sharedWidth = Math.max(0, containerRect.right - mainRect.left);
+    const computedMainMinWidth = Number.parseFloat(
+        window.getComputedStyle(mainContent).minWidth
+    );
+    const mainMinWidth = Number.isFinite(computedMainMinWidth) && computedMainMinWidth > 0
+        ? computedMainMinWidth
+        : SPLIT_MAIN_MIN_WIDTH;
+    return Math.max(SPLIT_PANE_MIN_WIDTH, sharedWidth - mainMinWidth);
+}
+
+function setSplitPaneWidth(width, {persist = true, conversationId = activeConversationId} = {}) {
+    const workspace = document.getElementById('splitWorkspace');
+    const handle = document.getElementById('splitResizeHandle');
+    if (!workspace) return 0;
+    const normalized = Math.round(Math.max(
+        SPLIT_PANE_MIN_WIDTH,
+        Math.min(Number(width) || SPLIT_PANE_DEFAULT_WIDTH, getSplitPaneWidthLimit())
+    ));
+    workspace.style.setProperty('--split-pane-width', `${normalized}px`);
+    handle?.setAttribute('aria-valuenow', String(normalized));
+    handle?.setAttribute('aria-valuemax', String(Math.round(getSplitPaneWidthLimit())));
+    if (persist && conversationId && canCallEel()) {
+        eel.set_split_conversation_state(conversationId, null, normalized)().catch(error => {
+            console.error('Failed to save split pane width:', error);
+        });
+    }
+    return normalized;
+}
+
+function hideSplitTaskPane() {
+    const workspace = document.getElementById('splitWorkspace');
+    const frame = document.getElementById('splitTaskFrame');
+    if (!workspace) return;
+    setSplitChildAgentDetailOpen(false);
+    setSplitChildBrowserPreviewOpen(false);
+    if (frame) frame.src = 'about:blank';
+    workspace.hidden = true;
+    document.body.classList.remove('split-workspace-open');
+}
+
+async function closeSplitTask() {
+    if (splitPaneMode) return;
+    const conversationId = activeConversationId;
+    hideSplitTaskPane();
+    if (conversationId && canCallEel()) {
+        try {
+            await eel.set_split_conversation_state(conversationId, false, null)();
+        } catch (error) {
+            console.error('Failed to close persisted split pane:', error);
+        }
+    }
+    document.getElementById('splitTaskButton')?.focus();
+}
+
+async function deleteSplitTask() {
+    if (splitPaneMode) return;
+    const sourceConversationId = activeConversationId;
+    if (!sourceConversationId || !canCallEel()) return;
+    const confirmed = await showConfirmDialog(
+        '删除当前子任务及其全部对话和短期记忆？此操作不可撤销。'
+    );
+    if (!confirmed || sourceConversationId !== activeConversationId) return;
+
+    splitStateGeneration += 1;
+    hideSplitTaskPane();
+    try {
+        const result = await eel.delete_split_conversation(sourceConversationId)();
+        if (!result?.success) {
+            throw new Error(result?.error || '删除子任务失败');
+        }
+        const deletedConversationIds = Array.from(new Set(
+            (result.deleted_conversation_ids || []).map(String)
+        ));
+        deletedConversationIds.forEach(deletedId => {
+            conversationExecutionStates.delete(deletedId);
+            clearConversationPlanProgress(deletedId);
+            clearConversationAgentTeams(deletedId);
+        });
+        await refreshConversations(sourceConversationId);
+        showToast('子任务及其独立记忆已删除', 'success');
+        document.getElementById('splitTaskButton')?.focus();
+    } catch (error) {
+        await restoreSplitTaskForConversation(sourceConversationId);
+        showToast(`删除子任务失败：${error.message}`, 'error');
+    }
+}
+
+function showSplitTaskPane(conversationId, width = 0) {
+    const workspace = document.getElementById('splitWorkspace');
+    const frame = document.getElementById('splitTaskFrame');
+    if (!workspace || !frame || !conversationId) return;
+    workspace.hidden = false;
+    document.body.classList.add('split-workspace-open');
+    setSplitPaneWidth(width || SPLIT_PANE_DEFAULT_WIDTH, {persist: false});
+    const nextUrl = splitTaskUrl(conversationId);
+    if (frame.src !== nextUrl) frame.src = nextUrl;
+}
+
+async function restoreSplitTaskForConversation(conversationId) {
+    if (splitPaneMode) return;
+    const generation = ++splitStateGeneration;
+    hideSplitTaskPane();
+    if (!conversationId || !canCallEel()) return;
+    try {
+        const state = await eel.get_split_conversation_state(conversationId)();
+        if (generation !== splitStateGeneration || conversationId !== activeConversationId) return;
+        if (state?.success && state.open && state.conversation_id) {
+            showSplitTaskPane(state.conversation_id, state.width);
+        }
+    } catch (error) {
+        console.error('Failed to restore split pane:', error);
+    }
+}
+
+function initializeSplitResizeHandle(handle) {
+    if (!handle || splitPaneMode) return;
+    let pointerId = null;
+
+    const finishResize = () => {
+        document.body.classList.remove('is-resizing-split');
+        if (pointerId === null) return;
+        const capturedPointerId = pointerId;
+        pointerId = null;
+        try {
+            if (handle.hasPointerCapture(capturedPointerId)) {
+                handle.releasePointerCapture(capturedPointerId);
+            }
+        } catch (_error) {
+            // Capture may already be gone after crossing into the child frame.
+        }
+        const width = parseFloat(
+            document.getElementById('splitWorkspace')?.style.getPropertyValue('--split-pane-width')
+        );
+        if (width) setSplitPaneWidth(width);
+    };
+    const updateFromPointer = event => {
+        if (pointerId === null || window.innerWidth <= 780) return;
+        setSplitPaneWidth(window.innerWidth - event.clientX, {persist: false});
+    };
+
+    handle.addEventListener('pointerdown', event => {
+        if (window.innerWidth <= 780 || event.button !== 0) return;
+        event.preventDefault();
+        pointerId = event.pointerId;
+        handle.setPointerCapture(pointerId);
+        document.body.classList.add('is-resizing-split');
+        updateFromPointer(event);
+    });
+    handle.addEventListener('pointermove', updateFromPointer);
+    installPointerResizeCleanup(handle, finishResize);
+    handle.addEventListener('keydown', event => {
+        const workspace = document.getElementById('splitWorkspace');
+        const current = parseFloat(workspace?.style.getPropertyValue('--split-pane-width'))
+            || SPLIT_PANE_DEFAULT_WIDTH;
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            setSplitPaneWidth(current + SPLIT_PANE_WIDTH_STEP);
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            setSplitPaneWidth(current - SPLIT_PANE_WIDTH_STEP);
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            setSplitPaneWidth(SPLIT_PANE_MIN_WIDTH);
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            setSplitPaneWidth(getSplitPaneWidthLimit());
+        }
+    });
+}
+
+async function openSplitTask() {
+    if (splitPaneMode) return;
+    if (!activeConversationId || !canCallEel()) return;
+    const sourceConversationId = activeConversationId;
+    const button = document.getElementById('splitTaskButton');
+    const workspace = document.getElementById('splitWorkspace');
+    const frame = document.getElementById('splitTaskFrame');
+    if (!workspace || !frame) return;
+    button?.setAttribute('aria-busy', 'true');
+    button && (button.disabled = true);
+    try {
+        const result = await eel.create_split_conversation(sourceConversationId)();
+        if (!result?.success || !result.conversation?.id) {
+            throw new Error(result?.error || '无法创建子任务');
+        }
+        if (sourceConversationId !== activeConversationId) return;
+        showSplitTaskPane(
+            result.conversation.id,
+            result.split_state?.width || SPLIT_PANE_DEFAULT_WIDTH
+        );
+        await refreshConversations(sourceConversationId);
+        showToast(
+            result.created
+                ? '已创建独立子任务，并复制当前短期记忆快照'
+                : '已恢复原子任务，继续使用其独立记忆',
+            'success'
+        );
+    } catch (error) {
+        showToast(`打开子任务失败：${error.message}`, 'error');
+    } finally {
+        button?.removeAttribute('aria-busy');
+        if (button) button.disabled = false;
     }
 }
 
@@ -3569,14 +5096,24 @@ function renderConversation(conversation) {
                 ));
             } else if (event.type === 'commentary') {
                 addCommentaryMessage(event.content || '', false);
-            } else if (event.type === 'tool') {
-                addToolMessage(
-                    event.tool || 'Tool',
-                    event.content || '',
-                    false,
-                    Number(event.duration_ms || 0),
-                    event.target || ''
+            } else if (event.type === 'agent_team') {
+                updateAgentTeamSnapshot(
+                    event,
+                    conversation?.id || activeConversationId,
+                    messageId,
+                    {animate: false}
                 );
+            } else if (event.type === 'tool') {
+                if (!isQuestionToolName(event.tool)) {
+                    addToolMessage(
+                        event.tool || 'Tool',
+                        event.content || '',
+                        false,
+                        Number(event.duration_ms || 0),
+                        event.target || '',
+                        event.actor || 'primary'
+                    );
+                }
             } else if (event.type === 'modified_files') {
                 addModifiedFilesSummary(event, false);
             } else if (event.type === 'compression') {
@@ -3631,6 +5168,8 @@ async function sendMessage() {
     const attachments = composerAttachments.slice();
     const planMode = planModeEnabled;
     const voiceMode = voiceModeActive;
+    const multiAgentMode = multiAgentModeEnabled;
+    const allowAll = autoAllowAll;
 
     if (!message && !attachments.length) return;
     const pendingStop = pendingStopRequests.get(String(activeConversationId || ''));
@@ -3651,6 +5190,8 @@ async function sendMessage() {
             attachments,
             planMode,
             voiceMode,
+            multiAgentMode,
+            allowAll,
         });
         messageInput.value = '';
         resetComposerInput(messageInput);
@@ -3705,7 +5246,9 @@ async function sendMessage() {
             buildAttachmentPayload(attachments),
             conversationId,
             planMode,
-            voiceMode
+            voiceMode,
+            multiAgentMode,
+            allowAll
         )();
         if (result?.status === 'busy') {
             throw new Error(result.error || '已有任务正在执行');
@@ -3740,7 +5283,9 @@ async function sendMessageWithText(
     attachments = [],
     conversationId = activeConversationId,
     planMode = planModeEnabled,
-    voiceMode = voiceModeActive
+    voiceMode = voiceModeActive,
+    multiAgentMode = multiAgentModeEnabled,
+    allowAll = autoAllowAll
 ) {
     if (!isInitialized || (!message && !attachments.length)) return;
 
@@ -3778,7 +5323,9 @@ async function sendMessageWithText(
             buildAttachmentPayload(attachments),
             targetConversationId,
             Boolean(planMode),
-            Boolean(voiceMode)
+            Boolean(voiceMode),
+            Boolean(multiAgentMode),
+            Boolean(allowAll)
         )();
         if (result?.status === 'busy' || result?.status === 'error') {
             throw new Error(result.error || '任务提交失败');
@@ -3857,6 +5404,14 @@ function startPolling(conversationId, msgId) {
             }
             const status = await eel.get_execution_status(executionId, messageId)();
             if (executionPollers.get(executionId) !== poller) return;
+            if (status?.agent_team) {
+                updateAgentTeamSnapshot(
+                    status.agent_team,
+                    executionId,
+                    messageId,
+                    {animate: false}
+                );
+            }
 
             // The backend may still persist task-end events after the model is
             // done. Keep polling for those events, but never keep the composer
@@ -3979,6 +5534,14 @@ async function restoreExecutionState() {
                 || hintedMessageId
                 || 0
             );
+            if (status?.agent_team && conversationId && messageId) {
+                updateAgentTeamSnapshot(
+                    status.agent_team,
+                    conversationId,
+                    messageId,
+                    {animate: false}
+                );
+            }
             if (!status?.running || !conversationId || !messageId) return;
 
             const state = updateConversationExecutionState(conversationId, {
@@ -4080,6 +5643,8 @@ function finishCurrentMessage(
 ) {
     const id = String(conversationId || '');
     markPlanProgressTerminal(id, msgId, terminalState, terminalMessage);
+    if (terminalState === 'error') markAgentTeamsTerminal(id, msgId, 'failed');
+    if (terminalState === 'stopped') markAgentTeamsTerminal(id, msgId, 'cancelled');
     const state = updateConversationExecutionState(id, {
         messageId: Number(msgId || 0),
         running: false,
@@ -4180,7 +5745,11 @@ async function dispatchNextQueuedMessage() {
                 queued.attachments || [],
                 queued.conversationId || activeConversationId,
                 typeof queued.planMode === 'boolean' ? queued.planMode : planModeEnabled,
-                typeof queued.voiceMode === 'boolean' ? queued.voiceMode : false
+                typeof queued.voiceMode === 'boolean' ? queued.voiceMode : false,
+                typeof queued.multiAgentMode === 'boolean'
+                    ? queued.multiAgentMode
+                    : multiAgentModeEnabled,
+                typeof queued.allowAll === 'boolean' ? queued.allowAll : autoAllowAll
             );
         }
     } catch (error) {
@@ -4203,6 +5772,20 @@ function handleResult(result, msgId, conversationId = activeConversationId) {
     );
     if (result?.type === 'plan_update') {
         updatePlanProgress(result, executionId, Number(result.message_id || msgId || 0));
+        return;
+    }
+    if (result?.type === 'agent_team_update') {
+        updateAgentTeamSnapshot(
+            result,
+            executionId,
+            Number(result.message_id || msgId || 0)
+        );
+        return;
+    }
+    if (
+        ['tool_preparing', 'tool_start', 'tool'].includes(result?.type)
+        && (isQuestionToolName(result.tool) || !isPrimaryToolEvent(result))
+    ) {
         return;
     }
     const state = getConversationExecutionState(executionId, false);
@@ -4322,6 +5905,7 @@ function handleResult(result, msgId, conversationId = activeConversationId) {
         markPlanProgressTerminal(
             executionId, msgId, 'error', result.content || '执行中断'
         );
+        markAgentTeamsTerminal(executionId, msgId, 'failed');
         addMessage('ai', '执行失败：' + result.content, true);
     }
 }
@@ -4709,6 +6293,7 @@ async function clearConversation() {
         clearMessageQueue(activeConversationId);
         conversationExecutionStates.delete(String(activeConversationId || ''));
         clearConversationPlanProgress(activeConversationId);
+        clearConversationAgentTeams(activeConversationId);
         resetConversationView();
         await refreshConversations(activeConversationId);
         showToast('当前任务历史与记忆已清空', 'success');
@@ -4864,7 +6449,7 @@ function updateMessageAttachments(messageId, attachments) {
 }
 
 function createStreamingResponse(streamId, state) {
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = state.host || document.getElementById('chatMessages');
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message ai streaming-response';
     messageDiv.dataset.streamId = streamId;
@@ -4901,7 +6486,9 @@ function markStreamingCommentary(streamId) {
 
 function createStreamingThinking(state) {
     state.thinkingStartedAt = Date.now();
-    state.thinkingCard = addThinkingCard('', state.element, false, true, false);
+    state.thinkingCard = addThinkingCard(
+        '', state.element, false, true, false, null, state.host || null
+    );
     state.thinkingBody = state.thinkingCard.querySelector('.thinking-content');
     state.thinkingCard.classList.add('is-streaming');
     if (state.thinkingClosed) {
@@ -4948,7 +6535,7 @@ function completeStreamingThinking(state) {
 }
 
 function moveThinkingBeforeAnswer(state) {
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = state.host || document.getElementById('chatMessages');
     if (state.thinkingCard?.parentNode === chatMessages
         && state.element?.parentNode === chatMessages
         && state.thinkingCard.nextSibling !== state.element) {
@@ -5085,7 +6672,7 @@ function renderStreamingState(state) {
         state.bubble.innerHTML = `${renderMarkdown(state.content)}<span class="stream-caret" aria-hidden="true"></span>`;
     }
 
-    followChatOutput();
+    if (!state.host) followChatOutput();
 }
 
 function splitStreamingContent(content) {
@@ -5304,9 +6891,10 @@ function addThinkingCard(
     scrollIntoView = true,
     animate = true,
     completed = false,
-    durationMs = null
+    durationMs = null,
+    host = null
 ) {
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = host || document.getElementById('chatMessages');
     const card = document.createElement('div');
     card.className = 'thinking-card';
     const completedLabel = Number.isFinite(durationMs)
@@ -5331,7 +6919,7 @@ function addThinkingCard(
     if (animate) requestAnimationFrame(() => card.classList.add('is-visible'));
     else card.classList.add('is-visible');
     if (completed) condenseThinkingCard(card, !animate);
-    if (scrollIntoView) followChatOutput(chatMessages);
+    if (scrollIntoView && !host) followChatOutput(chatMessages);
     return card;
 }
 
@@ -5528,6 +7116,7 @@ function toolResultFailed(value) {
 }
 
 function startToolExecution(result, msgId, isPreparing = false) {
+    if (isQuestionToolName(result.tool) || !isPrimaryToolEvent(result)) return null;
     const chatMessages = document.getElementById('chatMessages');
     const key = getToolExecutionKey(result, msgId);
     const existing = activeToolExecutions.get(key);
@@ -5545,9 +7134,10 @@ function startToolExecution(result, msgId, isPreparing = false) {
         existing.target = getToolTarget(toolName, result.params || {}, result.target) || existing.target || '';
         const summary = existing.element.querySelector('.tool-live-summary');
         if (summary) {
-            summary.textContent = existing.target
-                ? `${existing.progressCopy} · ${existing.target}`
-                : existing.progressCopy;
+            summary.textContent = primaryToolSummary(
+                existing.progressCopy,
+                existing.target
+            );
         }
         const backendStartedAt = Number(result.started_at_ms || 0);
         if (backendStartedAt > 0) {
@@ -5570,7 +7160,7 @@ function startToolExecution(result, msgId, isPreparing = false) {
             <div class="tool-header tool-header-running">
                 <span class="tool-progress-spinner" aria-hidden="true"><span></span></span>
                 <span class="tool-name">${escapeHtml(result.tool || 'Tool')}</span>
-                <span class="tool-summary tool-live-summary">${escapeHtml(target ? `${progressCopy} · ${target}` : progressCopy)}</span>
+                <span class="tool-summary tool-live-summary">${escapeHtml(primaryToolSummary(progressCopy, target))}</span>
                 <span class="tool-elapsed">0 秒</span>
             </div>
             <div class="tool-progress-track" aria-hidden="true"><span></span></div>
@@ -5604,9 +7194,7 @@ function startToolExecution(result, msgId, isPreparing = false) {
         if (liveSummary && seconds > 8 && seconds % 6 === 0) {
             execution.phase = (execution.phase + 1) % phases.length;
             const status = `${execution.progressCopy} · ${phases[execution.phase]}`;
-            liveSummary.textContent = execution.target
-                ? `${status} · ${execution.target}`
-                : status;
+            liveSummary.textContent = primaryToolSummary(status, execution.target);
         }
         followChatOutput(chatMessages);
     };
@@ -5618,6 +7206,7 @@ function startToolExecution(result, msgId, isPreparing = false) {
 }
 
 function finishToolExecution(result, msgId) {
+    if (isQuestionToolName(result.tool) || !isPrimaryToolEvent(result)) return null;
     const key = getToolExecutionKey(result, msgId);
     let execution = activeToolExecutions.get(key);
     let executionKey = key;
@@ -5658,7 +7247,10 @@ function finishToolExecution(result, msgId) {
             <summary class="tool-header">
                 <span class="tool-status-icon" aria-hidden="true">${failed ? '!' : '✓'}</span>
                 <span class="tool-name">${escapeHtml(result.tool || 'Tool')}</span>
-                <span class="tool-summary">${escapeHtml(target ? `${target} · ` : '')}${failed ? '工具调用失败' : '工具调用完成'} · ${escapeHtml(formatToolDuration(duration))}</span>
+                <span class="tool-summary">${escapeHtml(primaryToolSummary(
+                    `${failed ? '工具调用失败' : '工具调用完成'} · ${formatToolDuration(duration)}`,
+                    target
+                ))}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
             <div class="tool-result">${formatContent(String(result.result || '').substring(0, 1600))}</div>
@@ -5901,7 +7493,15 @@ function cancelSiblingPreparedToolExecutions(result, msgId) {
     });
 }
 
-function addToolMessage(toolName, result, animate = true, durationMs = 0, target = '') {
+function addToolMessage(
+    toolName,
+    result,
+    animate = true,
+    durationMs = 0,
+    target = '',
+    actor = 'primary'
+) {
+    if (isQuestionToolName(toolName) || !isPrimaryToolEvent({actor})) return null;
     const chatMessages = document.getElementById('chatMessages');
     const toolDiv = document.createElement('div');
     const failed = toolResultFailed(result);
@@ -5911,7 +7511,10 @@ function addToolMessage(toolName, result, animate = true, durationMs = 0, target
             <summary class="tool-header">
                 <span class="tool-status-icon" aria-hidden="true">${failed ? '!' : '✓'}</span>
                 <span class="tool-name">${escapeHtml(toolName)}</span>
-                <span class="tool-summary">${escapeHtml(target ? `${target} · ` : '')}${failed ? '工具调用失败' : '工具调用完成'}${durationMs > 0 ? ` · ${escapeHtml(formatToolDuration(durationMs))}` : ''}</span>
+                <span class="tool-summary">${escapeHtml(primaryToolSummary(
+                    `${failed ? '工具调用失败' : '工具调用完成'}${durationMs > 0 ? ` · ${formatToolDuration(durationMs)}` : ''}`,
+                    target
+                ))}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
             <div class="tool-result">${formatContent(String(result).substring(0, 1600))}</div>
@@ -5921,6 +7524,7 @@ function addToolMessage(toolName, result, animate = true, durationMs = 0, target
     if (animate) requestAnimationFrame(() => toolDiv.classList.add('is-visible'));
     else toolDiv.classList.add('is-visible');
     if (!isRestoringConversation) followChatOutput(chatMessages);
+    return toolDiv;
 }
 
 function normalizeModifiedFiles(result) {
@@ -6054,6 +7658,7 @@ function openChangeReview(result, initialPath = '') {
     const panel = document.getElementById('changeReviewPanel');
     const files = normalizeModifiedFiles(result);
     if (!panel || !files.length) return;
+    closeAgentDetail({restoreFocus: false});
     const chatMessages = document.getElementById('chatMessages');
     const distanceFromBottom = chatMessages
         ? chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
@@ -6423,6 +8028,7 @@ function openBrowserPreview(previewId, requestedUrl = '') {
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
     document.body.classList.add('browser-preview-open');
+    notifyParentBrowserPreview(true);
     updateOpenPreviewSession(session);
     loadBrowserPreviewUrl(targetUrl);
     document.getElementById('browserPreviewClose')?.focus();
@@ -6438,6 +8044,7 @@ function closeBrowserPreview(restoreFocus = true) {
     }
     hideBrowserPreviewState();
     document.body.classList.remove('browser-preview-open');
+    notifyParentBrowserPreview(false);
     activePreviewId = null;
     activePreviewUrl = '';
     if (restoreFocus) previewLastFocusedElement?.focus?.();
@@ -7320,12 +8927,12 @@ function collectSettingsFromForm(fallback = {}) {
         api_key: document.getElementById('settingApiKey').value.trim(),
         api_model: document.getElementById('settingApiModel').value.trim(),
         tavily_api_key: document.getElementById('settingTavilyKey').value.trim(),
-        max_steps: document.getElementById('settingMaxSteps').value.trim() || fallback.max_steps || '20',
-        max_tokens: document.getElementById('settingMaxTokens').value.trim() || fallback.max_tokens || '30000',
+        max_steps: document.getElementById('settingMaxSteps').value.trim() || fallback.max_steps || '100',
+        max_tokens: document.getElementById('settingMaxTokens').value.trim() || fallback.max_tokens || '50000',
         auto_compact_threshold_percent: document.getElementById('settingAutoCompactPercent').value.trim()
             || fallback.auto_compact_threshold_percent
             || '85',
-        max_web_searches: document.getElementById('settingMaxWebSearches').value.trim() || fallback.max_web_searches || '3'
+        max_web_searches: document.getElementById('settingMaxWebSearches').value.trim() || fallback.max_web_searches || '8'
     };
 }
 

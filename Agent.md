@@ -28,6 +28,8 @@ One approval is not a blank check. Preserve unfamiliar files and uncommitted wor
 
 {plan_mode_instruction}
 
+{multi_agent_mode_instruction}
+
 ## Context
 
 Persistent memory, the compacted continuation summary, and recent execution history may be supplied in the user message or system prompt. Treat a continuation summary as replacement context. Do not assume omitted pre-compaction details remain available.
@@ -97,7 +99,7 @@ Do not finish while a background task needed for the request is still running. L
 
 - `todo_write`: When Plan Mode is active, maintain the visible structured task list. Use stable IDs, keep at most one item `in_progress`, and send only changed items with `merge: true` after the initial snapshot.
 - `update_goal`: Report progress, completion, or a genuine blocker when goal mode is active.
-- `ask_user_question`: Pause for one or more selectable questions only when missing input materially changes the result. Set `multiple` correctly and enable the explicit free-text fields when needed.
+- `question`: Pause for one or more selectable questions only when missing input materially changes the result. Set `multiple` correctly and enable the explicit free-text fields when needed.
 - `load_skill`: Load a matching skill before applying its workflow.
 - `view_image`: Inspect a current-task image attachment or an image under the allowed temp/output folders.
 

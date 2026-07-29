@@ -391,6 +391,8 @@ def test_panel_resize_cleanup_handles_interrupted_pointer_gestures() -> None:
     sidebar_resize = sidebar_resize.split("\nfunction ", 1)[0]
     review_resize = source.split("function initializeChangeReviewResizeHandle", 1)[1]
     review_resize = review_resize.split("\nfunction ", 1)[0]
+    agent_resize = source.split("function initializeAgentDetailResizeHandle", 1)[1]
+    agent_resize = agent_resize.split("\nfunction ", 1)[0]
 
     assert "pointercancel" in cleanup
     assert "lostpointercapture" in cleanup
@@ -398,6 +400,11 @@ def test_panel_resize_cleanup_handles_interrupted_pointer_gestures() -> None:
     assert 'id="changeReviewResizeHandle"' in html_source
     assert 'class="change-review-resize-handle"' in html_source
     assert "installPointerResizeCleanup" in sidebar_resize
+    assert 'id="agentDetailResizeHandle"' in html_source
+    assert 'class="agent-detail-resize-handle"' in html_source
+    assert "AGENT_DETAIL_WIDTH_STORAGE_KEY" in source
+    assert "window.innerWidth - event.clientX" in agent_resize
+    assert "installPointerResizeCleanup" in agent_resize
     assert "installPointerResizeCleanup" in review_resize
     assert "is-resizing-sidebar" in sidebar_resize
     assert "is-resizing-review" in review_resize
@@ -497,10 +504,24 @@ def test_deleting_an_inactive_task_does_not_redraw_the_active_task() -> None:
 
     assert "const deletedWasActive = String(conversationId) === String(activeConversationId || '');" in delete_handler
     assert "deletedWasActive ? result.active_id : activeConversationId" in delete_handler
+    assert "hideSplitTaskPane();" in delete_handler
+    assert "result.deleted_conversation_ids" in delete_handler
+    assert "restoreSplitTaskForConversation(nextActiveId)" in delete_handler
+    hide_split = source.split("function hideSplitTaskPane()", 1)[1].split("\nfunction ", 1)[0]
+    assert "frame.src = 'about:blank'" in hide_split
     assert "if (!deletedWasActive) return;" in delete_handler
     assert delete_handler.index("if (!deletedWasActive) return;") < delete_handler.index(
         "eel.load_conversation(nextActiveId)"
     )
+
+
+def test_split_window_initializes_its_pinned_task_id() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    initializer = source.split("async function initializeOSAgent()", 1)[1]
+    initializer = initializer.split("\nfunction splitTaskUrl", 1)[0]
+
+    assert "eel.initialize(" in initializer
+    assert "splitPaneMode ? splitTaskIdFromUrl : ''" in initializer
 
 
 def test_plan_progress_uses_single_composer_component_and_latest_snapshot() -> None:
@@ -753,3 +774,226 @@ def test_stop_renders_the_synchronously_returned_modified_files_summary() -> Non
     assert stop_handler.index("addModifiedFilesSummary({") < stop_handler.index(
         "conversationId, messageId, 'stopped', '任务已停止'"
     )
+
+
+def test_multi_agent_mode_renders_bounded_isolated_team_snapshots() -> None:
+    app_source = APP_JS.read_text(encoding="utf-8")
+    html_source = INDEX_HTML.read_text(encoding="utf-8")
+    css_source = STYLES_CSS.read_text(encoding="utf-8")
+
+    for element_id in (
+        "multiAgentModePill",
+        "multiAgentModeToggle",
+        "agentDetailPanel",
+        "agentDetailClose",
+        "agentDetailName",
+        "agentDetailTask",
+        "agentDetailContextScope",
+        "agentCollaborationList",
+        "agentActivityList",
+        "agentResultSection",
+        "sidebarCollapseButton",
+    ):
+        assert f'id="{element_id}"' in html_source
+    assert 'data-composer-action="enable-multi-agent-mode"' in html_source
+    assert "不继承主对话、兄弟智能体上下文或任何私有思考" in html_source
+
+    assert "let multiAgentModeEnabled = localStorage.getItem(" in app_source
+    assert "function setMultiAgentModeEnabled(enabled)" in app_source
+    assert "function normalizeAgentTeamSnapshot(" in app_source
+    assert "function renderAgentTeamCard(" in app_source
+    assert "function createAgentChip(" in app_source
+    assert "function updateAgentChip(" in app_source
+    assert "function updateAgentActivityList(" in app_source
+    assert "function renderAgentDetail(" in app_source
+    assert "function renderAgentCollaboration(" in app_source
+    assert "function openAgentDetail(" in app_source
+    assert "function closeAgentDetail(" in app_source
+    assert "AGENT_TEAM_MAX_MEMBERS = 12" in app_source
+    assert "AGENT_ACTIVITY_MAX_ITEMS = 80" in app_source
+    assert "normalizeAgentCollaboration" in app_source
+    assert "agent-collaboration-section" in css_source
+    assert "SIDEBAR_COLLAPSED_STORAGE_KEY" in app_source
+    assert "function setSidebarCollapsed(" in app_source
+    assert "AGENT_DETAIL_MIN_WIDTH = 300" in app_source
+    assert 'aria-valuemin="300"' in html_source
+    assert "sidebar.sidebar-shell.is-collapsed" in css_source
+    assert "body.theme-light .sidebar.sidebar-shell.is-collapsed" in css_source
+    assert "body.theme-dark .sidebar.sidebar-shell.is-collapsed" in css_source
+    assert "var(--sidebar-rail-width)" in css_source
+    assert ".agent-detail-panel .markdown-table-wrap" in css_source
+    assert "width: max-content;" in css_source
+    assert "min-width: 72px;" in css_source
+    assert "overscroll-behavior-x: contain;" in css_source
+    assert ".agent-detail-panel .agent-activity-list .message-wrapper" in css_source
+    assert ".agent-collaboration-list" in css_source
+    assert "max-height: clamp(176px, 29vh, 320px);" in css_source
+    assert "overflow-y: auto;" in css_source
+    assert "scrollbar-gutter: stable;" in css_source
+    assert "协作黑板" in html_source
+    assert "splitTaskButton" in html_source
+    assert 'id="splitTaskCollapse"' in html_source
+    assert 'title="删除子任务"' in html_source
+    assert "splitWorkspace" in html_source
+    assert "splitResizeHandle" in html_source
+    assert "create_split_conversation" in app_source
+    assert "get_split_conversation_state" in app_source
+    assert "set_split_conversation_state" in app_source
+    assert "delete_split_conversation" in app_source
+    assert "splitTaskCollapse?.addEventListener('click', closeSplitTask)" in app_source
+    assert "splitTaskClose?.addEventListener('click', deleteSplitTask)" in app_source
+    assert "function deleteSplitTask()" in app_source
+    assert "独立子任务，并复制当前短期记忆快照" in app_source
+    assert "result.created" in app_source
+    assert "已恢复原子任务，继续使用其独立记忆" in app_source
+    assert "restoreSplitTaskForConversation" in app_source
+    assert "initializeSplitResizeHandle" in app_source
+    assert ".split-resize-handle" in css_source
+    assert "--split-pane-width" in css_source
+    assert "body.theme-light .main-content > .input-area" in css_source
+    assert "body.split-pane-mode .access-toggle span" in css_source
+    assert "body.split-pane-mode .model-badge svg" in css_source
+    assert "body.split-pane-mode #sidebarToggle" in css_source
+    assert "body.split-pane-mode #tokenIndicator" in css_source
+    split_hidden_rules = css_source.split("body.split-pane-mode .sidebar,", 1)[1].split("{", 1)[0]
+    assert ".agent-detail-panel" not in split_hidden_rules
+    assert "containerRect.right - mainRect.left" in app_source
+    assert "window.getComputedStyle(mainContent).minWidth" in app_source
+    assert "Narrow-pane safety" in css_source
+    assert ".input-tools-left .access-toggle" in css_source
+    assert "flex: 0 1 auto;" in css_source
+    assert ".input-tools-right .model-badge" in css_source
+    model_badge_rule = css_source.rsplit(".input-tools-right .model-badge {", 1)[1]
+    model_badge_rule = model_badge_rule.split("}", 1)[0]
+    assert "flex: 0 1 auto;" in model_badge_rule
+    assert "width: auto;" in model_badge_rule
+    assert "flex: 1 1 132px;" not in model_badge_rule
+    assert "#embeddingProviderText" in css_source
+    assert "overflow: visible;" in css_source
+    token_indicator_rule = css_source.rsplit(
+        ".header-right .token-indicator {", 1
+    )[1].split("}", 1)[0]
+    token_text_rule = css_source.rsplit(
+        ".header-right .token-text {", 1
+    )[1].split("}", 1)[0]
+    assert "flex: 0 0 auto;" in token_indicator_rule
+    assert "min-width: max-content;" in token_indicator_rule
+    assert "max-width: none;" in token_indicator_rule
+    assert "overflow: visible;" in token_text_rule
+    assert "text-overflow: clip;" in token_text_rule
+    assert "text-overflow: ellipsis;" not in token_text_rule
+    assert "function syncSplitTaskTheme(" in app_source
+    assert "jcodex-theme-change" in app_source
+    assert "jcodex-split-agent-detail" in app_source
+    assert "notifyParentAgentDetail(true)" in app_source
+    assert "notifyParentAgentDetail(false)" in app_source
+    assert "jcodex-split-browser-preview" in app_source
+    assert "notifyParentBrowserPreview(true)" in app_source
+    assert "notifyParentBrowserPreview(false)" in app_source
+    assert "split-child-agent-detail-open" in css_source
+    assert "body.split-child-browser-preview-open .split-task-frame" in css_source
+    assert "body.split-pane-mode .agent-detail-panel" in css_source
+    assert "body.split-workspace-open .agent-detail-panel" in css_source
+    assert "body.split-workspace-open.agent-detail-open .main-content" in css_source
+    assert "!document.body.classList.contains('split-workspace-open')" in app_source
+    assert "splitTaskFrame?.addEventListener('load'" in app_source
+    assert "split-pane-mode" in css_source
+    assert "splitPaneMode ? splitTaskIdFromUrl : ''" in app_source
+    assert "!item.is_split_task" in app_source
+    assert ".slice(-AGENT_ACTIVITY_MAX_ITEMS)" in app_source
+    assert "normalized.version <= previous.version" in app_source
+    render_helper = app_source.split("function renderAgentTeamCard(", 1)[1]
+    render_helper = render_helper.split("\nfunction updateAgentTeamSnapshot", 1)[0]
+    assert "card.innerHTML" not in render_helper
+    assert "card.className = `agent-team-card" not in render_helper
+    assert "existingChips = new Map" in render_helper
+    assert "chipList.insertBefore(chip" in render_helper
+    assert "updateAgentChip(chip" in render_helper
+    detail_helper = app_source.split("function renderAgentDetail(", 1)[1]
+    detail_helper = detail_helper.split("\nfunction openAgentDetail", 1)[0]
+    assert "activityList.innerHTML" not in detail_helper
+    assert "updateAgentActivityList(activityList" in detail_helper
+    assert "contextScope.replaceChildren" in detail_helper
+    assert "function renderAgentStream(" in app_source
+    assert "function renderAgentTool(" in app_source
+    assert "createAgentOutputMessage(" in app_source
+    assert "state.host || document.getElementById('chatMessages')" in app_source
+    agent_tool_helper = app_source.split("function renderAgentTool(", 1)[1].split(
+        "\nfunction updateAgentActivityList", 1
+    )[0]
+    assert "element.classList.remove(" in agent_tool_helper
+    assert "element.className = `tool-execution" not in agent_tool_helper
+    assert "cancelAnimationFrame(agentDetailScrollFrame)" in detail_helper
+    assert "AGENT_PUBLIC_ACTIVITY_KINDS.has(kind)" in app_source
+    assert "replace(/<think\\b" in app_source
+    assert "agent.reasoning" not in app_source
+    assert "agent.chain_of_thought" not in app_source
+    assert "get_subagent_detail" not in app_source
+    assert "result?.type === 'agent_activity'" not in app_source
+
+    send_helper = app_source.split("async function sendMessage()", 1)[1]
+    send_helper = send_helper.split("\n// 直接发送指定消息", 1)[0]
+    assert "const multiAgentMode = multiAgentModeEnabled;" in send_helper
+    assert "const allowAll = autoAllowAll;" in send_helper
+    assert "voiceMode,\n            multiAgentMode" in send_helper
+    assert "multiAgentMode,\n            allowAll" in send_helper
+
+    queued_helper = app_source.split("async function sendMessageWithText(", 1)[1]
+    queued_helper = queued_helper.split("\nfunction updateQueueDisplay", 1)[0]
+    assert "multiAgentMode = multiAgentModeEnabled" in queued_helper
+    assert "allowAll = autoAllowAll" in queued_helper
+    assert "Boolean(voiceMode),\n            Boolean(multiAgentMode)" in queued_helper
+    assert "Boolean(multiAgentMode),\n            Boolean(allowAll)" in queued_helper
+    assert "typeof queued.multiAgentMode === 'boolean'" in app_source
+    assert "typeof queued.allowAll === 'boolean'" in app_source
+    assert "function normalizeToolActor(result)" in app_source
+    assert "function isPrimaryToolEvent(result)" in app_source
+    assert "function primaryToolSummary(copy" in app_source
+    primary_summary = app_source.split("function primaryToolSummary(copy", 1)[1].split(
+        "\nfunction isQuestionToolName", 1
+    )[0]
+    assert "'主智能体'" not in primary_summary
+    result_router = app_source.split("function handleResult(", 1)[1]
+    result_router = result_router.split("\nfunction showApproval", 1)[0]
+    assert "!isPrimaryToolEvent(result)" in result_router
+    assert result_router.index("!isPrimaryToolEvent(result)") < result_router.index(
+        "trackExecutionResult(state, result)"
+    )
+    start_tool = app_source.split("function startToolExecution(", 1)[1]
+    start_tool = start_tool.split("\nfunction finishToolExecution", 1)[0]
+    assert "isQuestionToolName(result.tool) || !isPrimaryToolEvent(result)" in start_tool
+    assert "primaryToolSummary(progressCopy, target)" in start_tool
+    finish_tool = app_source.split("function finishToolExecution(", 1)[1]
+    finish_tool = finish_tool.split("\nfunction finishActiveToolExecutions", 1)[0]
+    assert "isQuestionToolName(result.tool) || !isPrimaryToolEvent(result)" in finish_tool
+    assert "primaryToolSummary(" in finish_tool
+    assert "QUESTION_TOOL_NAMES = new Set(['question', 'ask_user_question'])" in app_source
+    assert "function isQuestionToolName(toolName)" in app_source
+
+    history_helper = app_source.split("function renderConversation(conversation)", 1)[1]
+    history_helper = history_helper.split("\nasync function sendMessage()", 1)[0]
+    assert "event.type === 'agent_team'" in history_helper
+    assert "{animate: false}" in history_helper
+    assert "if (!isQuestionToolName(event.tool))" in history_helper
+
+    result_helper = app_source.split("function handleResult(", 1)[1]
+    result_helper = result_helper.split("\nfunction showApproval", 1)[0]
+    assert "result?.type === 'agent_team_update'" in result_helper
+    assert "updateAgentTeamSnapshot(" in result_helper
+
+    assert "closeChangeReview({restoreFocus: false});" in app_source
+    review_helper = app_source.split("function openChangeReview(", 1)[1]
+    review_helper = review_helper.split("\nfunction closeChangeReview", 1)[0]
+    assert "closeAgentDetail({restoreFocus: false});" in review_helper
+    reset_helper = app_source.split("function resetConversationView(", 1)[1]
+    reset_helper = reset_helper.split("\nfunction formatConversationDate", 1)[0]
+    assert "closeAgentDetail({restoreFocus: false});" in reset_helper
+    assert "detachAgentTeamCardsForConversation" in reset_helper
+    assert "markAgentTeamsTerminal(conversationId, messageId, 'cancelled');" in app_source
+
+    assert ".agent-team-card" in css_source
+    assert ".agent-chip" in css_source
+    assert ".agent-detail-panel" in css_source
+    assert "--agent-detail-width: 420px" in css_source
+    assert "@media (max-width: 1319px)" in css_source
+    assert "@media (max-width: 780px)" in css_source

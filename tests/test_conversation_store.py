@@ -95,6 +95,145 @@ def test_mark_completed_can_use_the_active_task_atomically(tmp_path) -> None:
     assert store.load(second["id"])["unread_completion"] is True
 
 
+def test_split_tasks_keep_messages_separate_and_fork_short_term_memory(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent task")
+    store.append_message(parent["id"], {"type": "user", "content": "parent only"})
+    parent_memory = store.memory_dir(parent["id"])
+    (parent_memory / "accumulated_compression.md").write_text(
+        "shared short context", encoding="utf-8"
+    )
+
+    child = store.create_split(parent["id"])
+
+    assert child["id"] != parent["id"]
+    assert child["messages"] == []
+    reloaded_parent = store.load(parent["id"])
+    reloaded_child = store.load(child["id"])
+    assert reloaded_parent["messages"][0]["content"] == "parent only"
+    assert reloaded_parent["memory_scope_id"] is None
+    assert reloaded_child["memory_scope_id"] is None
+    assert reloaded_parent["is_split_task"] is False
+    assert reloaded_child["is_split_task"] is True
+    assert reloaded_child["parent_conversation_id"] == parent["id"]
+    assert reloaded_parent["short_term_memory_id"] is None
+    assert reloaded_child["short_term_memory_id"] == child["id"]
+    assert store.short_term_memory_dir(parent["id"]) == parent_memory
+    assert store.short_term_memory_dir(child["id"]) == store.memory_dir(child["id"])
+    assert store.short_term_memory_dir(child["id"]) != parent_memory
+    assert (
+        store.short_term_memory_dir(child["id"])
+        / "accumulated_compression.md"
+    ).read_text(encoding="utf-8") == "shared short context"
+    (store.short_term_memory_dir(child["id"]) / "accumulated_compression.md").write_text(
+        "child branch", encoding="utf-8"
+    )
+    assert (
+        store.short_term_memory_dir(parent["id"])
+        / "accumulated_compression.md"
+    ).read_text(encoding="utf-8") == "shared short context"
+    assert reloaded_parent["split_conversation_id"] == child["id"]
+    assert reloaded_parent["split_open"] is True
+
+
+def test_split_state_reuses_child_and_persists_visibility_and_width(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+
+    first_child = store.create_split(parent["id"])
+    child_memory = store.short_term_memory_dir(first_child["id"])
+    (child_memory / "execution_history.md").write_text(
+        "child-only\n", encoding="utf-8"
+    )
+    (store.short_term_memory_dir(parent["id"]) / "execution_history.md").write_text(
+        "new-parent-state\n", encoding="utf-8"
+    )
+    store.set_split_state(parent["id"], is_open=False, width=640)
+    closed = store.get_split_state(parent["id"])
+    reopened_child = store.create_split(parent["id"])
+    reopened = store.get_split_state(parent["id"])
+
+    assert closed == {
+        "parent_conversation_id": parent["id"],
+        "conversation_id": first_child["id"],
+        "open": False,
+        "width": 640,
+    }
+    assert reopened_child["id"] == first_child["id"]
+    assert (child_memory / "execution_history.md").read_text(encoding="utf-8") == "child-only\n"
+    assert reopened["open"] is True
+    assert reopened["width"] == 640
+
+
+def test_deleting_split_then_creating_again_forks_latest_parent_memory(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    parent_history = store.short_term_memory_dir(parent["id"]) / "execution_history.md"
+    parent_history.write_text("first snapshot\n", encoding="utf-8")
+    first_child = store.create_split(parent["id"])
+
+    result = store.delete(first_child["id"])
+    parent_history.write_text("latest parent snapshot\n", encoding="utf-8")
+    second_child = store.create_split(parent["id"])
+
+    assert result["deleted_conversation_ids"] == [first_child["id"]]
+    assert not store.memory_dir(first_child["id"]).exists()
+    assert second_child["id"] != first_child["id"]
+    assert (
+        store.short_term_memory_dir(second_child["id"])
+        / "execution_history.md"
+    ).read_text(encoding="utf-8") == "latest parent snapshot\n"
+
+
+def test_deleting_primary_task_also_deletes_its_internal_split(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+
+    result = store.delete(parent["id"])
+
+    with pytest.raises(ValueError, match="Conversation not found"):
+        store.load(child["id"])
+    assert result["deleted_conversation_ids"] == sorted(
+        [parent["id"], child["id"]]
+    )
+
+
+def test_legacy_split_task_is_migrated_and_cannot_remain_globally_active(
+    tmp_path,
+) -> None:
+    root = tmp_path / "conversations"
+    store = ConversationStore(root)
+    parent = store.create("parent")
+    child = store.create_split(parent["id"])
+    child_file = root / child["id"] / "conversation.json"
+    legacy_child = json.loads(child_file.read_text(encoding="utf-8"))
+    legacy_child["short_term_memory_id"] = parent["id"]
+    legacy_child.pop("is_split_task", None)
+    legacy_child.pop("parent_conversation_id", None)
+    child_file.write_text(json.dumps(legacy_child), encoding="utf-8")
+    index = json.loads((root / "index.json").read_text(encoding="utf-8"))
+    index["active_id"] = child["id"]
+    for item in index["conversations"]:
+        if item["id"] == child["id"]:
+            item["short_term_memory_id"] = parent["id"]
+        item.pop("is_split_task", None)
+        item.pop("parent_conversation_id", None)
+    (root / "index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    migrated = ConversationStore(root)
+
+    assert migrated.active_id() == parent["id"]
+    migrated_child = migrated.load(child["id"])
+    assert migrated_child["is_split_task"] is True
+    assert migrated_child["short_term_memory_id"] == child["id"]
+    assert migrated.short_term_memory_dir(child["id"]) != migrated.short_term_memory_dir(
+        parent["id"]
+    )
+
+
 def test_visible_completion_becomes_unread_after_switch_before_opening(
     tmp_path,
 ) -> None:
@@ -211,3 +350,51 @@ def test_plan_terminal_state_persists_without_rewriting_steps(tmp_path) -> None:
     assert persisted["terminal_state"] == "complete"
     assert persisted["terminal_message"] == "task finished"
     assert persisted["terminal_at"]
+
+
+def test_agent_team_snapshot_replaces_only_its_own_newer_version(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    conversation = store.create("multi agent")
+    conversation_id = conversation["id"]
+
+    newest = store.upsert_agent_team_snapshot(
+        conversation_id,
+        {
+            "message_id": 800,
+            "team_id": "team-a",
+            "version": 3,
+            "status": "running",
+            "agents": [{"id": "research", "status": "running"}],
+        },
+    )
+    stale = store.upsert_agent_team_snapshot(
+        conversation_id,
+        {
+            "message_id": 800,
+            "team_id": "team-a",
+            "version": 2,
+            "status": "complete",
+            "agents": [{"id": "research", "status": "completed"}],
+        },
+    )
+    store.upsert_agent_team_snapshot(
+        conversation_id,
+        {
+            "message_id": 800,
+            "team_id": "team-b",
+            "version": 1,
+            "status": "complete",
+            "agents": [],
+        },
+    )
+
+    persisted = [
+        event
+        for event in store.load(conversation_id)["messages"]
+        if event.get("type") == "agent_team"
+    ]
+    assert stale == newest
+    assert len(persisted) == 2
+    team_a = next(event for event in persisted if event["team_id"] == "team-a")
+    assert team_a["version"] == 3
+    assert team_a["agents"][0]["status"] == "running"

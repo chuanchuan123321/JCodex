@@ -104,7 +104,7 @@ class PromptBuilder:
         step_count: int,
         max_steps: int,
         web_search_count: int = 0,
-        max_web_searches: int = 3,
+        max_web_searches: int = 8,
         accumulated_compression: str = "",
     ) -> str:
         """Build user message with task and context"""

@@ -1,4 +1,4 @@
-/* 麒麟OS-Agent Desktop UI - Light Minimal Theme */
+/* JCodex Desktop UI - Light Minimal Theme */
 
 :root {
     --bg-primary: #ffffff;
@@ -182,6 +182,170 @@ body {
     flex-direction: column;
     min-width: 0;
     background: var(--bg-primary);
+}
+
+.split-workspace {
+    display: flex;
+    position: relative;
+    flex: 0 0 var(--split-pane-width, 50%);
+    width: var(--split-pane-width, 50%);
+    min-width: 360px;
+    background: var(--bg-primary);
+}
+
+.split-workspace[hidden] {
+    display: none;
+}
+
+.split-task-frame {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: var(--bg-primary);
+}
+
+/* A preview opened inside the child iframe must cover the parent's floating
+   "子任务 ×" chip, otherwise that chip blocks the preview close action. */
+body.split-child-browser-preview-open .split-task-frame {
+    position: relative;
+    z-index: 4;
+}
+
+.split-resize-handle {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    bottom: 0;
+    left: -5px;
+    width: 10px;
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.split-resize-handle::after {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 5px;
+    width: 1px;
+    background: var(--codex-border, var(--border-color));
+    content: "";
+    transition: width 120ms ease, background-color 120ms ease;
+}
+
+.split-resize-handle:hover::after,
+.split-resize-handle:focus-visible::after,
+body.is-resizing-split .split-resize-handle::after {
+    width: 3px;
+    background: color-mix(in srgb, var(--codex-accent) 45%, var(--codex-border));
+}
+
+.split-resize-handle:focus-visible {
+    outline: 0;
+}
+
+body.is-resizing-split,
+body.is-resizing-split * {
+    cursor: col-resize !important;
+    user-select: none !important;
+}
+
+body.is-resizing-split .split-task-frame {
+    pointer-events: none;
+}
+
+.split-pane-toolbar {
+    position: absolute;
+    z-index: 3;
+    top: 8px;
+    right: 10px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 3px 3px 10px;
+    border: 1px solid var(--codex-border, var(--border-color));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+    color: var(--text-secondary);
+    font-size: 12px;
+    backdrop-filter: blur(10px);
+}
+
+.split-pane-close,
+.split-pane-collapse {
+    width: 26px;
+    height: 26px;
+}
+
+body.split-child-agent-detail-open .split-pane-toolbar {
+    display: none;
+}
+
+body.split-workspace-open .main-content {
+    flex: 1 1 auto;
+    min-width: 360px;
+}
+
+body.split-pane-mode .sidebar,
+body.split-pane-mode .sidebar-backdrop,
+body.split-pane-mode .split-workspace,
+body.split-pane-mode #splitTaskButton,
+body.split-pane-mode .change-review-panel {
+    display: none !important;
+}
+
+body.split-pane-mode .app-container,
+body.split-pane-mode .main-content {
+    width: 100%;
+}
+
+body.split-pane-mode .main-content {
+    flex: 1 1 auto;
+}
+
+/* The split child reuses the full app shell, but it has no sidebar of its own. */
+body.split-pane-mode #sidebarToggle {
+    display: none !important;
+}
+
+body.split-pane-mode #tokenIndicator {
+    display: none !important;
+}
+
+body.split-pane-mode .agent-detail-panel,
+body.split-pane-mode .agent-detail-panel.is-open {
+    z-index: 10000;
+    width: min(420px, 88vw);
+    max-width: calc(100vw - 36px);
+}
+
+@media (max-width: 1080px) {
+    .split-workspace {
+        min-width: 300px;
+    }
+
+    body.split-workspace-open .main-content {
+        min-width: 300px;
+    }
+}
+
+@media (max-width: 780px) {
+    .split-workspace {
+        position: fixed;
+        z-index: 60;
+        inset: 0;
+        min-width: 0;
+        border-left: 0;
+    }
+
+    .split-resize-handle {
+        display: none;
+    }
+
+    .split-pane-toolbar {
+        top: 7px;
+        right: 7px;
+    }
 }
 
 .chat-header {
@@ -3383,7 +3547,7 @@ body.theme-dark ::-webkit-scrollbar-thumb:hover {
     display: block;
 }
 
-/* Kylin-inspired visual polish */
+/* Desktop visual polish */
 :root {
     --kylin-blue: #0f62fe;
     --kylin-cyan: #00a6d6;
@@ -3848,7 +4012,7 @@ body.theme-dark .model-badge {
     color: var(--text-primary);
 }
 
-/* Final Kylin visual overrides */
+/* Final desktop visual overrides */
 .welcome-message {
     max-width: 880px;
     align-items: flex-start;
@@ -4228,6 +4392,79 @@ body.theme-dark .conversation-context-menu {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
+    }
+}
+
+/* A parent-agent detail panel overlays an open split instead of becoming a
+   third flex column that squeezes both conversations. */
+body.split-workspace-open .agent-detail-panel,
+body.split-workspace-open .agent-detail-panel.is-open {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 120;
+    flex-basis: 0;
+    width: min(var(--agent-detail-width), calc(100vw - 36px));
+    max-width: calc(100vw - 36px);
+    border-left-width: 1px;
+    box-shadow: -18px 0 52px rgba(20, 20, 18, 0.14);
+    transform: translateX(100%);
+}
+
+body.split-workspace-open .agent-detail-panel.is-open {
+    transform: translateX(0);
+}
+
+body.split-workspace-open.agent-detail-open .main-content {
+    min-width: 0;
+}
+
+/* The composer has no full-width footer plate; only the rounded input is visible. */
+body.theme-light .main-content > .input-area,
+body.theme-dark .main-content > .input-area {
+    align-self: center;
+    width: min(820px, calc(100% - 40px));
+    padding: 10px 0 16px;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+/* A split pane is desktop UI even when its iframe viewport is narrow. */
+body.split-pane-mode .access-toggle span,
+body.split-pane-mode .access-chevron,
+body.split-pane-mode .model-badge svg {
+    display: inline-flex;
+}
+
+body.split-pane-mode .access-toggle {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding-right: 6px;
+    padding-left: 6px;
+}
+
+body.split-pane-mode .access-toggle span,
+body.split-pane-mode #modelName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+body.split-pane-mode .access-toggle span {
+    max-width: 74px;
+}
+
+body.split-pane-mode .model-badge {
+    max-width: 132px;
+}
+
+@media (max-width: 780px) {
+    body:not(.split-pane-mode).theme-light .main-content > .input-area,
+    body:not(.split-pane-mode).theme-dark .main-content > .input-area {
+        width: calc(100% - 24px);
+        padding: 8px 0 12px;
     }
 }
 
@@ -7848,11 +8085,11 @@ body.theme-dark .input-area {
 }
 
 body.theme-light .input-area {
-    background: linear-gradient(to bottom, transparent, var(--codex-canvas) 34%);
+    background: transparent;
 }
 
 body.theme-dark .input-area {
-    background: linear-gradient(to bottom, transparent, var(--codex-canvas) 34%);
+    background: transparent;
 }
 
 body.theme-light .input-container,
@@ -9852,4 +10089,1068 @@ body.is-resizing-sidebar * {
         width: min(var(--voice-strands-width, 96vw), 96vw) !important;
         height: 230px !important;
     }
+}
+
+/* Multi-agent collaboration workspace. Kept after legacy overrides intentionally. */
+:root {
+    --agent-detail-width: 420px;
+    --agent-purple: #7569ee;
+    --agent-blue: #4777e8;
+}
+
+.multi-agent-mode-pill {
+    background: color-mix(in srgb, var(--agent-purple) 11%, var(--codex-hover));
+}
+
+.agent-team-card {
+    display: flex;
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 780px;
+    min-height: 38px;
+    margin: 2px auto;
+    padding: 3px 0;
+    overflow: visible;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    transform: translateY(5px);
+    transition: opacity 180ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.agent-team-card.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.agent-team-card-header,
+.agent-team-card-title,
+.agent-team-card-title > span {
+    display: flex;
+    align-items: center;
+}
+
+.agent-team-card-header {
+    justify-content: space-between;
+    min-width: 0;
+    gap: 12px;
+}
+
+.agent-team-card-title {
+    min-width: 0;
+    gap: 9px;
+}
+
+.agent-team-card-title > span {
+    min-width: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+}
+
+.agent-team-card-title strong {
+    color: var(--codex-text);
+    font-size: 12px;
+    font-weight: 670;
+}
+
+.agent-team-card-title small {
+    color: var(--codex-faint);
+    font-size: 10px;
+}
+
+.agent-network-mark {
+    position: relative;
+    display: grid;
+    flex: 0 0 auto;
+    width: 23px;
+    height: 23px;
+    padding: 4px;
+    border: 1px solid color-mix(in srgb, var(--agent-purple) 22%, var(--codex-border));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--agent-purple) 10%, var(--codex-surface-solid));
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 2px;
+}
+
+.agent-network-mark i {
+    display: block;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--agent-purple) 82%, var(--codex-text));
+}
+
+.agent-team-card-status {
+    flex: 0 0 auto;
+    color: var(--codex-muted);
+    font-size: 11px;
+    font-weight: 590;
+}
+
+.agent-chip-list {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.agent-chip {
+    display: inline-grid;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(260px, 100%);
+    min-height: 34px;
+    align-items: center;
+    padding: 4px 7px;
+    border: 1px solid var(--codex-border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--codex-surface-solid) 50%, transparent);
+    color: var(--codex-text);
+    cursor: pointer;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+    text-align: left;
+    transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.agent-chip:hover {
+    border-color: var(--codex-border-strong);
+    background: var(--codex-surface-solid);
+    transform: translateY(-1px);
+}
+
+.agent-chip.is-selected {
+    border-color: color-mix(in srgb, var(--agent-purple) 44%, var(--codex-border));
+    background: color-mix(in srgb, var(--agent-purple) 9%, var(--codex-surface-solid));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent-purple) 9%, transparent);
+}
+
+.agent-chip:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--agent-purple) 48%, transparent);
+    outline-offset: 2px;
+}
+
+.agent-chip .agent-network-mark {
+    width: 23px;
+    height: 23px;
+    padding: 4px;
+    border-radius: 7px;
+}
+
+.agent-chip-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.agent-chip-copy strong,
+.agent-chip-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-chip-copy strong {
+    color: var(--codex-text);
+    font-size: 11.5px;
+    font-weight: 640;
+}
+
+.agent-chip-copy small {
+    color: var(--codex-muted);
+    font-size: 10px;
+}
+
+.agent-chip-status {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+}
+
+.agent-chip-status > span {
+    display: block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--codex-faint);
+}
+
+.agent-chip.is-running .agent-chip-status > span {
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid color-mix(in srgb, var(--agent-blue) 28%, transparent);
+    border-top-color: var(--agent-blue);
+    background: transparent;
+    animation: agentStatusSpin 900ms linear infinite;
+}
+
+.agent-chip.is-waiting .agent-chip-status > span {
+    background: #d79727;
+    box-shadow: 0 0 0 3px color-mix(in srgb, #d79727 12%, transparent);
+}
+
+.agent-chip.is-completed .agent-chip-status > span {
+    background: var(--codex-green);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-green) 11%, transparent);
+}
+
+.agent-chip.is-failed .agent-chip-status > span {
+    background: #d94b4b;
+    box-shadow: 0 0 0 3px color-mix(in srgb, #d94b4b 11%, transparent);
+}
+
+.agent-chip.is-cancelled .agent-chip-status > span {
+    background: transparent;
+    border: 1.5px solid var(--codex-faint);
+}
+
+.agent-detail-panel {
+    position: relative;
+    z-index: 46;
+    display: flex;
+    flex: 0 0 0;
+    width: 0;
+    min-width: 0;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    border-left: 0 solid var(--codex-border);
+    background: var(--codex-surface-solid);
+    color: var(--codex-text);
+    flex-direction: column;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(16px);
+    transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1), flex-basis 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 160ms ease, transform 220ms ease;
+}
+
+.agent-detail-panel.is-open {
+    flex-basis: var(--agent-detail-width);
+    width: var(--agent-detail-width);
+    border-left-width: 1px;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+}
+
+.agent-detail-resize-handle {
+    position: absolute;
+    z-index: 4;
+    top: 0;
+    bottom: 0;
+    left: -4px;
+    width: 8px;
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.agent-detail-resize-handle::after {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 4px;
+    width: 1px;
+    background: transparent;
+    content: "";
+    transition: background-color 140ms ease, width 140ms ease;
+}
+
+.agent-detail-resize-handle:hover::after,
+.agent-detail-resize-handle:focus-visible::after,
+body.is-resizing-agent-detail .agent-detail-resize-handle::after {
+    width: 2px;
+    background: color-mix(in srgb, var(--agent-purple) 45%, transparent);
+}
+
+.agent-detail-resize-handle:focus-visible {
+    outline: 0;
+}
+
+body.is-resizing-agent-detail,
+body.is-resizing-agent-detail * {
+    cursor: col-resize !important;
+    user-select: none !important;
+}
+
+body.is-resizing-agent-detail .agent-detail-panel {
+    transition: none;
+}
+
+body.agent-detail-open .main-content {
+    min-width: 380px;
+}
+
+.agent-detail-toolbar {
+    display: flex;
+    flex: 0 0 var(--header-height);
+    min-height: var(--header-height);
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 11px 0 15px;
+    border-bottom: 1px solid var(--codex-border);
+}
+
+.agent-detail-heading {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 9px;
+}
+
+.agent-detail-heading > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.agent-detail-heading span:not(.agent-network-mark) {
+    color: var(--codex-faint);
+    font-size: 9px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.agent-detail-heading strong {
+    overflow: hidden;
+    color: var(--codex-text);
+    font-size: 13px;
+    font-weight: 670;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-detail-close {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--codex-muted);
+    cursor: pointer;
+}
+
+.agent-detail-close:hover,
+.agent-detail-close:focus-visible {
+    background: var(--codex-hover);
+    color: var(--codex-text);
+    outline: none;
+}
+
+.agent-detail-close:focus-visible {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--agent-purple) 32%, transparent);
+}
+
+.agent-detail-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 17px 28px;
+}
+
+.agent-detail-profile {
+    padding: 26px 2px 22px;
+    border-bottom: 1px solid var(--codex-border);
+}
+
+.agent-detail-badges {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 13px;
+}
+
+.agent-detail-status,
+.agent-detail-access,
+.agent-detail-section-title > span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: var(--codex-hover);
+    color: var(--codex-muted);
+    font-size: 10px;
+    font-weight: 620;
+}
+
+.agent-detail-status.is-running {
+    background: color-mix(in srgb, var(--agent-blue) 11%, var(--codex-surface-solid));
+    color: var(--agent-blue);
+}
+
+.agent-detail-status.is-completed {
+    background: color-mix(in srgb, var(--codex-green) 11%, var(--codex-surface-solid));
+    color: var(--codex-green);
+}
+
+.agent-detail-status.is-waiting {
+    background: color-mix(in srgb, #d79727 12%, var(--codex-surface-solid));
+    color: #a66c0d;
+}
+
+.agent-detail-status.is-failed {
+    background: color-mix(in srgb, #d94b4b 11%, var(--codex-surface-solid));
+    color: #c33d3d;
+}
+
+.agent-detail-profile h2 {
+    margin: 0;
+    color: var(--codex-text);
+    font-size: 22px;
+    font-weight: 660;
+    letter-spacing: -0.025em;
+    line-height: 1.2;
+}
+
+.agent-detail-profile p {
+    margin: 8px 0 0;
+    color: var(--codex-muted);
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.agent-detail-section {
+    padding: 19px 2px 4px;
+}
+
+.agent-detail-section[hidden] {
+    display: none;
+}
+
+.agent-detail-section h3 {
+    margin: 0 0 9px;
+    color: var(--codex-text);
+    font-size: 11px;
+    font-weight: 680;
+    letter-spacing: 0.02em;
+}
+
+.agent-detail-task,
+.agent-context-note,
+.agent-error-section p {
+    margin: 0;
+    color: var(--codex-muted);
+    font-size: 12px;
+    line-height: 1.62;
+    white-space: pre-wrap;
+}
+
+.agent-detail-section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 9px;
+}
+
+.agent-detail-section-title h3 {
+    margin: 0;
+}
+
+.agent-context-section {
+    margin-top: 16px;
+    padding: 15px;
+    border: 1px solid color-mix(in srgb, var(--agent-purple) 18%, var(--codex-border));
+    border-radius: 13px;
+    background: color-mix(in srgb, var(--agent-purple) 5%, var(--codex-surface-solid));
+}
+
+.agent-context-section .agent-detail-section-title > span {
+    background: color-mix(in srgb, var(--agent-purple) 11%, var(--codex-surface-solid));
+    color: color-mix(in srgb, var(--agent-purple) 74%, var(--codex-text));
+}
+
+.agent-context-scope {
+    display: grid;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.agent-collaboration-section {
+    margin-top: 16px;
+    padding: 15px;
+    border: 1px solid color-mix(in srgb, var(--agent-blue) 18%, var(--codex-border));
+    border-radius: 13px;
+    background: color-mix(in srgb, var(--agent-blue) 4%, var(--codex-surface-solid));
+}
+
+.agent-collaboration-list {
+    display: grid;
+    gap: 8px;
+    max-height: clamp(176px, 29vh, 320px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--codex-faint) 52%, transparent) transparent;
+    padding-right: 4px;
+}
+
+.agent-collaboration-list::-webkit-scrollbar {
+    width: 7px;
+}
+
+.agent-collaboration-list::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--codex-faint) 44%, transparent);
+    background-clip: padding-box;
+}
+
+.agent-collaboration-list::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--codex-muted) 54%, transparent);
+    background-clip: padding-box;
+}
+
+/* Desktop sidebar may collapse to its navigation rail while keeping every view reachable. */
+.sidebar-collapse-button {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--codex-faint);
+    cursor: pointer;
+    transition: background-color 140ms ease, color 140ms ease, transform 180ms ease;
+}
+
+.sidebar-collapse-button:hover,
+.sidebar-collapse-button:focus-visible {
+    background: var(--codex-hover);
+    color: var(--codex-text);
+    outline: none;
+}
+
+.sidebar-collapse-button:focus-visible {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--codex-accent) 42%, transparent);
+}
+
+body.theme-light .sidebar.sidebar-shell.is-collapsed,
+body.theme-dark .sidebar.sidebar-shell.is-collapsed,
+.sidebar.sidebar-shell.is-collapsed {
+    width: var(--sidebar-rail-width);
+    min-width: var(--sidebar-rail-width);
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-header {
+    justify-content: center;
+    padding: 10px 7px;
+}
+
+.sidebar.sidebar-shell.is-collapsed .logo,
+.sidebar.sidebar-shell.is-collapsed .sidebar-content {
+    display: none;
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-workbench {
+    grid-template-columns: var(--sidebar-rail-width);
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-footer {
+    display: flex;
+    justify-content: center;
+    padding: 6px 0 8px;
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-footer .status-text {
+    display: none;
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-footer .status-indicator {
+    padding: 6px;
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-resize-handle {
+    pointer-events: none;
+    opacity: 0;
+}
+
+.sidebar.sidebar-shell.is-collapsed .sidebar-collapse-button svg {
+    transform: rotate(180deg);
+}
+
+@media (max-width: 780px) {
+    .sidebar-collapse-button {
+        display: none;
+    }
+
+    body.sidebar-open .sidebar.sidebar-shell.is-collapsed {
+        width: min(300px, 86vw);
+        min-width: min(300px, 86vw);
+    }
+
+    body.sidebar-open .sidebar.sidebar-shell.is-collapsed .sidebar-workbench {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    body.sidebar-open .sidebar.sidebar-shell.is-collapsed .sidebar-content {
+        display: block;
+    }
+}
+
+/* Child-agent output lives in a narrow panel, so rich Markdown must never widen it. */
+.agent-detail-panel .agent-activity-list,
+.agent-detail-panel .agent-activity-list .message,
+.agent-detail-panel .agent-activity-list .message-wrapper,
+.agent-detail-panel .agent-activity-list .message-bubble,
+.agent-detail-panel .agent-activity-list .tool-execution,
+.agent-detail-panel .agent-result-content {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.agent-detail-panel .agent-activity-list .message,
+.agent-detail-panel .agent-activity-list .tool-execution {
+    width: 100%;
+}
+
+.agent-detail-panel .markdown-table-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-gutter: stable;
+}
+
+.agent-detail-panel .markdown-table-wrap table {
+    width: max-content;
+    min-width: 100%;
+    max-width: none;
+}
+
+.agent-detail-panel .markdown-table-wrap th,
+.agent-detail-panel .markdown-table-wrap td {
+    min-width: 72px;
+    padding: 7px 8px;
+    font-size: 11px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.agent-detail-panel .markdown-table-wrap code,
+.agent-detail-panel .message-bubble code:not(.markdown-code code),
+.agent-detail-panel .tool-result code:not(.markdown-code code) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.agent-detail-panel .markdown-code,
+.agent-detail-panel .message-bubble pre,
+.agent-detail-panel .tool-result,
+.agent-detail-panel .latex-display {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+}
+
+.agent-collaboration-item {
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1px solid var(--codex-border);
+    border-radius: 9px;
+    background: var(--codex-surface-solid);
+}
+
+.agent-collaboration-item.is-artifact {
+    border-color: color-mix(in srgb, var(--codex-green) 30%, var(--codex-border));
+}
+
+.agent-collaboration-item.is-claim {
+    border-color: color-mix(in srgb, #d79727 28%, var(--codex-border));
+}
+
+.agent-collaboration-item.is-dependency {
+    border-color: color-mix(in srgb, var(--agent-purple) 26%, var(--codex-border));
+}
+
+.agent-collaboration-item strong {
+    display: block;
+    color: var(--codex-text);
+    font-size: 10px;
+    font-weight: 650;
+}
+
+.agent-collaboration-item p {
+    margin: 4px 0 0;
+    color: var(--codex-muted);
+    font-size: 11px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.agent-collaboration-item span {
+    display: block;
+    margin-top: 6px;
+    color: var(--codex-faint);
+    font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.agent-context-item {
+    display: grid;
+    min-width: 0;
+    padding: 8px 9px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--codex-surface-solid) 72%, transparent);
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 8px;
+}
+
+.agent-context-item span {
+    color: var(--codex-faint);
+    font-size: 10px;
+}
+
+.agent-context-item strong {
+    overflow-wrap: anywhere;
+    color: var(--codex-muted);
+    font-size: 10px;
+    font-weight: 560;
+    line-height: 1.45;
+}
+
+.agent-activity-list {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.agent-activity-item {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    padding: 2px 0 17px;
+    grid-template-columns: 17px minmax(0, 1fr);
+    gap: 8px;
+}
+
+.agent-activity-item:not(:last-child)::before {
+    position: absolute;
+    top: 11px;
+    bottom: -1px;
+    left: 4px;
+    width: 1px;
+    background: var(--codex-border);
+    content: "";
+}
+
+.agent-activity-marker {
+    position: relative;
+    z-index: 1;
+    display: block;
+    width: 9px;
+    height: 9px;
+    margin-top: 5px;
+    border: 2px solid var(--codex-surface-solid);
+    border-radius: 50%;
+    background: var(--agent-blue);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent-blue) 24%, var(--codex-border));
+}
+
+.agent-activity-item.is-result .agent-activity-marker,
+.agent-activity-item.is-artifact .agent-activity-marker {
+    background: var(--codex-green);
+}
+
+.agent-activity-item.is-error .agent-activity-marker {
+    background: #d94b4b;
+}
+
+.agent-activity-copy {
+    min-width: 0;
+}
+
+.agent-activity-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.agent-activity-heading strong {
+    color: var(--codex-text);
+    font-size: 11px;
+    font-weight: 620;
+}
+
+.agent-activity-heading time {
+    flex: 0 0 auto;
+    color: var(--codex-faint);
+    font-size: 9px;
+}
+
+.agent-activity-content {
+    margin-top: 4px;
+    color: var(--codex-muted);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.agent-activity-content > :first-child,
+.agent-result-content > :first-child {
+    margin-top: 0;
+}
+
+.agent-activity-content > :last-child,
+.agent-result-content > :last-child {
+    margin-bottom: 0;
+}
+
+.agent-activity-empty {
+    padding: 17px 0;
+    color: var(--codex-faint);
+    font-size: 11px;
+    text-align: center;
+}
+
+.agent-result-section {
+    margin-top: 16px;
+    padding: 15px;
+    border: 1px solid color-mix(in srgb, var(--codex-green) 18%, var(--codex-border));
+    border-radius: 13px;
+    background: color-mix(in srgb, var(--codex-green) 5%, var(--codex-surface-solid));
+}
+
+.agent-result-content {
+    color: var(--codex-muted);
+    font-size: 12px;
+    line-height: 1.62;
+}
+
+.agent-error-section {
+    margin-top: 14px;
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, #d94b4b 20%, var(--codex-border));
+    border-radius: 12px;
+    background: color-mix(in srgb, #d94b4b 5%, var(--codex-surface-solid));
+}
+
+@keyframes agentStatusSpin {
+    to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1319px) {
+    .agent-detail-resize-handle {
+        display: none;
+    }
+
+    .agent-detail-panel,
+    .agent-detail-panel.is-open {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 91;
+        width: min(480px, 88vw);
+        max-width: 100vw;
+        border-left-width: 1px;
+        box-shadow: -18px 0 52px rgba(20, 20, 18, 0.14);
+        transform: translateX(100%);
+    }
+
+    .agent-detail-panel.is-open {
+        transform: translateX(0);
+    }
+
+    body.agent-detail-open .main-content {
+        min-width: 0;
+    }
+}
+
+@media (max-width: 780px) {
+    .agent-detail-panel,
+    .agent-detail-panel.is-open {
+        width: 100vw;
+    }
+
+    .agent-detail-scroll {
+        padding-right: 15px;
+        padding-left: 15px;
+    }
+}
+
+@media (max-width: 620px) {
+    .agent-team-card {
+        align-items: flex-start;
+        padding: 3px 0;
+        flex-direction: column;
+    }
+
+    .agent-chip {
+        max-width: 100%;
+    }
+
+    .agent-team-card-status {
+        max-width: 112px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .agent-context-item {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 3px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-team-card,
+    .agent-chip,
+    .agent-detail-panel,
+    .agent-chip.is-running .agent-chip-status > span {
+        animation: none !important;
+        transition: none !important;
+    }
+}
+
+/* Narrow-pane safety: preserve controls and truncate only their text labels. */
+.chat-header {
+    min-width: 0;
+    gap: 10px;
+    overflow: hidden;
+}
+
+.header-left {
+    flex: 1 1 140px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.chat-title,
+.header-subtitle {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.header-right {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: calc(100% - 48px);
+    overflow: hidden;
+}
+
+.header-right > .btn-icon,
+.header-right svg,
+.embedding-dot {
+    flex: 0 0 auto;
+}
+
+.header-right .embedding-badge {
+    flex: 1 1 132px;
+    min-width: 32px;
+    max-width: 164px;
+}
+
+#embeddingProviderText {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.header-right .token-indicator {
+    flex: 0 0 auto;
+    width: max-content;
+    min-width: max-content;
+    max-width: none;
+}
+
+.header-right .token-progress {
+    flex: 0 0 48px;
+    min-width: 48px;
+}
+
+.header-right .token-text {
+    flex: 0 0 auto;
+    min-width: max-content;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
+.input-toolbar {
+    width: 100%;
+    min-width: 0;
+    gap: 6px;
+    overflow: visible;
+}
+
+.input-tools-left,
+.input-tools-right {
+    min-width: 0;
+    gap: 6px;
+}
+
+.input-tools-left {
+    flex: 1 1 52%;
+    overflow: visible;
+}
+
+.input-tools-right {
+    flex: 1 1 48%;
+    justify-content: flex-end;
+    overflow: hidden;
+}
+
+.composer-add-menu-anchor,
+.btn-input-tool,
+.btn-voice,
+.input-area .btn-send,
+.input-area .btn-stop,
+.access-toggle > svg,
+.model-badge > svg {
+    flex: 0 0 auto;
+}
+
+.input-tools-left .access-toggle {
+    flex: 0 1 auto;
+    min-width: 32px;
+    max-width: 180px;
+    overflow: hidden;
+}
+
+.access-toggle span,
+.plan-mode-pill-label,
+#modelName {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.input-tools-left .plan-mode-pill {
+    flex: 0 1 auto;
+    min-width: 32px;
+    max-width: 116px;
+    overflow: hidden;
+}
+
+.input-tools-right .model-badge {
+    flex: 0 1 auto;
+    width: auto;
+    min-width: 32px;
+    max-width: 180px;
+    overflow: hidden;
 }

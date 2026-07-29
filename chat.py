@@ -264,9 +264,9 @@ class Toast:
 
 
 # 从环境变量读取配置
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "30000"))
-MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
-MAX_WEB_SEARCHES = int(os.getenv("MAX_WEB_SEARCHES", "3"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "50000"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "100"))
+MAX_WEB_SEARCHES = int(os.getenv("MAX_WEB_SEARCHES", "8"))
 
 
 class NaturalTaskExecutor:
@@ -322,7 +322,7 @@ class NaturalTaskExecutor:
         self.web_search_count = 0  # 网络搜索计数
         self.max_web_searches = MAX_WEB_SEARCHES  # 从环境变量读取
         self.max_steps = MAX_STEPS  # 从环境变量读取
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "30000"))
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
         self.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
         self.context_compactor = ContextCompactor(
             ContextCompactor.policy_from_runtime(self.context_window, None)

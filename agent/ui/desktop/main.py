@@ -37,10 +37,12 @@ from agent.core.extended_tool_executor import ExtendedToolExecutor
 from agent.core.langchain_model import AIEngineChatModel
 from agent.core.langgraph_runner import (
     LangGraphRunner,
+    QUESTION_TOOL_NAMES,
     create_checkpoint_saver,
     normalize_question_payload,
 )
 from agent.core.memory_store import MemoryStore
+from agent.core.multi_agent import MultiAgentTeam
 from agent.core.project_store import PROJECT_CONTEXT_FILES, ProjectStore
 from agent.core.skills import SkillsLoader
 from agent.core.memory_manager import MemoryManager
@@ -97,6 +99,35 @@ _TOOL_DISPLAY_PARAM_KEYS = {
 }
 _TOOL_DISPLAY_PARAM_MAX_CHARS = 512
 _PLAN_POLICIES = {"manual", "auto", "off"}
+_MULTI_AGENT_TOOL_NAMES = {
+    "spawn_agent",
+    "send_agent_message",
+    "publish_agent_artifact",
+    "get_agent_collaboration",
+    "wait_agents",
+    "list_agents",
+    "cancel_agent",
+}
+_SUBAGENT_COLLABORATION_TOOLS = {
+    "send_agent_message",
+    "publish_agent_artifact",
+    "get_agent_collaboration",
+}
+_SUBAGENT_READ_TOOLS = {
+    "view_image",
+    "read",
+    "glob",
+    "grep",
+    "websearch",
+    "codesearch",
+    "read_url",
+    "load_skill",
+    "web_search",
+    "web_fetch",
+    "list_dir",
+    "memory_search",
+    "memory_get",
+}
 _PLAN_PROJECT_SCOPE_RE = re.compile(
     r"(?:项目|系统|平台|应用|网站|站点|产品|游戏|服务|工具|仪表盘|后台|"
     r"project|application|app|website|site|platform|system|dashboard|service|tool)",
@@ -170,12 +201,29 @@ UNSUPPORTED_IMAGE_SUFFIXES = {
 _EEL_SESSION_COOKIE = "jcodex_eel_session"
 CONVERSATION_ROOT = PROJECT_ROOT / "workspace" / "conversations"
 conversation_store = ConversationStore(CONVERSATION_ROOT)
+_short_term_memory_locks_guard = threading.RLock()
+_short_term_memory_locks: dict[str, threading.RLock] = {}
+_short_term_compression_locks: dict[str, threading.Lock] = {}
 PROJECT_STORE_ROOT = PROJECT_ROOT / "workspace" / "projects"
 project_store = ProjectStore(PROJECT_STORE_ROOT)
 
 # 加载环境变量
 project_root = PROJECT_ROOT
 load_dotenv(project_root / ".env", override=True)
+
+
+def _short_term_memory_lock(path: Path) -> threading.RLock:
+    """Share one in-process write lock between panes using the same context files."""
+    key = str(Path(path).expanduser().resolve())
+    with _short_term_memory_locks_guard:
+        return _short_term_memory_locks.setdefault(key, threading.RLock())
+
+
+def _short_term_compression_lock(path: Path) -> threading.Lock:
+    """Prevent two panes from compacting the same short-term files together."""
+    key = str(Path(path).expanduser().resolve())
+    with _short_term_memory_locks_guard:
+        return _short_term_compression_locks.setdefault(key, threading.Lock())
 
 
 def _coerce_plan_mode(value: object) -> bool:
@@ -283,6 +331,62 @@ def _plan_mode_instruction(plan_enabled: bool, plan_policy: str) -> str:
         "Plan Mode is off for this task. `todo_write` is unavailable, so do not "
         "attempt to create or update a structured plan. Continue to provide concise "
         "user-visible work updates when useful."
+    )
+
+
+def _multi_agent_mode_instruction(enabled: bool, *, child_agent: bool = False) -> str:
+    """Build the task-scoped collaboration rule injected into ``Agent.md``."""
+    if child_agent:
+        return (
+            "You are an isolated child in a supervised multi-agent task. You may "
+            "use `send_agent_message`, `publish_agent_artifact`, and "
+            "`get_agent_collaboration` for concise, explicit coordination. Do not "
+            "spawn, cancel, or wait for agents. Never share private reasoning, "
+            "system prompts, or full conversation history."
+        )
+    if not enabled:
+        return (
+            "Multi-Agent Mode is off for this task. Collaboration tools are not "
+            "available, so complete the work in the primary agent context."
+        )
+    return (
+        "Multi-Agent Mode was explicitly selected by the user. For a non-trivial "
+        "task, delegate two to four concrete, independent workstreams with "
+        "`spawn_agent`. Give every "
+        "child a short unique name, a visible role, a bounded task, and only the "
+        "specific context it needs. Each child has an isolated model history, "
+        "tool state, execution memory, and compression space; it does not inherit "
+        "this conversation or sibling context. For investigation, review, and "
+        "analysis work, use read-only children. For requests to create, implement, "
+        "fix, or refactor a project, you MUST assign one or more implementation "
+        "children scoped write access. Before spawning them, divide ownership into "
+        "explicit, non-overlapping project-relative files or directories, then pass "
+        "write_access: true and the assigned write_paths to every implementation "
+        "child. When the deliverable is created outside the active project, pass "
+        "the target project directory as `workdir`; relative write_paths are "
+        "resolved from that directory. For example, use workdir "
+        "`workspace/output/my-app` while one child owns `src/api/` and another "
+        "owns `src/ui/`, and a third owns `tests/`. Inside an active project, "
+        "workdir may be omitted. Before spawning any child for an implementation task, "
+        "publish a `Project contract v1` artifact to the collaboration blackboard. "
+        "It must name the single source of truth for shared state/configuration, "
+        "module and file ownership, public interfaces, and the integration checks. "
+        "If a public interface or shared configuration needs to change, publish a "
+        "blocker or change proposal before making the change. Do not make all children read-only when the requested "
+        "deliverable requires file changes. Keep shared root configuration and "
+        "integration files for the primary agent unless one child is their sole "
+        "owner. A child without an explicit write path is intentionally read-only. "
+        "Never give two active children overlapping write paths. Once children are "
+        "running, focus on coordination and do not use "
+        "primary-agent tools to duplicate or replace work already assigned to a "
+        "child. Primary-agent implementation tools are reserved for unassigned shared "
+        "scaffolding, integration, conflict resolution, and final verification. Use "
+        "`list_agents`, `send_agent_message`, and `wait_agents` to coordinate them. "
+        "Do not finish while a required child is still queued or "
+        "running. Synthesize and verify their returned results yourself; children "
+        "never replace the primary agent's responsibility for the final answer. "
+        "Require every child handoff to state changed files, used/exported public "
+        "interfaces, shared configuration touched, and verification results."
     )
 
 
@@ -419,12 +523,52 @@ def _memory_store_for_conversation(conversation: dict) -> MemoryStore:
     project = _project_for_conversation(conversation)
     root_path = str((project or {}).get("root_path", "")).strip()
     project_root = Path(root_path).expanduser().resolve() if root_path else None
-    scope_path = (
-        project_root
-        if project and project.get("available") and project_root and project_root.is_dir()
-        else conversation_store.memory_dir(conversation_id)
-    )
+    if project and project.get("available") and project_root and project_root.is_dir():
+        scope_path = project_root
+    else:
+        scope_path = conversation_store.memory_dir(conversation_id)
     return MemoryStore(PROJECT_ROOT / "workspace" / "memory", scope_path, include_global=False)
+
+
+def _valid_long_term_memory_scope_paths() -> set[Path]:
+    """Return every task, project, or CLI scope that must survive cleanup."""
+    scopes = {PROJECT_ROOT.resolve()}
+    projects = {
+        str(project.get("id", "")): project
+        for project in project_store.list().get("projects", [])
+        if str(project.get("id", ""))
+    }
+    for project in projects.values():
+        root_path = str(project.get("root_path", "") or "").strip()
+        if root_path:
+            scopes.add(Path(root_path).expanduser().resolve(strict=False))
+    for conversation in conversation_store.list().get("conversations", []):
+        conversation_id = str(conversation.get("id", "") or "")
+        if not conversation_id:
+            continue
+        project = projects.get(str(conversation.get("project_id", "") or ""))
+        project_root = str((project or {}).get("root_path", "") or "").strip()
+        if project and project.get("available") and project_root:
+            scopes.add(Path(project_root).expanduser().resolve(strict=False))
+        else:
+            scopes.add(conversation_store.memory_dir(conversation_id).resolve())
+    return scopes
+
+
+def _cleanup_orphaned_long_term_memory() -> dict:
+    """Reclaim long-term indexes left by tasks/projects deleted in old builds."""
+    try:
+        return MemoryStore.prune_orphaned_scopes(
+            PROJECT_ROOT / "workspace" / "memory",
+            _valid_long_term_memory_scope_paths(),
+        )
+    except OSError as exc:
+        return {
+            "removed_scopes": [],
+            "removed_bytes": 0,
+            "preserved_scopes": [],
+            "errors": [{"scope": "", "error": str(exc)}],
+        }
 
 
 def _decode_attachment_data(data_url: str) -> tuple:
@@ -685,9 +829,9 @@ def _validate_runtime_settings(settings: dict) -> dict:
         raise ValueError("API Model cannot be empty")
 
     numeric_rules = {
-        "max_steps": (1, 100, 20),
-        "max_tokens": (1000, 200000, 30000),
-        "max_web_searches": (0, 100, 3),
+        "max_steps": (1, 200, 100),
+        "max_tokens": (1000, 200000, 50000),
+        "max_web_searches": (0, 100, 8),
         "auto_compact_threshold_percent": (1, 100, 85),
     }
     for key, (minimum, maximum, default) in numeric_rules.items():
@@ -718,12 +862,12 @@ class DesktopTaskExecutor:
         self.langgraph_checkpointer = None
         self._langgraph_max_steps = 0
         self.step_count = 0
-        self.max_steps = int(os.getenv("MAX_STEPS", "20"))
+        self.max_steps = int(os.getenv("MAX_STEPS", "100"))
         self.allow_all_commands = False
         self.auto_allow_all_commands = False
         self.web_search_count = 0
-        self.max_web_searches = int(os.getenv("MAX_WEB_SEARCHES", "3"))
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "30000"))
+        self.max_web_searches = int(os.getenv("MAX_WEB_SEARCHES", "8"))
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
         self.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
         self.context_compactor = ContextCompactor(
             ContextCompactor.policy_from_runtime(self.context_window, None)
@@ -731,6 +875,7 @@ class DesktopTaskExecutor:
         self.compress_at = self.context_compactor.policy.trigger_tokens
         self.show_knowledge_appendix = False
         self._memory_context_block = ""
+        self._uses_persisted_short_term_context = False
         self.accumulated_compression = ""
         self.pending_approval: Optional[dict] = None
         self.pending_question: Optional[dict] = None
@@ -746,6 +891,7 @@ class DesktopTaskExecutor:
         self._memory_lock = threading.RLock()
         self._context_usage_lock = threading.RLock()
         self._latest_context_usage: Optional[dict] = None
+        self._memory_cleanup_result: dict = {}
         self._shared_from = shared_from
 
     def initialize(self):
@@ -781,6 +927,7 @@ class DesktopTaskExecutor:
             self.data_integrator = DataIntegrator(data_dir=workspace_path / "data")
             self.rebuild_langgraph_runner()
             self.cleanup_orphaned_desktop_checkpoints()
+            self._memory_cleanup_result = _cleanup_orphaned_long_term_memory()
 
             return True, "Initialized successfully"
         except Exception as e:
@@ -838,6 +985,124 @@ class DesktopTaskExecutor:
         self.data_integrator = DataIntegrator(data_dir=workspace_path / "data")
         self.rebuild_langgraph_runner()
 
+    def initialize_subagent_runtime(
+        self,
+        parent: "DesktopTaskExecutor",
+        *,
+        team_id: str,
+        agent_id: str,
+        write_access: bool = False,
+        write_paths: Optional[list[str]] = None,
+        workdir: str = "",
+    ) -> None:
+        """Create a child runtime without sharing active conversation context."""
+        if not parent.ai_engine or not parent.tool_executor or not parent.memory_manager:
+            raise RuntimeError("Parent desktop runtime has not been initialized")
+
+        self.skills_loader = parent.skills_loader
+        # Each child gets its own checkpoint store. An in-memory saver is enough
+        # for the lifetime of a collaboration run and avoids cross-agent SQLite
+        # contention while keeping graph state completely isolated.
+        self.langgraph_checkpointer = create_checkpoint_saver()
+        # A child must remain bounded independently, while respecting a lower
+        # parent limit selected for a short task.
+        self.max_steps = max(4, min(parent.max_steps, 100))
+        self.max_tokens = parent.max_tokens
+        self.context_window = parent.context_window
+        self.max_web_searches = parent.max_web_searches
+        self.context_compactor.refresh_policy(self.context_window, None)
+        self.compress_at = self.context_compactor.policy.trigger_tokens
+        self.show_knowledge_appendix = False
+        self.auto_allow_all_commands = True
+        self.allow_all_commands = True
+        raw_workdir = str(workdir or "").strip()
+        workdir_path = Path(raw_workdir).expanduser() if raw_workdir else None
+        if workdir_path is not None and not workdir_path.is_absolute():
+            workdir_path = parent.project_root / workdir_path
+        self.project_root = (
+            workdir_path.resolve(strict=False)
+            if workdir_path is not None
+            else parent.project_root
+        )
+        self.project = dict(parent.project) if parent.project else None
+        if raw_workdir and not self.project:
+            self.project = {
+                "id": f"subagent-workdir:{self.project_root}",
+                "name": self.project_root.name or "Subagent Workdir",
+                "root_path": str(self.project_root),
+                "instructions": "",
+                "available": True,
+            }
+        self.conversation_id = (
+            f"{parent.conversation_id}:agent:{str(team_id)[:16]}:{str(agent_id)[:16]}"
+        )
+
+        workspace_path = PROJECT_ROOT / "workspace"
+        self.ai_engine = AIEngine()
+        self.preview_manager = parent.preview_manager
+        self.tool_executor = ExtendedToolExecutor(
+            skills_loader=self.skills_loader,
+            preview_manager=self.preview_manager,
+            project_root=self.project_root,
+            workspace_root=workspace_path,
+            protected_root=PROJECT_ROOT,
+            restrict_reads_to_project=False,
+        )
+        self.memory_manager = MemoryManager(
+            str(
+                parent.memory_manager.memory_dir
+                / "agents"
+                / str(team_id)
+                / str(agent_id)
+            )
+        )
+        # Project long-term memory may be searched, while child execution and
+        # compression files remain private to this exact agent.
+        self.memory_store = parent.memory_store
+        self.tool_executor.memory_store = self.memory_store
+        self._memory_context_block = ""
+        self.accumulated_compression = ""
+        self.current_user_request = ""
+        self.pending_approval = None
+        self.pending_question = None
+        self.tool_loop_guard = ToolLoopGuard()
+        self._subagent_write_access = bool(write_access)
+        self._subagent_write_paths = list(write_paths or [])
+        self._subagent_workdir = str(self.project_root)
+        setattr(
+            self.tool_executor,
+            "mutation_scope_roots",
+            tuple(
+                (
+                    Path(path).expanduser()
+                    if Path(path).expanduser().is_absolute()
+                    else self.project_root / Path(path).expanduser()
+                )
+                for path in self._subagent_write_paths
+                if str(path or "").strip()
+            ),
+        )
+
+        from agent.core.data_integrator import DataIntegrator
+
+        self.data_integrator = DataIntegrator(
+            data_dir=self.memory_manager.memory_dir / "data"
+        )
+        self.langchain_model = AIEngineChatModel(engine=self.ai_engine)
+        self.langgraph_runner = None
+        self._langgraph_max_steps = 0
+
+    def get_subagent_tools(self, *, write_access: bool = False) -> list[dict]:
+        """Expose a bounded child tool set with no nested collaboration or UI waits."""
+        allowed = set(_SUBAGENT_READ_TOOLS) | _SUBAGENT_COLLABORATION_TOOLS
+        if write_access:
+            allowed.update({"edit", "write"})
+        return [
+            tool
+            for tool in self.get_available_tools()
+            if str(tool.get("function", {}).get("name", "")) in allowed
+        ]
+
     def _create_conversation_memory_store(self) -> MemoryStore:
         """Create a project-shared or task-isolated long-term memory index."""
         if not self.conversation_id:
@@ -867,7 +1132,14 @@ class DesktopTaskExecutor:
             clear_plans(conversation_id)
         self.conversation_id = conversation_id
         self.memory_manager = MemoryManager(
-            str(conversation_store.memory_dir(conversation_id))
+            str(conversation_store.short_term_memory_dir(conversation_id))
+        )
+        self._memory_lock = _short_term_memory_lock(self.memory_manager.memory_dir)
+        self._compression_lock = _short_term_compression_lock(
+            self.memory_manager.memory_dir
+        )
+        self._uses_persisted_short_term_context = bool(
+            conversation.get("short_term_memory_id")
         )
         self.memory_store = self._create_conversation_memory_store()
         if self.tool_executor:
@@ -885,7 +1157,11 @@ class DesktopTaskExecutor:
         # Retrieval is cached only while this task runtime stays active. A task
         # switch or desktop restart must re-query its own scoped long-term index
         # instead of trusting a cache created under an earlier shared scope.
-        self._memory_context_block = ""
+        self._memory_context_block = (
+            self.memory_manager.load_memory_context()
+            if self._uses_persisted_short_term_context
+            else ""
+        )
         with self._context_usage_lock:
             self._latest_context_usage = None
         if self.ai_engine:
@@ -897,14 +1173,20 @@ class DesktopTaskExecutor:
         return self.tool_executor.get_available_tools()
 
     def get_runtime_tools(
-        self, *, plan_enabled: bool = True, voice_mode: bool = False
+        self,
+        *,
+        plan_enabled: bool = True,
+        voice_mode: bool = False,
+        multi_agent_enabled: bool = False,
     ) -> list[dict]:
         """Return the schemas actually bound for this desktop task mode."""
         hidden = set()
         if not plan_enabled:
             hidden.update({"todo_write", "update_plan"})
         if voice_mode:
-            hidden.add("question")
+            hidden.update(QUESTION_TOOL_NAMES)
+        if not multi_agent_enabled:
+            hidden.update(_MULTI_AGENT_TOOL_NAMES)
         return [
             tool
             for tool in self.get_available_tools()
@@ -921,9 +1203,7 @@ class DesktopTaskExecutor:
             self.tool_executor.get_available_tools(),
             self.execute_graph_tool,
             checkpointer=self.langgraph_checkpointer,
-            requires_approval=lambda name, _params: self._is_tool_requires_approval(
-                name
-            ),
+            requires_approval=self._is_tool_requires_approval,
             max_steps=self.max_steps,
         )
         self._langgraph_max_steps = self.max_steps
@@ -984,6 +1264,8 @@ class DesktopTaskExecutor:
         plan_enabled: bool = False,
         plan_policy: str = "off",
         voice_mode: bool = False,
+        multi_agent_enabled: bool = False,
+        child_agent: bool = False,
     ) -> tuple:
         project_root = self.project_root
         workspace_path = PROJECT_ROOT / "workspace"
@@ -1029,6 +1311,12 @@ class DesktopTaskExecutor:
         system_prompt = system_prompt.replace(
             "{plan_mode_instruction}",
             _plan_mode_instruction(plan_enabled, plan_policy),
+        )
+        system_prompt = system_prompt.replace(
+            "{multi_agent_mode_instruction}",
+            _multi_agent_mode_instruction(
+                multi_agent_enabled, child_agent=child_agent
+            ),
         )
         system_prompt = system_prompt.replace(
             "{runtime_mode_instruction}",
@@ -1108,6 +1396,10 @@ class DesktopTaskExecutor:
         )
         system_prompt = system_prompt.replace("{skills_summary}", skills_summary)
 
+        if self._uses_persisted_short_term_context:
+            persisted_memory_context = self.memory_manager.load_memory_context()
+            if persisted_memory_context:
+                self._memory_context_block = persisted_memory_context
         if self.memory_store and not self._memory_context_block:
             self._memory_context_block = self.memory_store.initial_context(user_request)
             self.memory_manager.save_memory_context(self._memory_context_block)
@@ -1266,8 +1558,12 @@ class DesktopTaskExecutor:
 
         return None
 
-    def _is_tool_requires_approval(self, tool_name: str) -> bool:
+    def _is_tool_requires_approval(
+        self, tool_name: str, params: Optional[dict] = None
+    ) -> bool:
         """Check if a tool requires user approval before execution（与 CLI 完全一致）"""
+        if tool_name == "spawn_agent":
+            return bool((params or {}).get("write_access", False))
         dangerous_tools = {
             "bash",
             "shell",
@@ -1439,6 +1735,7 @@ class DesktopTaskExecutor:
         *,
         plan_enabled: bool = True,
         voice_mode: bool = False,
+        multi_agent_enabled: bool = False,
     ) -> dict:
         """Return the exact system/messages/tools prompt sent by LangGraph."""
         snapshot = ContextCompactor.build_snapshot(
@@ -1447,6 +1744,7 @@ class DesktopTaskExecutor:
             self.get_runtime_tools(
                 plan_enabled=plan_enabled,
                 voice_mode=voice_mode,
+                multi_agent_enabled=multi_agent_enabled,
             ),
         )
         self._cache_context_snapshot(snapshot)
@@ -1496,12 +1794,19 @@ class DesktopTaskExecutor:
             return ""
         try:
             conversation = conversation_store.load(self.conversation_id)
+            # A task can become a split-task parent while it is running. Resolve
+            # again at write time so its final record lands in the shared scope.
+            resolved_store = _memory_store_for_conversation(conversation)
+            if resolved_store.workspace_dir != self.memory_store.workspace_dir:
+                self.memory_store = resolved_store
+                if self.tool_executor:
+                    self.tool_executor.memory_store = resolved_store
             requests = [
                 str(event.get("content", ""))
                 for event in conversation.get("messages", [])
                 if event.get("type") == "user" and str(event.get("content", "")).strip()
             ]
-            path = self.memory_store.upsert_conversation_record(
+            path = resolved_store.upsert_conversation_record(
                 session_id=self.conversation_id,
                 title=str(conversation.get("title", "")),
                 user_requests=requests,
@@ -1736,6 +2041,11 @@ class DesktopTaskExecutor:
         """Build context from memory files and accumulated compression（与 CLI 完全一致）"""
         context_parts = []
 
+        if self._uses_persisted_short_term_context:
+            self.accumulated_compression = (
+                self.memory_manager.load_accumulated_compression()
+            )
+
         # 添加累积的压缩摘要
         if self.accumulated_compression:
             context_parts.append("【之前的任务摘要】")
@@ -1793,6 +2103,7 @@ class DesktopRunContext:
     plan_enabled: bool = False
     plan_policy: str = "off"
     voice_mode: bool = False
+    multi_agent_enabled: bool = False
     image_paths: list[str] = field(default_factory=list)
     reference_folder_paths: list[str] = field(default_factory=list)
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -1812,6 +2123,8 @@ class DesktopRunContext:
     )
     modified_files_emitted: bool = False
     modified_files_summary: Optional[dict] = None
+    agent_team: Optional[object] = None
+    subagent_executors: dict[str, DesktopTaskExecutor] = field(default_factory=dict)
 
 
 def _dynamic_compaction_reminder(run: DesktopRunContext) -> str:
@@ -1885,6 +2198,26 @@ def _dynamic_compaction_reminder(run: DesktopRunContext) -> str:
                     for preview in active_previews[:10]
                 )
             )
+
+    team = _agent_team_snapshot(run)
+    if team and team.get("agents"):
+        lines = []
+        for agent in team["agents"][:4]:
+            summary = str(
+                agent.get("result")
+                or agent.get("error")
+                or agent.get("current_activity")
+                or ""
+            ).strip()
+            line = (
+                f"- {agent.get('name', 'Child Agent')} "
+                f"[{agent.get('status', 'queued')}]: "
+                f"{agent.get('role', '')}"
+            )
+            if summary:
+                line += f" | {summary[:1200]}"
+            lines.append(line)
+        sections.append("## Multi-Agent Team\n" + "\n".join(lines))
 
     if not sections:
         return ""
@@ -2029,11 +2362,26 @@ def _persist_step(step: dict, message_id: int, conversation_id: str) -> None:
             conversation_id, message_id, step.get("attachments", [])
         )
         return
+    if step_type == "agent_team_update":
+        snapshot = step.get("team")
+        event = dict(snapshot) if isinstance(snapshot, dict) else dict(step)
+        event.pop("conversation_id", None)
+        event.pop("type", None)
+        event["message_id"] = message_id
+        conversation_store.upsert_agent_team_snapshot(conversation_id, event)
+        return
+    if step_type == "tool" and str(step.get("tool", "")) in QUESTION_TOOL_NAMES:
+        return
 
     events = []
     if step_type == "tool":
         events.append({
             "type": "tool",
+            "actor": (
+                "primary"
+                if str(step.get("actor", "primary") or "primary") == "primary"
+                else "unknown"
+            ),
             "tool": step.get("tool", "Tool"),
             "content": str(step.get("result", "")),
             "target": str(step.get("target", "")),
@@ -2201,6 +2549,11 @@ def push_step(
     run = _run_for(conversation_id, message_id) if conversation_id else None
     if run and generation and run.generation != int(generation):
         return
+    if run and run.stopping and payload.get("type") not in {
+        "agent_team_update",
+        "modified_files",
+    }:
+        return
     if run and run.cancel_event.is_set():
         return
     payload["message_id"] = int(message_id or (run.message_id if run else 0))
@@ -2282,6 +2635,7 @@ def _begin_execution(
     plan_enabled: bool = False,
     plan_policy: str = "off",
     voice_mode: bool = False,
+    multi_agent_enabled: bool = False,
 ) -> Optional[DesktopRunContext]:
     """Reserve one execution slot for this conversation only."""
     executor = _executor_for_conversation(conversation_id)
@@ -2305,6 +2659,7 @@ def _begin_execution(
             executor=executor,
             plan_enabled=bool(plan_enabled),
             voice_mode=bool(voice_mode),
+            multi_agent_enabled=bool(multi_agent_enabled),
             plan_policy=(
                 str(plan_policy).lower()
                 if str(plan_policy).lower() in _PLAN_POLICIES
@@ -2334,6 +2689,11 @@ def _finish_execution(run: DesktopRunContext, outcome: str = "") -> None:
             "cancelled" if run.cancel_event.is_set() or outcome == "stopped"
             else "error" if outcome == "error"
             else "complete"
+        )
+    if terminal_status in {"error", "cancelled"}:
+        _cancel_agent_team(
+            run,
+            publish_terminal=not run.cancel_event.is_set(),
         )
     if terminal_status in {"complete", "cancelled"}:
         _publish_modified_files_summary(run)
@@ -2375,6 +2735,10 @@ def _finish_execution(run: DesktopRunContext, outcome: str = "") -> None:
         except ValueError:
             pass
     run.executor._sync_long_term_conversation_memory()
+    if terminal_status == "complete":
+        _release_subagent_runtimes(run)
+    else:
+        _schedule_subagent_runtime_release(run)
     # Do this last: `modified_files` has been queued and persisted before the
     # desktop is allowed to stop draining this run's event queue.
     with state_lock:
@@ -2386,6 +2750,1178 @@ def _execution_cancelled(run: DesktopRunContext) -> bool:
     with state_lock:
         is_current = conversation_runs.get(run.conversation_id) is run
     return run.cancel_event.is_set() or not is_current
+
+
+def _agent_result_text(value: object, limit: int = 12000) -> str:
+    """Render a bounded, public child result for the model and desktop UI."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+    return MemoryManager.strip_reasoning(text).strip()[:limit]
+
+
+def _display_subagent_paths(paths: object, workdir: object = "") -> list[str]:
+    """Show absolute ownership paths relative to their shared project root."""
+    root_text = str(workdir or "").strip()
+    root = Path(root_text).expanduser().resolve(strict=False) if root_text else None
+    display = []
+    for raw_path in paths if isinstance(paths, (list, tuple)) else []:
+        text = str(raw_path or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        if root is not None and path.is_absolute():
+            try:
+                text = str(path.resolve(strict=False).relative_to(root)) or "."
+            except ValueError:
+                pass
+        display.append(text[:4096])
+    return display
+
+
+def _public_agent_team_snapshot(snapshot: Optional[dict]) -> dict:
+    """Normalize one core team snapshot into the stable desktop event contract."""
+    source = dict(snapshot or {})
+    agents = []
+    terminal_statuses = {"completed", "failed", "cancelled"}
+    for index, raw_agent in enumerate(source.get("agents") or []):
+        if not isinstance(raw_agent, dict):
+            continue
+        raw_activities = raw_agent.get("activities") or []
+        activities = []
+        for raw_activity in raw_activities[-80:]:
+            if not isinstance(raw_activity, dict):
+                continue
+            metadata = raw_activity.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            kind = str(raw_activity.get("kind", "progress") or "progress")
+            content = str(raw_activity.get("content", "") or "")
+            if kind != "stream":
+                content = MemoryManager.strip_reasoning(content)
+            public_metadata = {
+                key: metadata[key]
+                for key in (
+                    "phase",
+                    "target",
+                    "stream_id",
+                    "thinking_duration_ms",
+                    "tool",
+                    "tool_call_id",
+                    "prepared_tool_call_id",
+                    "params",
+                    "result",
+                    "failed",
+                    "duration_ms",
+                    "started_at_ms",
+                    "kind",
+                    "direction",
+                    "sender_agent_id",
+                    "recipient_agent_id",
+                    "references",
+                    "artifact_id",
+                    "depends_on",
+                )
+                if key in metadata
+            }
+            activities.append(
+                {
+                    "seq": int(
+                        raw_activity.get("sequence", raw_activity.get("seq", 0))
+                        or 0
+                    ),
+                    "kind": kind,
+                    "title": str(
+                        metadata.get("title")
+                        or raw_activity.get("title")
+                        or {
+                            "tool": "工具执行",
+                            "tool_result": "工具结果",
+                            "message": "协调消息",
+                            "error": "执行异常",
+                            "status": "状态更新",
+                        }.get(kind, "工作更新")
+                    )[:160],
+                    "content": content[:20000],
+                    "metadata": public_metadata,
+                    "created_at": str(
+                        raw_activity.get("timestamp")
+                        or raw_activity.get("created_at")
+                        or ""
+                    ),
+                }
+            )
+        status = str(raw_agent.get("status", "queued") or "queued")
+        current_activity = activities[-1]["content"] if activities else ""
+        result = _agent_result_text(raw_agent.get("result"))
+        write_access = bool(raw_agent.get("write_access", False))
+        workdir = str(raw_agent.get("workdir", "") or "").strip()
+        write_paths = _display_subagent_paths(
+            raw_agent.get("write_paths", []), workdir
+        )
+        agents.append(
+            {
+                "id": str(
+                    raw_agent.get("agent_id")
+                    or raw_agent.get("id")
+                    or f"agent-{index + 1}"
+                ),
+                "name": str(raw_agent.get("name") or f"子智能体 {index + 1}")[:80],
+                "role": str(raw_agent.get("role") or "协作成员")[:240],
+                "task": str(raw_agent.get("task") or "")[:20000],
+                "status": status,
+                "current_activity": current_activity[:1000],
+                "summary": (result or current_activity)[:2000],
+                "result": result,
+                "error": MemoryManager.strip_reasoning(
+                    str(raw_agent.get("error", "") or "")
+                )[:4000],
+                "started_at": str(raw_agent.get("started_at", "") or ""),
+                "ended_at": str(
+                    raw_agent.get("completed_at")
+                    or raw_agent.get("ended_at")
+                    or ""
+                ),
+                "workdir": workdir,
+                "access_scope": (
+                    "可写：" + ("、".join(write_paths) if write_paths else "项目目录")
+                    if write_access
+                    else "只读项目访问"
+                ),
+                "depends_on": [
+                    str(agent_id)[:80]
+                    for agent_id in raw_agent.get("depends_on", [])
+                    if str(agent_id or "").strip()
+                ][:12],
+                "context_scope": (
+                    "独立上下文：仅接收主任务目标、分配任务、显式背景、"
+                    "项目基础说明和相关长期记忆；不继承主对话或兄弟智能体上下文"
+                ),
+                "activities": activities,
+            }
+        )
+    active_count = sum(
+        agent["status"] not in terminal_statuses for agent in agents
+    )
+    if active_count:
+        status = "running"
+    elif any(agent["status"] == "failed" for agent in agents):
+        status = "failed"
+    elif agents and all(agent["status"] == "cancelled" for agent in agents):
+        status = "cancelled"
+    else:
+        status = "complete" if agents else "idle"
+    agent_ids = {agent["id"] for agent in agents}
+    artifacts = []
+    for raw_artifact in (source.get("artifacts") or [])[-40:]:
+        if not isinstance(raw_artifact, dict):
+            continue
+        sender_id = str(raw_artifact.get("sender_agent_id", "") or "")[:80]
+        recipient_ids = [
+            str(agent_id)[:80]
+            for agent_id in raw_artifact.get("recipient_agent_ids", [])
+            if str(agent_id or "").strip() in agent_ids
+        ][:12]
+        if sender_id not in agent_ids and sender_id != "primary":
+            continue
+        artifacts.append(
+            {
+                "id": str(raw_artifact.get("id", "") or "")[:96],
+                "seq": int(raw_artifact.get("sequence", 0) or 0),
+                "created_at": str(raw_artifact.get("timestamp", "") or ""),
+                "sender_id": sender_id,
+                "sender_name": str(raw_artifact.get("sender_name", "") or "")[:80],
+                "title": MemoryManager.strip_reasoning(
+                    str(raw_artifact.get("title", "") or "")
+                )[:160],
+                "summary": MemoryManager.strip_reasoning(
+                    str(raw_artifact.get("summary", "") or "")
+                )[:4000],
+                "paths": [str(path)[:4096] for path in raw_artifact.get("paths", [])][:24],
+                "recipient_ids": recipient_ids,
+            }
+        )
+    collaboration_events = []
+    for raw_event in (source.get("collaboration_events") or [])[-120:]:
+        if not isinstance(raw_event, dict):
+            continue
+        sender_id = str(raw_event.get("sender_agent_id", "") or "")[:80]
+        recipient_id = str(raw_event.get("recipient_agent_id", "") or "")[:80]
+        if sender_id not in agent_ids and recipient_id not in agent_ids:
+            continue
+        collaboration_events.append(
+            {
+                "seq": int(raw_event.get("sequence", 0) or 0),
+                "created_at": str(raw_event.get("timestamp", "") or ""),
+                "type": str(raw_event.get("type", "message") or "message")[:32],
+                "kind": str(raw_event.get("kind", "message") or "message")[:32],
+                "content": MemoryManager.strip_reasoning(
+                    str(raw_event.get("content", "") or "")
+                )[:4000],
+                "sender_id": sender_id,
+                "sender_name": str(raw_event.get("sender_name", "") or "")[:80],
+                "recipient_id": recipient_id,
+                "recipient_name": str(raw_event.get("recipient_name", "") or "")[:80],
+                "references": [str(value)[:4096] for value in raw_event.get("references", [])][:24],
+                "title": MemoryManager.strip_reasoning(
+                    str(raw_event.get("title", "") or "")
+                )[:160],
+            }
+        )
+    return {
+        "team_id": str(source.get("team_id", "") or ""),
+        "version": int(source.get("version", 0) or 0),
+        "status": status,
+        "created_at": str(source.get("created_at", "") or ""),
+        "agent_count": len(agents),
+        "active_count": active_count,
+        "all_terminal": bool(agents) and active_count == 0,
+        "agents": agents,
+        "artifacts": artifacts,
+        "collaboration_events": collaboration_events,
+        "file_claims": [
+            {
+                "agent_id": str(item.get("agent_id", "") or "")[:80],
+                "agent_name": str(item.get("agent_name", "") or "")[:80],
+                "paths": _display_subagent_paths(
+                    item.get("paths", []), item.get("workdir", "")
+                )[:24],
+                "active": bool(item.get("active", False)),
+            }
+            for item in source.get("file_claims", [])
+            if isinstance(item, dict)
+        ][:40],
+    }
+
+
+def _agent_team_snapshot(run: Optional[DesktopRunContext]) -> Optional[dict]:
+    team = run.agent_team if run else None
+    if team is None:
+        return None
+    list_agents = getattr(team, "list_agents", None)
+    if not callable(list_agents):
+        return None
+    try:
+        return _public_agent_team_snapshot(list_agents())
+    except Exception:
+        return None
+
+
+def _terminal_cancelled_team_snapshot(snapshot: dict) -> dict:
+    """Return a durable terminal UI view without waiting for worker teardown."""
+    terminal = dict(snapshot or {})
+    terminal_agents = []
+    ended_at = datetime.now().isoformat()
+    for raw_agent in terminal.get("agents") or []:
+        agent = dict(raw_agent) if isinstance(raw_agent, dict) else {}
+        if agent.get("status") not in {"completed", "failed", "cancelled"}:
+            agent["status"] = "cancelled"
+            agent["completed_at"] = agent.get("completed_at") or ended_at
+            agent["result"] = None
+        terminal_agents.append(agent)
+    terminal["agents"] = terminal_agents
+    terminal["active_count"] = 0
+    terminal["all_terminal"] = bool(terminal_agents)
+    terminal["version"] = int(terminal.get("version", 0) or 0) + 1
+    return terminal
+
+
+def _cancel_agent_team(
+    run: DesktopRunContext, *, publish_terminal: bool = False
+) -> Optional[dict]:
+    """Cooperatively cancel every child and optionally persist a terminal view."""
+    team = run.agent_team
+    cancel_all = getattr(team, "cancel_all", None)
+    if not callable(cancel_all):
+        return None
+    try:
+        snapshot = cancel_all()
+    except Exception:
+        return None
+    if publish_terminal:
+        terminal = _terminal_cancelled_team_snapshot(snapshot)
+        _publish_agent_team_update(run, terminal)
+        return terminal
+    return _public_agent_team_snapshot(snapshot)
+
+
+def _release_subagent_runtimes(
+    run: DesktopRunContext, *, wait_timeout: float = 0.0
+) -> None:
+    """Release child model histories and graph checkpoints after they stop."""
+    team = run.agent_team
+    wait_agents = getattr(team, "wait_agents", None)
+    if callable(wait_agents) and wait_timeout > 0:
+        try:
+            wait_agents(timeout=wait_timeout)
+        except Exception:
+            pass
+    snapshot = _agent_team_snapshot(run) or {}
+    terminal_ids = {
+        str(agent.get("id", ""))
+        for agent in snapshot.get("agents", [])
+        if agent.get("status") in {"completed", "failed", "cancelled"}
+    }
+    with state_lock:
+        children = list(run.subagent_executors.items())
+    for agent_id, child in children:
+        runner = child.langgraph_runner
+        thread_id = _subagent_thread_id(run, agent_id)
+        if runner and agent_id not in terminal_ids:
+            try:
+                runner.cancel(thread_id)
+            except Exception:
+                pass
+            continue
+        if runner:
+            try:
+                runner.delete_thread(thread_id)
+            except Exception:
+                pass
+        if child.ai_engine:
+            child.ai_engine.clear_history()
+        with state_lock:
+            if run.subagent_executors.get(agent_id) is child:
+                run.subagent_executors.pop(agent_id, None)
+
+
+def _schedule_subagent_runtime_release(run: DesktopRunContext) -> None:
+    threading.Thread(
+        target=lambda: _release_subagent_runtimes(run, wait_timeout=10.0),
+        name=f"agent-cleanup-{run.message_id}",
+        daemon=True,
+    ).start()
+
+
+def _publish_agent_team_update(run: DesktopRunContext, snapshot: dict) -> None:
+    public_snapshot = _public_agent_team_snapshot(snapshot)
+    push_step(
+        {"type": "agent_team_update", **public_snapshot},
+        run.message_id,
+        run.conversation_id,
+        run.generation,
+    )
+
+
+def _subagent_thread_id(run: DesktopRunContext, agent_id: str) -> str:
+    return (
+        f"{run.conversation_id}:{run.message_id}:agent:"
+        f"{str(agent_id or '')[:64]}"
+    )
+
+
+def _subagent_coordination_packet(run: DesktopRunContext, agent_id: str) -> str:
+    """Render only explicit public coordination data for one child prompt.
+
+    The blackboard is an intentional communication boundary: parent/sibling
+    execution history, tool output, activity logs, and model reasoning never cross
+    it.  A launch packet contains only artifacts and claimed paths that a child
+    needs to integrate its bounded work with the rest of the project.
+    """
+    team = run.agent_team
+    if not isinstance(team, MultiAgentTeam):
+        return ""
+    try:
+        snapshot = team.collaboration_snapshot(str(agent_id or ""))
+    except (KeyError, ValueError, TypeError):
+        return ""
+
+    sections: list[str] = []
+    artifacts = snapshot.get("artifacts") or []
+    for artifact in artifacts[-12:]:
+        if not isinstance(artifact, dict):
+            continue
+        title = MemoryManager.strip_reasoning(str(artifact.get("title", "") or "")).strip()
+        summary = MemoryManager.strip_reasoning(str(artifact.get("summary", "") or "")).strip()
+        paths = [str(path).strip() for path in artifact.get("paths", []) if str(path).strip()]
+        if not title or not summary:
+            continue
+        path_text = f"\nPaths: {', '.join(paths[:24])}" if paths else ""
+        sections.append(f"### {title}\n{summary}{path_text}")
+
+    claims = []
+    for claim in snapshot.get("file_claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        name = MemoryManager.strip_reasoning(str(claim.get("agent_name", "") or "")).strip()
+        paths = _display_subagent_paths(
+            claim.get("paths", []), claim.get("workdir", "")
+        )
+        if name and paths:
+            claims.append(f"- {name}: {', '.join(paths[:24])}")
+    if claims:
+        sections.append("### Active file ownership\n" + "\n".join(claims[:12]))
+
+    if not sections:
+        return ""
+    return MemoryManager.strip_reasoning(
+        "\n\n## Public coordination packet\n\n" + "\n\n".join(sections)
+    ).strip()[:12000]
+
+
+def _subagent_prompt(
+    run: DesktopRunContext,
+    child: DesktopTaskExecutor,
+    request: dict,
+    task: str,
+) -> tuple[str, str]:
+    parent_goal = str(run.executor.current_user_request or "")[:12000]
+    explicit_context = str(request.get("context", "") or "")[:24000]
+    coordination_packet = _subagent_coordination_packet(
+        run, str(request.get("agent_id", "") or "")
+    )
+    user_request = (
+        f"Parent goal:\n{parent_goal}\n\n"
+        f"Your assigned task:\n{task}\n\n"
+        f"Explicit context from the coordinator:\n{explicit_context or 'None provided.'}"
+        f"{coordination_packet}"
+    )
+    child.current_user_request = user_request
+    system_prompt, user_message = child.build_system_prompt(
+        user_request,
+        child._build_context(),
+        plan_enabled=False,
+        plan_policy="off",
+        voice_mode=False,
+        multi_agent_enabled=True,
+        child_agent=True,
+    )
+    write_access = bool(request.get("write_access", False))
+    write_paths = [
+        str(path) for path in request.get("write_paths", []) if str(path).strip()
+    ]
+    workdir = str(request.get("workdir", "") or child.project_root).strip()
+    access_text = (
+        "You may edit only these coordinator-assigned paths: "
+        + ", ".join(write_paths)
+        if write_access and write_paths
+        else "You may use edit/write inside the bound project for this assignment."
+        if write_access
+        else "You are read-only. Do not modify files or run terminal commands."
+    )
+    boundary = (
+        "\n\n## Isolated Child Agent\n\n"
+        f"Name: {str(request.get('name', 'Child Agent'))[:80]}\n"
+        f"Role: {str(request.get('role', 'Specialist'))[:240]}\n"
+        f"Working directory: {workdir}\n"
+        f"{access_text}\n"
+        "Work only on the assigned task. Your context contains the parent goal, "
+        "your explicit brief, project instructions, your private execution history, "
+        "and relevant retrieved project memory. It deliberately excludes the parent "
+        "conversation, parent tool results, and every sibling agent's context. "
+        "Do not attempt to spawn another agent, ask the user a question, or approve "
+        "operations. You may coordinate with named sibling agents only through "
+        "`send_agent_message` and `publish_agent_artifact`: share concise decisions, "
+        "blockers, handoffs, and referenced paths, never private reasoning or full "
+        "history. New collaboration messages are delivered at a safe model boundary. "
+        "The public coordination packet is the authoritative shared contract and "
+        "ownership view. Do not create a parallel state model, configuration, or "
+        "public API when it conflicts with that contract. If your work requires a "
+        "change, send a concise `blocker` or `change proposal` to the coordinator "
+        "before editing the shared boundary. "
+        "Before a meaningful tool group, "
+        "provide one short public progress sentence; it will appear in the child "
+        "activity panel. Never expose private reasoning or chain-of-thought. Finish "
+        "with a concise evidence-backed handoff for the coordinating agent: changed "
+        "files, used/exported public interfaces, shared configuration touched, "
+        "verification results, risks, and recommended next actions.\n"
+    )
+    return f"{system_prompt.rstrip()}{boundary}", user_message
+
+
+def _subagent_event_publisher(activity, mutation_observer=None):
+    """Publish child events in the same stream/tool shape used by the main chat."""
+
+    stream_buffers: dict[str, list[str]] = {}
+    reasoning_open: set[str] = set()
+    reasoning_started_at: dict[str, float] = {}
+    reasoning_duration_ms: dict[str, int] = {}
+    last_stream_publish_at: dict[str, float] = {}
+    tool_started_at: dict[str, int] = {}
+
+    def stream_key(stream_id: str) -> str:
+        return f"stream:{stream_id or 'default'}"
+
+    def publish_stream(
+        stream_id: str,
+        *,
+        phase: str,
+        target: str = "",
+        force: bool = False,
+    ) -> None:
+        content = "".join(stream_buffers.get(stream_id, []))
+        if not content:
+            return
+        now = time.monotonic()
+        if not force and now - last_stream_publish_at.get(stream_id, 0.0) < 0.08:
+            return
+        last_stream_publish_at[stream_id] = now
+        activity(
+            content,
+            "stream",
+            {
+                "stream_id": stream_id,
+                "phase": phase,
+                "target": target,
+                "thinking_duration_ms": reasoning_duration_ms.get(stream_id, 0),
+                "_replace": True,
+                "_activity_key": stream_key(stream_id),
+            },
+        )
+
+    def close_reasoning(stream_id: str) -> None:
+        if stream_id not in reasoning_open:
+            return
+        reasoning_open.discard(stream_id)
+        started_at = reasoning_started_at.pop(stream_id, None)
+        if started_at is not None:
+            reasoning_duration_ms[stream_id] = (
+                reasoning_duration_ms.get(stream_id, 0)
+                + int(max(0.0, time.monotonic() - started_at) * 1000)
+            )
+
+    def publish_tool(event: dict, phase: str) -> None:
+        tool_name = str(event.get("tool", "Tool") or "Tool")
+        tool_call_id = str(
+            event.get("prepared_tool_call_id") or event.get("tool_call_id") or ""
+        )
+        if not tool_call_id:
+            tool_call_id = f"{tool_name}:{event.get('stream_id', '')}"
+        params = _tool_display_params(event.get("params", {}))
+        target = _tool_target(tool_name, params)
+        started_at_ms = int(event.get("started_at_ms", 0) or time.time() * 1000)
+        if phase != "end":
+            tool_started_at.setdefault(tool_call_id, started_at_ms)
+        duration_ms = int(event.get("duration_ms", 0) or 0)
+        if phase == "end":
+            duration_ms = max(
+                duration_ms, int(time.time() * 1000) - tool_started_at.pop(tool_call_id, started_at_ms)
+            )
+        content = (
+            MemoryManager.strip_reasoning(str(event.get("result", "") or ""))
+            if phase == "end"
+            else str(target or json.dumps(params, ensure_ascii=False))
+        )
+        activity(
+            content or ("执行完成" if phase == "end" else "正在执行"),
+            "tool_event",
+            {
+                "phase": phase,
+                "tool": tool_name,
+                "tool_call_id": tool_call_id,
+                "prepared_tool_call_id": tool_call_id,
+                "stream_id": str(event.get("stream_id", "") or ""),
+                "params": params,
+                "target": target,
+                "result": str(event.get("result", "") or ""),
+                "failed": bool(event.get("failed", False)),
+                "duration_ms": duration_ms,
+                "started_at_ms": started_at_ms,
+                "_replace": True,
+                "_activity_key": f"tool:{tool_call_id}",
+            },
+        )
+
+    def publish(event: dict) -> None:
+        event = dict(event or {})
+        event_type = str(event.get("type", "") or "")
+        stream_id = str(event.get("stream_id", "") or "")
+        if event_type in {"tool_start", "tool_end"} and callable(mutation_observer):
+            mutation_observer(event)
+        if event_type == "model_start":
+            stream_buffers[stream_id] = []
+            return
+        if event_type in {"reasoning_delta", "content_delta"}:
+            content = str(event.get("content", "") or "")
+            if not content:
+                return
+            parts = stream_buffers.setdefault(stream_id, [])
+            if event_type == "reasoning_delta" and stream_id not in reasoning_open:
+                reasoning_open.add(stream_id)
+                reasoning_started_at[stream_id] = time.monotonic()
+                parts.append("<think>")
+            elif event_type == "content_delta" and stream_id in reasoning_open:
+                close_reasoning(stream_id)
+                parts.append("</think>\n")
+            parts.append(content)
+            publish_stream(stream_id, phase="delta")
+            return
+        if event_type == "model_end":
+            if not stream_buffers.get(stream_id) and event.get("content"):
+                stream_buffers[stream_id] = [str(event.get("content", "") or "")]
+            if stream_id in reasoning_open:
+                close_reasoning(stream_id)
+                stream_buffers.setdefault(stream_id, []).append("</think>")
+            streamed_content = "".join(stream_buffers.get(stream_id, []))
+            visible_commentary = MemoryManager.extract_visible_commentary(streamed_content)
+            target = (
+                "commentary"
+                if event.get("tool_calls") and visible_commentary
+                else "thinking"
+                if event.get("tool_calls") and streamed_content
+                else "discard" if event.get("tool_calls") else "final"
+            )
+            publish_stream(stream_id, phase="end", target=target, force=True)
+            return
+        if event_type == "tool_preparing":
+            publish_tool(event, "preparing")
+            return
+        if event_type == "tool_start":
+            publish_tool(event, "running")
+            return
+        if event_type == "tool_end":
+            publish_tool(event, "end")
+            return
+        if event_type == "compression_start":
+            activity(
+                "正在整理该子智能体的独立上下文",
+                "status",
+                {"title": "上下文压缩"},
+            )
+        elif event_type == "compression_end":
+            activity(
+                str(event.get("message", "上下文整理完成")),
+                "status" if event.get("success") else "error",
+                {"title": "上下文压缩完成"},
+            )
+
+    return publish
+
+
+def _track_subagent_file_mutation(
+    run: DesktopRunContext, agent_id: str, event: dict
+) -> None:
+    """Include successful child edits in the parent's durable code review."""
+    tracked_event = dict(event or {})
+    tracked_event["_modified_file_scope"] = f"agent:{str(agent_id or '')[:64]}"
+    if tracked_event.get("type") == "tool_start":
+        _capture_modified_file_snapshots(run, tracked_event)
+    elif (
+        tracked_event.get("type") == "tool_end"
+        and not tracked_event.get("failed")
+    ):
+        _record_modified_file_changes(run, tracked_event)
+
+
+def _take_subagent_collaboration_messages(
+    run: DesktopRunContext, agent_id: str
+) -> list[str]:
+    """Drain only this child's bounded public mailbox at a model safe point."""
+    team = run.agent_team
+    take_inbox = getattr(team, "take_inbox", None)
+    if not callable(take_inbox):
+        return []
+    try:
+        messages = take_inbox(agent_id, limit=8)
+    except (KeyError, ValueError, TypeError):
+        return []
+    return [
+        MemoryManager.strip_reasoning(str(message or ""))[:9000]
+        for message in messages
+        if str(message or "").strip()
+    ]
+
+
+def _dispatch_subagent_tool(
+    run: DesktopRunContext, sender_agent_id: str, tool_name: str, params: dict
+) -> dict:
+    """Route child collaboration calls without exposing parent-only controls."""
+    if tool_name not in _SUBAGENT_COLLABORATION_TOOLS:
+        raise RuntimeError(f"{tool_name} is unavailable to child agents")
+    team = run.agent_team
+    if not isinstance(team, MultiAgentTeam):
+        raise RuntimeError("No active collaboration team")
+    payload = dict(params or {})
+    if tool_name == "send_agent_message":
+        recipient = team.send_message(
+            str(payload.get("agent_id", "")),
+            str(payload.get("message", "")),
+            sender_agent_id=sender_agent_id,
+            kind=str(payload.get("kind", "message")),
+            references=payload.get("references"),
+        )
+        return {
+            "success": True,
+            "recipient": {
+                "agent_id": recipient["agent_id"],
+                "name": recipient["name"],
+                "status": recipient["status"],
+            },
+        }
+    if tool_name == "publish_agent_artifact":
+        artifact = team.publish_artifact(
+            sender_agent_id,
+            str(payload.get("title", "")),
+            str(payload.get("summary", "")),
+            payload.get("paths"),
+            payload.get("recipient_agent_ids"),
+        )
+        return {"success": True, "artifact": artifact}
+    snapshot = team.collaboration_snapshot(sender_agent_id)
+    return {"success": True, **snapshot}
+
+
+def _run_subagent_turn(
+    run: DesktopRunContext,
+    child: DesktopTaskExecutor,
+    request: dict,
+    task: str,
+    cancel_event: threading.Event,
+    activity,
+) -> str:
+    tools = child.get_subagent_tools(
+        write_access=bool(request.get("write_access", False))
+    )
+    runner = LangGraphRunner(
+        child.langchain_model,
+        tools,
+        child.execute_graph_tool,
+        checkpointer=child.langgraph_checkpointer,
+        requires_approval=lambda _name, _params: False,
+        max_steps=child.max_steps,
+    )
+    child.langgraph_runner = runner
+    child._langgraph_max_steps = child.max_steps
+    system_prompt, user_message = _subagent_prompt(run, child, request, task)
+    thread_id = _subagent_thread_id(run, str(request.get("agent_id", "")))
+
+    def cancelled() -> bool:
+        return cancel_event.is_set() or _execution_cancelled(run)
+
+    agent_id = str(request.get("agent_id", ""))
+
+    def collaboration_messages(_state: Optional[dict] = None) -> list[str]:
+        return _take_subagent_collaboration_messages(run, agent_id)
+
+    def compression_check(state: dict) -> Optional[dict]:
+        if cancelled():
+            return None
+        snapshot = child.get_graph_compression_snapshot(
+            state,
+            plan_enabled=False,
+            voice_mode=False,
+            multi_agent_enabled=False,
+        )
+        context_snapshot = snapshot["context_snapshot"]
+        if child.context_compactor.should_prefire(context_snapshot):
+            child.context_compactor.start_prefire(
+                context_snapshot, child._sample_compaction_prompt
+            )
+        if not child.context_compactor.should_compact(context_snapshot):
+            return None
+        return {
+            **snapshot,
+            "flush_messages": list(state.get("messages") or []),
+            "memory_session_id": thread_id,
+            "threshold": snapshot["threshold"],
+            "compression_id": (
+                f"agent:{request.get('agent_id', '')}:"
+                f"{int(state.get('step_count', 0) or 0)}"
+            ),
+        }
+
+    def compression_handler(state: dict, snapshot: dict, progress) -> dict:
+        shared_store = child.memory_store
+        try:
+            # Child compaction must never flush its private working trace into
+            # the project-wide long-term memory index.
+            child.memory_store = None
+            child.tool_executor.memory_store = shared_store
+            result = child._compress_current_task_manual(
+                progress, snapshot, cancelled=cancelled
+            )
+        finally:
+            child.memory_store = shared_store
+            child.tool_executor.memory_store = shared_store
+        if not result or not result.get("success"):
+            return dict(result or {})
+        child.step_count = int(state.get("step_count", 0) or 0)
+        child.accumulated_compression = (
+            child.memory_manager.load_accumulated_compression()
+        )
+        refreshed_system, refreshed_user = _subagent_prompt(
+            run, child, request, task
+        )
+        replacement_messages = [
+            _graph_continuation_message(state, refreshed_user)
+        ]
+        successor = ContextCompactor.build_snapshot(
+            {
+                "system_prompt": refreshed_system,
+                "messages": replacement_messages,
+                "step_count": int(state.get("step_count", 0) or 0),
+            },
+            child.context_compactor.policy,
+            tools,
+        )
+        child._cache_context_snapshot(successor)
+        result = dict(result)
+        result["tokens_after"] = successor.tokens
+        result["released_tokens"] = max(
+            0,
+            int(result.get("tokens_before", 0) or 0) - successor.tokens,
+        )
+        result["system_prompt"] = refreshed_system
+        result["replacement_messages"] = replacement_messages
+        return result
+
+    child.memory_manager.append_execution_step(f"【协调任务】{task[:12000]}")
+    child.data_integrator.start_task(task[:12000])
+    result = runner.run(
+        thread_id,
+        HumanMessage(content=user_message),
+        system_prompt=system_prompt,
+        runtime={
+            "thread_id": thread_id,
+            "run_id": f"agent:{request.get('agent_id', '')}:{time.time_ns()}",
+            "conversation_id": child.conversation_id,
+            "message_id": run.message_id,
+            "cancel_event": cancel_event,
+            "cancelled": cancelled,
+            "allow_all": True,
+            "plan_enabled": False,
+            "voice_mode": False,
+            "multi_agent_enabled": True,
+            "multi_agent_dispatch": lambda name, params: _dispatch_subagent_tool(
+                run, agent_id, name, params
+            ),
+            "collaboration_messages": collaboration_messages,
+            "compression_check": compression_check,
+            "compression_handler": compression_handler,
+        },
+        emit=_subagent_event_publisher(
+            activity,
+            lambda event: _track_subagent_file_mutation(
+                run, str(request.get("agent_id", "")), event
+            ),
+        ),
+        run_id=f"agent:{request.get('agent_id', '')}:{time.time_ns()}",
+    )
+    try:
+        runner.delete_thread(thread_id)
+    except Exception:
+        pass
+    if result.status == "cancelled" or cancelled():
+        child.data_integrator.end_task("已停止")
+        raise RuntimeError("child agent cancelled")
+    if result.status != "complete":
+        child.data_integrator.end_task("失败")
+        raise RuntimeError(result.error or f"child agent ended with {result.status}")
+    child.data_integrator.end_task("已完成")
+    visible = MemoryManager.strip_reasoning(result.content).strip()
+    child.memory_manager.append_execution_step(f"最终回应: {visible}")
+    return visible
+
+
+def _run_subagent_worker(
+    run: DesktopRunContext,
+    request: dict,
+    cancel_event: threading.Event,
+    activity,
+    inbox,
+) -> str:
+    """Run one isolated child and consume coordinator follow-ups between turns."""
+    child = DesktopTaskExecutor(shared_from=run.executor)
+    child.initialize_subagent_runtime(
+        run.executor,
+        team_id=str(getattr(run.agent_team, "team_id", "team")),
+        agent_id=str(request.get("agent_id", "agent")),
+        write_access=bool(request.get("write_access", False)),
+        write_paths=list(request.get("write_paths", []) or []),
+        workdir=str(request.get("workdir", "") or ""),
+    )
+    with state_lock:
+        run.subagent_executors[str(request.get("agent_id", ""))] = child
+    results = []
+    next_task = str(request.get("task", "") or "").strip()
+    try:
+        while next_task and not cancel_event.is_set():
+            results.append(
+                _run_subagent_turn(
+                    run, child, request, next_task, cancel_event, activity
+                )
+            )
+            followups = []
+            try:
+                followups.append(inbox.get(timeout=0.12))
+            except queue.Empty:
+                pass
+            while True:
+                try:
+                    followups.append(inbox.get_nowait())
+                except queue.Empty:
+                    break
+            followups = [str(item).strip() for item in followups if str(item).strip()]
+            next_task = (
+                "Coordinator follow-up:\n" + "\n".join(f"- {item}" for item in followups)
+                if followups
+                else ""
+            )
+        return "\n\n".join(results)[-24000:]
+    finally:
+        if child.ai_engine:
+            child.ai_engine.clear_history()
+
+
+def _ensure_agent_team(run: DesktopRunContext) -> MultiAgentTeam:
+    with state_lock:
+        existing = run.agent_team
+        if isinstance(existing, MultiAgentTeam):
+            return existing
+
+        def worker(request, cancel_event, activity, inbox):
+            return _run_subagent_worker(
+                run, request, cancel_event, activity, inbox
+            )
+
+        team = MultiAgentTeam(
+            worker,
+            on_update=lambda snapshot: _publish_agent_team_update(run, snapshot),
+            max_agents=4,
+            max_activities=80,
+            max_activity_chars=20000,
+        )
+        run.agent_team = team
+        return team
+
+
+def _model_agent_team_snapshot(snapshot: dict) -> dict:
+    """Keep tool results useful without reinjecting the whole activity timeline."""
+    public = _public_agent_team_snapshot(snapshot)
+    return {
+        "team_id": public["team_id"],
+        "version": public["version"],
+        "status": public["status"],
+        "active_count": public["active_count"],
+        "agents": [
+            {
+                "agent_id": agent["id"],
+                "name": agent["name"],
+                "role": agent["role"],
+                "status": agent["status"],
+                "current_activity": agent["current_activity"],
+                "result": agent["result"],
+                "error": agent["error"],
+            }
+            for agent in public["agents"]
+        ],
+    }
+
+
+def _prepare_subagent_write_scope(
+    executor: DesktopTaskExecutor,
+    raw_workdir: str,
+    raw_write_paths: list[str],
+    write_access: bool,
+) -> tuple[Path, list[str]]:
+    """Resolve ownership paths and create one shared child project root."""
+    workdir_path = (
+        Path(raw_workdir).expanduser()
+        if raw_workdir
+        else executor.project_root
+    )
+    if not workdir_path.is_absolute():
+        workdir_path = executor.project_root / workdir_path
+    workdir_path = workdir_path.resolve(strict=False)
+
+    resolved_write_paths = []
+    for raw_path in raw_write_paths:
+        normalized_raw_path = str(raw_path or "").strip().replace("\\", "/")
+        while normalized_raw_path.rstrip("/").endswith(("/**", "/*")):
+            normalized_raw_path = normalized_raw_path.rstrip("/").rsplit("/", 1)[0]
+        if not normalized_raw_path or any(
+            marker in normalized_raw_path for marker in ("*", "?", "[")
+        ):
+            raise ValueError(
+                f"write path '{raw_path}' contains an unsupported wildcard. "
+                "Assign an exact file or directory; directory ownership is "
+                "recursive automatically."
+            )
+        path = Path(normalized_raw_path).expanduser()
+        if path.is_absolute():
+            path = path.resolve(strict=False)
+        else:
+            project_candidate = (executor.project_root / path).resolve(strict=False)
+            sibling_candidate = (workdir_path.parent / path).resolve(strict=False)
+            if ExtendedToolExecutor._is_within_directory(
+                project_candidate, workdir_path
+            ):
+                path = project_candidate
+            elif ExtendedToolExecutor._is_within_directory(
+                sibling_candidate, workdir_path
+            ):
+                path = sibling_candidate
+            else:
+                path = (workdir_path / path).resolve(strict=False)
+            if not ExtendedToolExecutor._is_within_directory(path, workdir_path):
+                raise ValueError(
+                    f"relative write path '{raw_path}' escapes subagent workdir "
+                    f"'{workdir_path}'"
+                )
+        resolved_write_paths.append(str(path))
+
+    if not write_access:
+        return workdir_path, resolved_write_paths
+
+    writable_jcodex_roots = (
+        (PROJECT_ROOT / "workspace" / "output").resolve(strict=False),
+        (PROJECT_ROOT / "workspace" / "temp").resolve(strict=False),
+    )
+    for path_text in resolved_write_paths:
+        path = Path(path_text)
+        if ExtendedToolExecutor._is_within_directory(path, PROJECT_ROOT) and not any(
+            ExtendedToolExecutor._is_within_directory(path, root)
+            for root in writable_jcodex_roots
+        ):
+            raise ValueError(
+                f"write path '{path_text}' resolves inside the protected "
+                "JCodex source tree. Set workdir to the target project "
+                "directory, for example workspace/output/my-app."
+            )
+
+    if workdir_path.exists() and not workdir_path.is_dir():
+        raise ValueError(f"subagent workdir is not a directory: {workdir_path}")
+    try:
+        workdir_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            f"failed to prepare subagent workdir '{workdir_path}': {exc}"
+        ) from exc
+    return workdir_path, resolved_write_paths
+
+
+def _dispatch_multi_agent_tool(
+    run: DesktopRunContext, tool_name: str, params: dict
+) -> dict:
+    if not run.multi_agent_enabled:
+        raise RuntimeError("Multi-Agent Mode is not active")
+    params = dict(params or {})
+    if tool_name == "publish_agent_artifact":
+        # A project contract must be publishable before the first child exists.
+        team = _ensure_agent_team(run)
+        artifact = team.publish_artifact(
+            "primary",
+            str(params.get("title", "")),
+            str(params.get("summary", "")),
+            params.get("paths"),
+            params.get("recipient_agent_ids"),
+        )
+        return {"success": True, "artifact": artifact}
+    if tool_name == "spawn_agent":
+        write_access = bool(params.get("write_access", False))
+        raw_workdir = str(params.get("workdir", "") or "").strip()
+        write_paths = [
+            str(path).strip()
+            for path in params.get("write_paths", []) or []
+            if str(path or "").strip()
+        ]
+        if write_access and not write_paths:
+            raise ValueError(
+                "write_access=true requires at least one explicit write_paths entry"
+            )
+        workdir_path, resolved_write_paths = _prepare_subagent_write_scope(
+            run.executor,
+            raw_workdir,
+            write_paths,
+            write_access,
+        )
+        team = _ensure_agent_team(run)
+        agent = team.spawn(
+            name=str(params.get("name", "")),
+            role=str(params.get("role", "")),
+            task=str(params.get("task", "")),
+            context=str(params.get("context", "")),
+            write_access=write_access,
+            write_paths=resolved_write_paths,
+            workdir=str(workdir_path) if raw_workdir else "",
+            depends_on=params.get("depends_on"),
+        )
+        return {
+            "success": True,
+            "team_id": team.team_id,
+            "agent": _model_agent_team_snapshot(
+                {"team_id": team.team_id, "version": 0, "agents": [agent]}
+            )["agents"][0],
+            "message": "Child agent started in an isolated context.",
+            "workdir": str(workdir_path),
+        }
+
+    team = run.agent_team
+    if not isinstance(team, MultiAgentTeam):
+        if tool_name == "list_agents":
+            return {
+                "team_id": "",
+                "version": 0,
+                "status": "idle",
+                "active_count": 0,
+                "agents": [],
+            }
+        raise RuntimeError("No child agents have been created for this task")
+    if tool_name == "send_agent_message":
+        agent = team.send_message(
+            str(params.get("agent_id", "")),
+            str(params.get("message", "")),
+            kind=str(params.get("kind", "message")),
+            references=params.get("references"),
+        )
+        return {
+            "success": True,
+            "team_id": team.team_id,
+            "agent": _model_agent_team_snapshot(
+                {"team_id": team.team_id, "version": 0, "agents": [agent]}
+            )["agents"][0],
+        }
+    if tool_name == "get_agent_collaboration":
+        snapshot = _public_agent_team_snapshot(team.list_agents())
+        return {
+            "team_id": snapshot["team_id"],
+            "artifacts": snapshot.get("artifacts", []),
+            "collaboration_events": snapshot.get("collaboration_events", []),
+            "file_claims": snapshot.get("file_claims", []),
+        }
+    if tool_name == "wait_agents":
+        timeout_ms = max(
+            0, min(int(params.get("timeout_ms", 30000) or 0), 600000)
+        )
+        snapshot = team.wait_agents(
+            params.get("agent_ids"), timeout=timeout_ms / 1000
+        )
+        result = _model_agent_team_snapshot(snapshot)
+        result["wait"] = snapshot.get("wait", {})
+        return result
+    if tool_name == "list_agents":
+        return _model_agent_team_snapshot(team.list_agents())
+    if tool_name == "cancel_agent":
+        agent = team.cancel_agent(str(params.get("agent_id", "")))
+        return {
+            "success": True,
+            "team_id": team.team_id,
+            "agent": _model_agent_team_snapshot(
+                {"team_id": team.team_id, "version": 0, "agents": [agent]}
+            )["agents"][0],
+        }
+    raise RuntimeError(f"Unsupported collaboration action: {tool_name}")
+
+
+def _multi_agent_finish_guard(run: DesktopRunContext) -> str:
+    snapshot = _agent_team_snapshot(run)
+    if snapshot and snapshot.get("active_count", 0):
+        names = ", ".join(
+            agent["name"]
+            for agent in snapshot.get("agents", [])
+            if agent.get("status") not in {"completed", "failed", "cancelled"}
+        )
+        return (
+            "Required child agents are still running"
+            + (f": {names}" if names else "")
+            + ". Call wait_agents and synthesize their results before finishing."
+        )
+    return ""
 
 
 def _graph_thread_id(conversation_id: str, message_id: int) -> str:
@@ -2443,6 +3979,11 @@ def _graph_runtime(run: DesktopRunContext) -> dict:
         "plan_enabled": run.plan_enabled,
         "plan_policy": run.plan_policy,
         "voice_mode": run.voice_mode,
+        "multi_agent_enabled": run.multi_agent_enabled,
+        "multi_agent_dispatch": lambda name, params: _dispatch_multi_agent_tool(
+            run, name, params
+        ),
+        "finish_guard": lambda *_args: _multi_agent_finish_guard(run),
         "compression_check": lambda state: _graph_compression_check(run, state),
         "compression_handler": lambda state, snapshot, progress: (
             _graph_compression_handler(run, state, snapshot, progress)
@@ -2458,6 +3999,7 @@ def _graph_compression_check(run: DesktopRunContext, state: dict) -> Optional[di
         state,
         plan_enabled=run.plan_enabled,
         voice_mode=run.voice_mode,
+        multi_agent_enabled=run.multi_agent_enabled,
     )
     context_snapshot = snapshot["context_snapshot"]
     if run.executor.context_compactor.should_prefire(context_snapshot):
@@ -2519,6 +4061,7 @@ def _graph_compression_handler(
         plan_enabled=run.plan_enabled,
         plan_policy=run.plan_policy,
         voice_mode=run.voice_mode,
+        multi_agent_enabled=run.multi_agent_enabled,
     )
     dynamic_reminder = _dynamic_compaction_reminder(run)
     if dynamic_reminder:
@@ -2541,6 +4084,7 @@ def _graph_compression_handler(
         executor.get_runtime_tools(
             plan_enabled=run.plan_enabled,
             voice_mode=run.voice_mode,
+            multi_agent_enabled=run.multi_agent_enabled,
         ),
     )
     executor._cache_context_snapshot(successor_snapshot)
@@ -2692,32 +4236,36 @@ def _modified_file_event_key(
     event: dict, project_root: Path = PROJECT_ROOT
 ) -> str:
     """Pair a tool end event with its pre-mutation snapshot."""
+    scope = str(event.get("_modified_file_scope", "") or "").strip()
     tool = str(event.get("tool", "") or "").strip().lower()
     call_id = str(
         event.get("prepared_tool_call_id") or event.get("tool_call_id") or ""
     ).strip()
     if call_id:
-        return f"{tool}:{call_id}"
+        return f"{scope}:{tool}:{call_id}"
     targets = "|".join(
         str(raw_path) for raw_path, _path in _modified_file_paths(
             tool, event.get("params", {}), project_root
         )
     )
-    return f"{tool}:{targets}"
+    return f"{scope}:{tool}:{targets}"
 
 
 def _capture_modified_file_snapshots(run: DesktopRunContext, event: dict) -> None:
     """Remember before-states at structured file-tool start events."""
-    snapshots = [
-        _modified_file_snapshot(raw_path, path, run.executor.project_root)
-        for raw_path, path in _modified_file_paths(
-            event.get("tool"), event.get("params", {}), run.executor.project_root
-        )
-    ]
-    if snapshots:
-        run.pending_modified_file_snapshots[
-            _modified_file_event_key(event, run.executor.project_root)
-        ] = snapshots
+    with state_lock:
+        if run.cancel_event.is_set():
+            return
+        snapshots = [
+            _modified_file_snapshot(raw_path, path, run.executor.project_root)
+            for raw_path, path in _modified_file_paths(
+                event.get("tool"), event.get("params", {}), run.executor.project_root
+            )
+        ]
+        if snapshots:
+            run.pending_modified_file_snapshots[
+                _modified_file_event_key(event, run.executor.project_root)
+            ] = snapshots
 
 
 def _record_modified_file_changes(run: DesktopRunContext, event: dict) -> None:
@@ -3076,6 +4624,10 @@ def _graph_event_publisher(
             return
 
         if event_type == "tool_preparing":
+            if event.get("tool") in _MULTI_AGENT_TOOL_NAMES:
+                return
+            if event.get("tool") in QUESTION_TOOL_NAMES:
+                return
             if event.get("tool") in {"todo_write", "update_plan"}:
                 return
             tool_key = str(
@@ -3089,6 +4641,7 @@ def _graph_event_publisher(
             emit(
                 {
                     "type": "tool_preparing",
+                    "actor": "primary",
                     "tool": event.get("tool", "Tool"),
                     "stream_id": stream_id,
                     "tool_call_id": tool_key,
@@ -3140,6 +4693,10 @@ def _graph_event_publisher(
             return
 
         if event_type == "tool_start":
+            if event.get("tool") in _MULTI_AGENT_TOOL_NAMES:
+                return
+            if event.get("tool") in QUESTION_TOOL_NAMES:
+                return
             if event.get("tool") in {"todo_write", "update_plan"}:
                 return
             tool_key = str(
@@ -3155,6 +4712,7 @@ def _graph_event_publisher(
             emit(
                 {
                     "type": "tool_start",
+                    "actor": "primary",
                     "tool": event.get("tool", "Tool"),
                     "params": _tool_display_params(raw_params),
                     "target": _tool_target(
@@ -3169,6 +4727,17 @@ def _graph_event_publisher(
             return
 
         if event_type == "tool_end":
+            if event.get("tool") in _MULTI_AGENT_TOOL_NAMES:
+                tool_key = str(
+                    event.get("prepared_tool_call_id")
+                    or event.get("tool_call_id")
+                    or ""
+                )
+                tool_started_at.pop(tool_key, None)
+                tool_started_at_ms.pop(tool_key, None)
+                return
+            if event.get("tool") in QUESTION_TOOL_NAMES:
+                return
             if event.get("tool") in {"todo_write", "update_plan"}:
                 if event.get("disabled"):
                     return
@@ -3233,6 +4802,7 @@ def _graph_event_publisher(
             emit(
                 {
                     "type": "tool",
+                    "actor": "primary",
                     "tool": event.get("tool", "Tool"),
                     "result": event.get("result", ""),
                     "target": _tool_target(
@@ -3441,17 +5011,34 @@ def _run_graph_task(
 
 
 @eel.expose
-def initialize():
+def initialize(conversation_id: str = ""):
+    """Initialize the desktop runtime for the task owned by this window.
+
+    Split panes are separate browser documents and can finish booting after
+    their parent task has already been deleted.  Treat that as a stale window,
+    not as a fatal backend exception, and never use the base executor's cached
+    conversation id to decide which task the caller owns.
+    """
     result = os_agent.initialize()
-    if result[0] and os_agent.conversation_id:
-        with state_lock:
-            active = conversation_store.load(os_agent.conversation_id)
-            if active.get("project_id"):
-                executor = DesktopTaskExecutor(shared_from=os_agent)
-                executor.initialize_conversation_runtime(active["id"], os_agent)
-                conversation_executors.setdefault(active["id"], executor)
-            else:
-                conversation_executors.setdefault(active["id"], os_agent)
+    if not result[0]:
+        return result
+
+    target_id = str(conversation_id or conversation_store.active_id() or "")
+    if not target_id:
+        return False, "Conversation not found"
+    try:
+        active = conversation_store.load(target_id)
+        if (
+            target_id == os_agent.conversation_id
+            and not active.get("project_id")
+            and not active.get("is_split_task")
+        ):
+            with state_lock:
+                conversation_executors.setdefault(target_id, os_agent)
+        else:
+            _executor_for_conversation(target_id)
+    except (RuntimeError, ValueError) as exc:
+        return False, str(exc)
     return result
 
 
@@ -3463,6 +5050,8 @@ def send_message(
     conversation_id: str = "",
     plan_mode: bool = False,
     voice_mode: bool = False,
+    multi_agent_mode: bool = False,
+    allow_all: Optional[bool] = None,
 ):
     """处理消息，支持 /clear、/compact 和 /stop 快捷命令（与 CLI 完全一致）"""
     message = str(message or "").strip()
@@ -3564,6 +5153,7 @@ def send_message(
         plan_enabled=plan_enabled,
         plan_policy=plan_policy,
         voice_mode=_coerce_plan_mode(voice_mode),
+        multi_agent_enabled=_coerce_plan_mode(multi_agent_mode),
     )
     if run is None:
         return {"status": "busy", "error": "当前对话已有任务正在执行"}
@@ -3572,7 +5162,11 @@ def send_message(
     executor.pending_approval = None
     executor.pending_question = None
     executor.step_count = 0
-    executor.allow_all_commands = executor.auto_allow_all_commands
+    executor.allow_all_commands = (
+        executor.auto_allow_all_commands
+        if allow_all is None
+        else _coerce_plan_mode(allow_all)
+    )
     executor.tool_loop_guard.reset()
     try:
         conversation_store.append_message(
@@ -3734,7 +5328,10 @@ def send_message(
                 history_message += (
                     f" [参考文件夹: {', '.join(reference_folder_paths)}]"
                 )
-            executor.memory_manager.append_execution_step(f"【用户请求】{history_message}")
+            with executor._memory_lock:
+                executor.memory_manager.append_execution_step(
+                    f"【用户请求】{history_message}"
+                )
             executor.data_integrator.start_task(history_message)
             if _execution_cancelled(run):
                 outcome = "stopped"
@@ -3746,6 +5343,7 @@ def send_message(
                 plan_enabled=run.plan_enabled,
                 plan_policy=run.plan_policy,
                 voice_mode=run.voice_mode,
+                multi_agent_enabled=run.multi_agent_enabled,
             )
             outcome = _run_graph_task(
                 user_msg,
@@ -4034,9 +5632,35 @@ def get_next_results(
 
 
 @eel.expose
-def list_conversations():
-    """Return persisted desktop tasks ordered by recent activity."""
+def list_conversations(split_conversation_id: str = ""):
+    """Return normal sidebar tasks or one pinned internal split task."""
     result = conversation_store.list()
+    split_conversation_id = str(split_conversation_id or "").strip()
+    if split_conversation_id:
+        result["conversations"] = [
+            item
+            for item in result.get("conversations", [])
+            if str(item.get("id", "")) == split_conversation_id
+            and item.get("is_split_task")
+        ]
+        result["active_id"] = (
+            split_conversation_id if result["conversations"] else None
+        )
+    else:
+        result["conversations"] = [
+            item
+            for item in result.get("conversations", [])
+            if not item.get("is_split_task")
+        ]
+        visible_ids = {
+            str(item.get("id", "")) for item in result["conversations"]
+        }
+        if str(result.get("active_id", "")) not in visible_ids:
+            result["active_id"] = (
+                result["conversations"][0]["id"]
+                if result["conversations"]
+                else None
+            )
     with state_lock:
         for item in result.get("conversations", []):
             run = conversation_runs.get(str(item.get("id", "")))
@@ -4073,6 +5697,86 @@ def create_conversation(title: str = "新任务", project_id: str = ""):
 
 
 @eel.expose
+def create_split_conversation(source_conversation_id: str):
+    """Create or reopen a child forked from the parent's short-term snapshot."""
+    try:
+        source = conversation_store.load(str(source_conversation_id or ""))
+        split_state = conversation_store.get_split_state(source["id"])
+        if not split_state.get("conversation_id"):
+            with state_lock:
+                active_run = conversation_runs.get(source["id"])
+                if active_run and active_run.status in {"running", "waiting"}:
+                    return {
+                        "success": False,
+                        "error": "请等待主任务执行完成后再创建子任务快照",
+                    }
+        project_id = str(source.get("project_id", "") or "").strip()
+        if project_id:
+            project = project_store.load(project_id)
+            if not project.get("available"):
+                raise ValueError("项目目录当前不可用")
+        conversation = conversation_store.create_split(source["id"])
+        _executor_for_conversation(conversation["id"])
+        return {
+            "success": True,
+            "created": not bool(split_state.get("conversation_id")),
+            "conversation": conversation,
+            "split_state": conversation_store.get_split_state(source["id"]),
+        }
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@eel.expose
+def get_split_conversation_state(source_conversation_id: str):
+    """Return the split child, visibility, and width saved for one primary task."""
+    try:
+        return {
+            "success": True,
+            **conversation_store.get_split_state(str(source_conversation_id or "")),
+        }
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@eel.expose
+def set_split_conversation_state(
+    source_conversation_id: str,
+    is_open: Optional[bool] = None,
+    width: Optional[int] = None,
+):
+    """Persist split visibility and width for one primary task."""
+    try:
+        return {
+            "success": True,
+            **conversation_store.set_split_state(
+                str(source_conversation_id or ""),
+                is_open=is_open,
+                width=width,
+            ),
+        }
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@eel.expose
+def delete_split_conversation(source_conversation_id: str):
+    """Permanently delete one primary task's internal split child."""
+    try:
+        state = conversation_store.get_split_state(str(source_conversation_id or ""))
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+    child_id = str(state.get("conversation_id") or "")
+    if not child_id:
+        return {
+            "success": True,
+            "active_id": conversation_store.active_id(),
+            "deleted_conversation_ids": [],
+        }
+    return delete_conversation(child_id)
+
+
+@eel.expose
 def load_conversation(conversation_id: str):
     try:
         return {"success": True, "conversation": conversation_store.load(conversation_id)}
@@ -4102,7 +5806,11 @@ def load_conversation_attachment(conversation_id: str, asset_id: str):
 @eel.expose
 def set_active_conversation(conversation_id: str):
     try:
-        conversation_store.set_active(conversation_id)
+        conversation = conversation_store.load(conversation_id)
+        # Internal split tasks are pinned to their own pane. They may be marked
+        # read, but must never replace the primary pane's global active task.
+        if not conversation.get("is_split_task"):
+            conversation_store.set_active(conversation_id)
         conversation = conversation_store.mark_read(conversation_id)
         _executor_for_conversation(conversation_id)
         return {"success": True, "conversation": conversation}
@@ -4147,31 +5855,48 @@ def move_conversation_to_project(conversation_id: str, project_id: str = ""):
 
 @eel.expose
 def delete_conversation(conversation_id: str):
+    try:
+        delete_ids = conversation_store.related_conversation_ids(conversation_id)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
     with state_lock:
-        run = conversation_runs.get(conversation_id)
-        if run and run.status in {"running", "waiting"}:
+        if any(
+            (run := conversation_runs.get(target_id))
+            and run.status in {"running", "waiting"}
+            for target_id in delete_ids
+        ):
             return {"success": False, "error": "请先停止该对话的当前任务"}
     try:
-        conversation = conversation_store.load(conversation_id)
-        memory_store = _memory_store_for_conversation(conversation)
-        project = _project_for_conversation(conversation)
-        if project and project.get("available"):
-            memory_store.delete_conversation_record(conversation_id)
-        else:
-            memory_store.purge_scope()
-        executor = conversation_executors.get(conversation_id)
-        manager = (
-            executor.preview_manager
-            if executor and executor.preview_manager is not None
-            else os_agent.preview_manager
-        )
-        if manager:
-            manager.clear_conversation(conversation_id)
+        checkpoint_cleanup = {}
+        for target_id in delete_ids:
+            conversation = conversation_store.load(target_id)
+            memory_store = _memory_store_for_conversation(conversation)
+            project = _project_for_conversation(conversation)
+            if project and project.get("available"):
+                memory_store.delete_conversation_record(target_id)
+            else:
+                memory_store.purge_scope()
+            executor = conversation_executors.get(target_id)
+            manager = (
+                executor.preview_manager
+                if executor and executor.preview_manager is not None
+                else os_agent.preview_manager
+            )
+            if manager:
+                manager.clear_conversation(target_id)
+            checkpoint_cleanup[target_id] = _purge_conversation_checkpoints(
+                target_id
+            )
         result = conversation_store.delete(conversation_id)
-        checkpoint_cleanup = _purge_conversation_checkpoints(conversation_id)
         with state_lock:
-            conversation_runs.pop(conversation_id, None)
-            conversation_executors.pop(conversation_id, None)
+            for target_id in delete_ids:
+                conversation_runs.pop(target_id, None)
+                conversation_executors.pop(target_id, None)
+                conversation_generations.pop(target_id, None)
+            if str(os_agent.conversation_id or "") in delete_ids:
+                # The durable task is gone.  Do not let a late iframe
+                # initialize call dereference this cached id again.
+                os_agent.conversation_id = None
         _executor_for_conversation(result["active_id"])
         return {"success": True, **result, "checkpoint_cleanup": checkpoint_cleanup}
     except ValueError as exc:
@@ -4234,6 +5959,8 @@ def list_projects():
         conversations = conversation_store.list().get("conversations", [])
         counts: dict[str, int] = {}
         for conversation in conversations:
+            if conversation.get("is_split_task"):
+                continue
             project_id = str(conversation.get("project_id") or "")
             if project_id:
                 counts[project_id] = counts.get(project_id, 0) + 1
@@ -4510,6 +6237,11 @@ def delete_project(project_id: str):
         for item in conversation_store.list().get("conversations", [])
         if str(item.get("project_id") or "") == project_id
     }
+    project_primary_task_ids = {
+        conversation_id
+        for conversation_id in project_task_ids
+        if not conversation_store.load(conversation_id).get("is_split_task")
+    }
     with state_lock:
         if any(
             conversation_id in project_task_ids
@@ -4526,24 +6258,34 @@ def delete_project(project_id: str):
             include_global=False,
         ).purge_scope()
         deleted_conversation_ids = []
-        for conversation_id in project_task_ids:
-            executor = conversation_executors.get(conversation_id)
-            if executor and executor.preview_manager:
-                executor.preview_manager.clear_conversation(conversation_id)
-            conversation_store.delete(conversation_id)
-            _purge_conversation_checkpoints(conversation_id)
-            deleted_conversation_ids.append(conversation_id)
+        for conversation_id in project_primary_task_ids:
+            related_ids = conversation_store.related_conversation_ids(conversation_id)
+            for target_id in related_ids:
+                executor = conversation_executors.get(target_id)
+                manager = (
+                    executor.preview_manager
+                    if executor and executor.preview_manager is not None
+                    else os_agent.preview_manager
+                )
+                if manager:
+                    manager.clear_conversation(target_id)
+                _purge_conversation_checkpoints(target_id)
+            result = conversation_store.delete(conversation_id)
+            deleted_conversation_ids.extend(
+                result.get("deleted_conversation_ids", related_ids)
+            )
         project_store.delete(project_id)
         with state_lock:
-            for conversation_id in deleted_conversation_ids:
+            for conversation_id in set(deleted_conversation_ids):
                 conversation_runs.pop(conversation_id, None)
                 conversation_executors.pop(conversation_id, None)
+                conversation_generations.pop(conversation_id, None)
         active_id = conversation_store.active_id()
         if active_id:
             _executor_for_conversation(active_id)
         return {
             "success": True,
-            "deleted_conversation_ids": deleted_conversation_ids,
+            "deleted_conversation_ids": sorted(set(deleted_conversation_ids)),
         }
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
@@ -4670,6 +6412,7 @@ def get_execution_status(conversation_id: str = "", message_id: int = 0):
         finalized = True if run is None else bool(run.finalized)
         pending_approval = _pending_approval_snapshot(run)
         pending_question = _pending_question_snapshot(run)
+    agent_team = _agent_team_snapshot(run)
     return {
         "running": running,
         "finalized": finalized,
@@ -4680,6 +6423,7 @@ def get_execution_status(conversation_id: str = "", message_id: int = 0):
         "awaiting_question": pending_question is not None,
         "pending_question": pending_question,
         "stopping": bool(run and run.stopping),
+        "agent_team": agent_team,
     }
 
 
@@ -4702,20 +6446,23 @@ def stop_execution(conversation_id: str = "", message_id: int = 0):
             executor.pending_question = None
             run.stopping = True
             run.detached = True
+
+        clear_step_queue(run.conversation_id, run.message_id)
+        modified_files = _publish_modified_files_summary(run)
+        agent_team = _cancel_agent_team(run, publish_terminal=True)
+        with state_lock:
             run.cancel_event.set()
             run.status = "cancelled"
-
         if executor.ai_engine:
             executor.ai_engine.clear_history()
         executor.allow_all_commands = executor.auto_allow_all_commands
-        clear_step_queue(run.conversation_id, run.message_id)
-        modified_files = _publish_modified_files_summary(run)
         if executor.langgraph_runner:
             graph_thread_id = str(
                 (pending or {}).get("graph_thread_id")
                 or _graph_thread_id(run.conversation_id, run.message_id)
             )
             executor.langgraph_runner.cancel(graph_thread_id)
+        _schedule_subagent_runtime_release(run)
         executor.data_integrator.end_task("已停止")
         executor.current_user_request = ""
         try:
@@ -4733,6 +6480,7 @@ def stop_execution(conversation_id: str = "", message_id: int = 0):
             "conversation_id": run.conversation_id,
             "message_id": run.message_id,
             "modified_files": modified_files,
+            "agent_team": agent_team,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -4914,9 +6662,9 @@ def load_settings():
             "api_key": "",
             "api_model": "",
             "tavily_api_key": "",
-            "max_steps": "20",
-            "max_tokens": "30000",
-            "max_web_searches": "3",
+            "max_steps": "100",
+            "max_tokens": "50000",
+            "max_web_searches": "8",
             "auto_compact_threshold_percent": "85",
         }
 
@@ -4953,9 +6701,9 @@ def load_settings():
             "api_key": "",
             "api_model": "",
             "tavily_api_key": "",
-            "max_steps": "20",
-            "max_tokens": "30000",
-            "max_web_searches": "3",
+            "max_steps": "100",
+            "max_tokens": "50000",
+            "max_web_searches": "8",
             "auto_compact_threshold_percent": "85",
         }
 
@@ -4975,10 +6723,10 @@ def save_settings(settings: dict):
         load_dotenv(env_file, override=True)
 
         # 更新运行时配置，直接使用用户保存的值，避免读回旧环境变量
-        configured_max_steps = int(settings.get("max_steps", "20"))
-        configured_max_tokens = int(settings.get("max_tokens", "30000"))
+        configured_max_steps = int(settings.get("max_steps", "100"))
+        configured_max_tokens = int(settings.get("max_tokens", "50000"))
         configured_max_web_searches = int(
-            settings.get("max_web_searches", "3")
+            settings.get("max_web_searches", "8")
         )
         with state_lock:
             configured_executors = set(conversation_executors.values()) | {os_agent}
@@ -5049,11 +6797,11 @@ def sync_runtime_env(settings: dict):
             os.environ["TAVILY_API_KEY"] = settings.get("tavily_api_key", "")
 
         if "max_steps" in settings:
-            os.environ["MAX_STEPS"] = settings.get("max_steps", "20")
+            os.environ["MAX_STEPS"] = settings.get("max_steps", "100")
         if "max_tokens" in settings:
-            os.environ["MAX_TOKENS"] = settings.get("max_tokens", "30000")
+            os.environ["MAX_TOKENS"] = settings.get("max_tokens", "50000")
         if "max_web_searches" in settings:
-            os.environ["MAX_WEB_SEARCHES"] = settings.get("max_web_searches", "3")
+            os.environ["MAX_WEB_SEARCHES"] = settings.get("max_web_searches", "8")
         if "auto_compact_threshold_percent" in settings:
             os.environ["AUTO_COMPACT_THRESHOLD_PERCENT"] = settings.get(
                 "auto_compact_threshold_percent", "85"
@@ -5071,10 +6819,10 @@ def sync_runtime_env(settings: dict):
             )
             os_agent.ai_engine.model = os.getenv("API_MODEL", "gpt-4")
         if os_agent:
-            os_agent.max_steps = int(os.getenv("MAX_STEPS", "20"))
-            os_agent.max_tokens = int(os.getenv("MAX_TOKENS", "30000"))
+            os_agent.max_steps = int(os.getenv("MAX_STEPS", "100"))
+            os_agent.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
             os_agent.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
-            os_agent.max_web_searches = int(os.getenv("MAX_WEB_SEARCHES", "3"))
+            os_agent.max_web_searches = int(os.getenv("MAX_WEB_SEARCHES", "8"))
             os_agent.context_compactor.refresh_policy(os_agent.context_window, None)
             os_agent.compress_at = os_agent.context_compactor.policy.trigger_tokens
             os_agent.show_knowledge_appendix = False
@@ -5229,7 +6977,7 @@ def get_token_count(conversation_id: str = ""):
                 os.getenv("AUTO_COMPACT_THRESHOLD_PERCENT", "85")
             ),
             "max_tokens": int(os.getenv("CONTEXT_WINDOW", "128000")),
-            "response_max_tokens": int(os.getenv("MAX_TOKENS", "30000")),
+            "response_max_tokens": int(os.getenv("MAX_TOKENS", "50000")),
         }
 
 
@@ -6004,7 +7752,9 @@ def _create_secured_eel_app(port: int):
                 "Path=/; HttpOnly; SameSite=Strict"
             ),
         )
-        response.set_header("X-Frame-Options", "DENY")
+        # Split tasks embed only this exact same-origin desktop page. External
+        # origins remain blocked by both SAMEORIGIN and the CSP below.
+        response.set_header("X-Frame-Options", "SAMEORIGIN")
         response.set_header("X-Content-Type-Options", "nosniff")
         response.set_header("Referrer-Policy", "no-referrer")
         response.set_header(
@@ -6024,7 +7774,7 @@ def _create_secured_eel_app(port: int):
                     "object-src 'none'",
                     "base-uri 'self'",
                     "form-action 'self'",
-                    "frame-ancestors 'none'",
+                    "frame-ancestors 'self'",
                 ]
             ),
         )

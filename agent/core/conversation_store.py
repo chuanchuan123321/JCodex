@@ -15,7 +15,6 @@ _IMAGE_ATTACHMENT_SUFFIXES = {
     "image/webp": ".webp",
 }
 
-
 class ConversationStore:
     """Store desktop task metadata, UI events, and task-local memory paths."""
 
@@ -51,6 +50,8 @@ class ConversationStore:
                 )
                 if isinstance(conversation, dict):
                     before = dict(conversation)
+                    self._normalize_split_state(conversation)
+                    self._ensure_split_memory_fork(conversation)
                     self._normalize_completion_state(conversation)
                     if conversation != before:
                         self._write_json(
@@ -64,11 +65,18 @@ class ConversationStore:
                 changed = changed or metadata != item
 
             index["conversations"] = normalized_items
+            visible_items = [
+                item for item in normalized_items if not item.get("is_split_task")
+            ]
             if not index.get("active_id") or not any(
                 item.get("id") == index.get("active_id")
-                for item in normalized_items
+                for item in visible_items
             ):
-                index["active_id"] = normalized_items[0]["id"]
+                index["active_id"] = (
+                    visible_items[0]["id"]
+                    if visible_items
+                    else normalized_items[0]["id"]
+                )
                 changed = True
             if changed:
                 self._write_index(index)
@@ -234,13 +242,35 @@ class ConversationStore:
             attachment_dir.rmdir()
 
     def _new_conversation(
-        self, title: str, project_id: Optional[str] = None
+        self,
+        title: str,
+        project_id: Optional[str] = None,
+        memory_scope_id: Optional[str] = None,
+        is_split_task: bool = False,
+        parent_conversation_id: Optional[str] = None,
+        short_term_memory_id: Optional[str] = None,
+        split_conversation_id: Optional[str] = None,
+        split_open: bool = False,
+        split_pane_width: int = 0,
     ) -> Dict[str, Any]:
         now = self._now()
         conversation = {
             "id": str(uuid.uuid4()),
             "title": self._clean_title(title),
             "project_id": self._clean_project_id(project_id),
+            "memory_scope_id": self._clean_memory_scope_id(memory_scope_id),
+            "is_split_task": bool(is_split_task),
+            "parent_conversation_id": self._clean_conversation_id(
+                parent_conversation_id
+            ),
+            "short_term_memory_id": self._clean_conversation_id(
+                short_term_memory_id
+            ),
+            "split_conversation_id": self._clean_conversation_id(
+                split_conversation_id
+            ),
+            "split_open": bool(split_open),
+            "split_pane_width": self._clean_split_pane_width(split_pane_width),
             "created_at": now,
             "updated_at": now,
             "messages": [],
@@ -265,6 +295,108 @@ class ConversationStore:
         if any(char not in "0123456789abcdef-" for char in value):
             raise ValueError("Invalid project id")
         return value
+
+    @staticmethod
+    def _clean_memory_scope_id(memory_scope_id: Optional[str]) -> Optional[str]:
+        """Validate the opaque identifier used by split ordinary tasks."""
+        value = str(memory_scope_id or "").strip()
+        if not value:
+            return None
+        if any(char not in "0123456789abcdef-" for char in value):
+            raise ValueError("Invalid memory scope id")
+        return value
+
+    @staticmethod
+    def _clean_conversation_id(conversation_id: Optional[str]) -> Optional[str]:
+        value = str(conversation_id or "").strip()
+        if not value:
+            return None
+        if any(char not in "0123456789abcdef-" for char in value):
+            raise ValueError("Invalid conversation id")
+        return value
+
+    @staticmethod
+    def _clean_split_pane_width(value: Any) -> int:
+        try:
+            width = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(width, 4000))
+
+    @classmethod
+    def _normalize_split_state(cls, conversation: Dict[str, Any]) -> None:
+        """Migrate split tasks created before the explicit internal-task flag."""
+        conversation_id = str(conversation.get("id", "") or "")
+        memory_scope_id = cls._clean_memory_scope_id(
+            conversation.get("memory_scope_id")
+        )
+        short_term_memory_id = cls._clean_conversation_id(
+            conversation.get("short_term_memory_id")
+        )
+        inferred_split = bool(
+            conversation_id
+            and (
+                (memory_scope_id and memory_scope_id != conversation_id)
+                or (
+                    short_term_memory_id
+                    and short_term_memory_id != conversation_id
+                )
+            )
+        )
+        conversation["is_split_task"] = bool(
+            conversation.get("is_split_task", inferred_split)
+        )
+        parent_id = conversation.get("parent_conversation_id")
+        if conversation["is_split_task"] and not parent_id:
+            parent_id = short_term_memory_id or memory_scope_id
+        conversation["parent_conversation_id"] = cls._clean_conversation_id(
+            parent_id
+        )
+        if conversation["is_split_task"] and not short_term_memory_id:
+            # New split tasks own their post-fork memory directory.  A
+            # self-reference keeps the persisted retrieval snapshot enabled
+            # without resolving back to the parent's live files.
+            short_term_memory_id = conversation_id
+        elif not conversation["is_split_task"] and short_term_memory_id == conversation_id:
+            # Older parents used a redundant self-reference solely because
+            # their child shared this directory.  It is no longer needed.
+            short_term_memory_id = None
+        conversation["short_term_memory_id"] = short_term_memory_id
+        conversation["split_conversation_id"] = cls._clean_conversation_id(
+            conversation.get("split_conversation_id")
+        )
+        conversation["split_open"] = bool(conversation.get("split_open", False))
+        conversation["split_pane_width"] = cls._clean_split_pane_width(
+            conversation.get("split_pane_width", 0)
+        )
+        if conversation["is_split_task"]:
+            conversation["split_conversation_id"] = None
+            conversation["split_open"] = False
+            conversation["split_pane_width"] = 0
+
+    def _ensure_split_memory_fork(self, conversation: Dict[str, Any]) -> bool:
+        """Detach a legacy split task from its parent's live memory directory."""
+        if not conversation.get("is_split_task"):
+            return False
+        conversation_id = self._clean_conversation_id(conversation.get("id"))
+        if not conversation_id:
+            return False
+        current_scope = self._clean_conversation_id(
+            conversation.get("short_term_memory_id")
+        )
+        if current_scope == conversation_id:
+            return False
+        source_id = current_scope or self._clean_conversation_id(
+            conversation.get("parent_conversation_id")
+        )
+        source_dir = self.memory_dir(source_id) if source_id else None
+        target_dir = self.memory_dir(conversation_id)
+        if source_dir and source_dir != target_dir and source_dir.is_dir():
+            shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        conversation["short_term_memory_id"] = conversation_id
+        return True
 
     @staticmethod
     def _message_id(value: Any) -> int:
@@ -303,12 +435,30 @@ class ConversationStore:
 
     @staticmethod
     def _metadata(conversation: Dict[str, Any]) -> Dict[str, Any]:
+        ConversationStore._normalize_split_state(conversation)
         ConversationStore._normalize_completion_state(conversation)
         return {
             "id": conversation["id"],
             "title": conversation.get("title", "新任务"),
             "project_id": ConversationStore._clean_project_id(
                 conversation.get("project_id")
+            ),
+            "memory_scope_id": ConversationStore._clean_memory_scope_id(
+                conversation.get("memory_scope_id")
+            ),
+            "is_split_task": bool(conversation.get("is_split_task", False)),
+            "parent_conversation_id": ConversationStore._clean_conversation_id(
+                conversation.get("parent_conversation_id")
+            ),
+            "short_term_memory_id": ConversationStore._clean_conversation_id(
+                conversation.get("short_term_memory_id")
+            ),
+            "split_conversation_id": ConversationStore._clean_conversation_id(
+                conversation.get("split_conversation_id")
+            ),
+            "split_open": bool(conversation.get("split_open", False)),
+            "split_pane_width": ConversationStore._clean_split_pane_width(
+                conversation.get("split_pane_width", 0)
             ),
             "created_at": conversation.get("created_at", ""),
             "updated_at": conversation.get("updated_at", ""),
@@ -324,7 +474,12 @@ class ConversationStore:
         conversation = self._read_json(self._conversation_file(conversation_id), None)
         if not isinstance(conversation, dict):
             raise ValueError("Conversation not found")
+        before = dict(conversation)
+        self._normalize_split_state(conversation)
+        self._ensure_split_memory_fork(conversation)
         self._normalize_completion_state(conversation)
+        if conversation != before:
+            self._write_json(self._conversation_file(conversation_id), conversation)
         return conversation
 
     def _update_index_metadata(self, conversation: Dict[str, Any]) -> None:
@@ -350,10 +505,15 @@ class ConversationStore:
             return {"active_id": index.get("active_id"), "conversations": items}
 
     def create(
-        self, title: str = "新任务", project_id: Optional[str] = None
+        self,
+        title: str = "新任务",
+        project_id: Optional[str] = None,
+        memory_scope_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
-            conversation = self._new_conversation(title, project_id)
+            conversation = self._new_conversation(
+                title, project_id, memory_scope_id
+            )
             index = self._read_index()
             index["active_id"] = conversation["id"]
             index.setdefault("conversations", []).append(self._metadata(conversation))
@@ -362,6 +522,167 @@ class ConversationStore:
             )
             self._write_index(index)
             return conversation
+
+    def create_split(self, source_conversation_id: str) -> Dict[str, Any]:
+        """Create or reopen a child task forked from current short-term context."""
+        with self._lock:
+            source = self._load_required(source_conversation_id)
+            if source.get("is_split_task"):
+                raise ValueError("Split tasks cannot create nested split tasks")
+
+            child_id = self._clean_conversation_id(
+                source.get("split_conversation_id")
+            )
+            child = None
+            if child_id:
+                try:
+                    candidate = self._load_required(child_id)
+                except ValueError:
+                    candidate = None
+                if (
+                    candidate
+                    and candidate.get("is_split_task")
+                    and candidate.get("parent_conversation_id") == source["id"]
+                ):
+                    child = candidate
+
+            if child is None:
+                for item in self._read_index().get("conversations", []):
+                    if (
+                        item.get("is_split_task")
+                        and item.get("parent_conversation_id") == source["id"]
+                    ):
+                        try:
+                            child = self._load_required(str(item.get("id", "")))
+                        except ValueError:
+                            child = None
+                        if child is not None:
+                            break
+
+            if child is not None:
+                source["short_term_memory_id"] = None
+                source["memory_scope_id"] = None
+                source["split_conversation_id"] = child["id"]
+                source["split_open"] = True
+                child["short_term_memory_id"] = child["id"]
+                child["memory_scope_id"] = None
+                self._write_json(self._conversation_file(source["id"]), source)
+                self._write_json(self._conversation_file(child["id"]), child)
+                self._update_index_metadata(source)
+                self._update_index_metadata(child)
+                return child
+
+            source_memory_dir = self.short_term_memory_dir(source["id"])
+            source["short_term_memory_id"] = None
+            source["memory_scope_id"] = None
+            child = self._new_conversation(
+                f"{source.get('title', '新任务')} · 子任务",
+                self._clean_project_id(source.get("project_id")),
+                None,
+                True,
+                source["id"],
+                None,
+            )
+            try:
+                shutil.copytree(
+                    source_memory_dir,
+                    self.memory_dir(child["id"]),
+                    dirs_exist_ok=True,
+                )
+            except OSError:
+                shutil.rmtree(self._conversation_dir(child["id"]), ignore_errors=True)
+                raise
+            child["short_term_memory_id"] = child["id"]
+            self._write_json(self._conversation_file(child["id"]), child)
+            source["split_conversation_id"] = child["id"]
+            source["split_open"] = True
+            self._write_json(self._conversation_file(source["id"]), source)
+            index = self._read_index()
+            index["conversations"] = [
+                item
+                for item in index.get("conversations", [])
+                if item.get("id") != source["id"]
+            ]
+            index["conversations"].append(self._metadata(source))
+            index.setdefault("conversations", []).append(self._metadata(child))
+            index["conversations"].sort(
+                key=lambda item: item.get("updated_at", ""), reverse=True
+            )
+            self._write_index(index)
+            return child
+
+    def get_split_state(self, source_conversation_id: str) -> Dict[str, Any]:
+        """Return the persisted split pane state for one primary task."""
+        with self._lock:
+            source = self._load_required(source_conversation_id)
+            if source.get("is_split_task"):
+                raise ValueError("Split state belongs to a primary task")
+            child_id = self._clean_conversation_id(
+                source.get("split_conversation_id")
+            )
+            if child_id:
+                try:
+                    child = self._load_required(child_id)
+                except ValueError:
+                    child = None
+                if not child or child.get("parent_conversation_id") != source["id"]:
+                    child_id = None
+            return {
+                "parent_conversation_id": source["id"],
+                "conversation_id": child_id,
+                "open": bool(child_id and source.get("split_open")),
+                "width": self._clean_split_pane_width(
+                    source.get("split_pane_width", 0)
+                ),
+            }
+
+    def set_split_state(
+        self,
+        source_conversation_id: str,
+        *,
+        is_open: Optional[bool] = None,
+        width: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Persist pane visibility and width without changing task ordering."""
+        with self._lock:
+            source = self._load_required(source_conversation_id)
+            if source.get("is_split_task"):
+                raise ValueError("Split state belongs to a primary task")
+            if is_open is not None:
+                source["split_open"] = bool(
+                    is_open and source.get("split_conversation_id")
+                )
+            if width is not None:
+                source["split_pane_width"] = self._clean_split_pane_width(width)
+            self._write_json(self._conversation_file(source["id"]), source)
+            self._update_index_metadata(source)
+            return self.get_split_state(source["id"])
+
+    def has_other_memory_scope_member(self, conversation_id: str) -> bool:
+        """Whether another ordinary task shares this task's memory group."""
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            scope_id = self._clean_memory_scope_id(
+                conversation.get("memory_scope_id")
+            )
+            if not scope_id:
+                return False
+            for item in self._read_index().get("conversations", []):
+                other_id = str(item.get("id", ""))
+                if other_id == conversation_id:
+                    continue
+                if self._clean_memory_scope_id(item.get("memory_scope_id")) == scope_id:
+                    return True
+            return False
+
+    def shared_memory_dir(self, memory_scope_id: str) -> Path:
+        scope_id = self._clean_memory_scope_id(memory_scope_id)
+        if not scope_id:
+            raise ValueError("Memory scope id is required")
+        path = (self.root_dir / "shared_memory" / scope_id).resolve()
+        if (self.root_dir / "shared_memory").resolve() not in path.parents:
+            raise ValueError("Invalid memory scope path")
+        return path
 
     def load(self, conversation_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -430,23 +751,68 @@ class ConversationStore:
 
     def delete(self, conversation_id: str) -> Dict[str, Any]:
         with self._lock:
-            self._load_required(conversation_id)
-            shutil.rmtree(self._conversation_dir(conversation_id), ignore_errors=True)
+            conversation = self._load_required(conversation_id)
             index = self._read_index()
+            delete_ids = set(self.related_conversation_ids(conversation_id))
+            for delete_id in delete_ids:
+                shutil.rmtree(self._conversation_dir(delete_id), ignore_errors=True)
             remaining = [
                 item
                 for item in index.get("conversations", [])
-                if item.get("id") != conversation_id
+                if item.get("id") not in delete_ids
             ]
+            if conversation.get("is_split_task"):
+                parent_id = self._clean_conversation_id(
+                    conversation.get("parent_conversation_id")
+                )
+                if parent_id:
+                    try:
+                        parent = self._load_required(parent_id)
+                    except ValueError:
+                        parent = None
+                    if parent:
+                        parent["split_conversation_id"] = None
+                        parent["split_open"] = False
+                        self._write_json(self._conversation_file(parent_id), parent)
+                        remaining = [
+                            item for item in remaining if item.get("id") != parent_id
+                        ]
+                        remaining.append(self._metadata(parent))
             index["conversations"] = remaining
             if not remaining:
                 replacement = self._new_conversation("新任务")
                 remaining = [self._metadata(replacement)]
                 index["conversations"] = remaining
             if index.get("active_id") == conversation_id:
-                index["active_id"] = remaining[0]["id"]
+                visible_remaining = [
+                    item for item in remaining if not item.get("is_split_task")
+                ]
+                index["active_id"] = (
+                    visible_remaining[0]["id"]
+                    if visible_remaining
+                    else remaining[0]["id"]
+                )
             self._write_index(index)
-            return {"active_id": index["active_id"], "conversations": remaining}
+            return {
+                "active_id": index["active_id"],
+                "conversations": remaining,
+                "deleted_conversation_ids": sorted(delete_ids),
+            }
+
+    def related_conversation_ids(self, conversation_id: str) -> List[str]:
+        """Return a task and any internal split children deleted with it."""
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            related_ids = {conversation_id}
+            if not conversation.get("is_split_task"):
+                related_ids.update(
+                    str(item.get("id", ""))
+                    for item in self._read_index().get("conversations", [])
+                    if item.get("is_split_task")
+                    and item.get("parent_conversation_id") == conversation_id
+                    and str(item.get("id", ""))
+                )
+            return sorted(related_ids)
 
     def clear(self, conversation_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -457,7 +823,7 @@ class ConversationStore:
             conversation["last_read_message_id"] = 0
             conversation["updated_at"] = self._now()
             self._write_json(self._conversation_file(conversation_id), conversation)
-            memory_dir = self.memory_dir(conversation_id)
+            memory_dir = self.short_term_memory_dir(conversation_id)
             shutil.rmtree(memory_dir, ignore_errors=True)
             memory_dir.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(self.attachments_dir(conversation_id), ignore_errors=True)
@@ -581,6 +947,69 @@ class ConversationStore:
             self._update_index_metadata(conversation)
             return event
 
+    def upsert_agent_team_snapshot(
+        self, conversation_id: str, message: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Persist only the latest bounded multi-agent snapshot for one run.
+
+        Live child activity arrives as complete, versioned snapshots. Replacing
+        the prior snapshot keeps conversation history reloadable without growing
+        one event for every child status transition.
+        """
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            event = dict(message)
+            event["type"] = "agent_team"
+            event["message_id"] = self._message_id(event.get("message_id"))
+            event["team_id"] = str(event.get("team_id", "")).strip()
+            if not event["team_id"]:
+                raise ValueError("team_id is required")
+            event["version"] = self._message_id(event.get("version"))
+            event.setdefault("id", str(uuid.uuid4()))
+            event["timestamp"] = self._now()
+
+            matching = [
+                existing
+                for existing in conversation.setdefault("messages", [])
+                if existing.get("type") == "agent_team"
+                and self._message_id(existing.get("message_id"))
+                == event["message_id"]
+                and str(existing.get("team_id", "")) == event["team_id"]
+            ]
+            if matching:
+                latest = max(
+                    matching,
+                    key=lambda item: self._message_id(item.get("version")),
+                )
+                if event["version"] < self._message_id(latest.get("version")):
+                    return dict(latest)
+
+            retained = []
+            insert_at: Optional[int] = None
+            for existing in conversation.setdefault("messages", []):
+                same_snapshot = (
+                    existing.get("type") == "agent_team"
+                    and self._message_id(existing.get("message_id"))
+                    == event["message_id"]
+                    and str(existing.get("team_id", "")) == event["team_id"]
+                )
+                if same_snapshot:
+                    if insert_at is None:
+                        insert_at = len(retained)
+                        event["id"] = existing.get("id", event["id"])
+                    continue
+                retained.append(existing)
+
+            if insert_at is None:
+                retained.append(event)
+            else:
+                retained.insert(insert_at, event)
+            conversation["messages"] = retained
+            conversation["updated_at"] = self._now()
+            self._write_json(self._conversation_file(conversation_id), conversation)
+            self._update_index_metadata(conversation)
+            return event
+
     def mark_plan_terminal(
         self,
         conversation_id: str,
@@ -632,6 +1061,15 @@ class ConversationStore:
 
     def memory_dir(self, conversation_id: str) -> Path:
         return self._conversation_dir(conversation_id) / "memory"
+
+    def short_term_memory_dir(self, conversation_id: str) -> Path:
+        """Return this task's writable short-term context directory."""
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            scope_id = self._clean_conversation_id(
+                conversation.get("short_term_memory_id")
+            ) or conversation["id"]
+            return self.memory_dir(scope_id)
 
     def active_id(self) -> Optional[str]:
         return self._read_index().get("active_id")

@@ -35,6 +35,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Command, interrupt
 from typing_extensions import Annotated, NotRequired, TypedDict
 
+from agent.core.multi_agent import MULTI_AGENT_TOOL_NAMES
 from agent.core.tool_loop_guard import ToolLoopGuard
 from agent.core.tool_result import ToolExecutionResult
 
@@ -42,6 +43,7 @@ from agent.core.tool_result import ToolExecutionResult
 EventCallback = Callable[[dict[str, Any]], None]
 ToolExecutor = Callable[..., Any]
 ApprovalPredicate = Callable[[str, dict[str, Any]], bool]
+QUESTION_TOOL_NAMES = frozenset({"question", "ask_user_question"})
 
 
 _MULTIPLE_CHOICE_CUE = re.compile(
@@ -240,7 +242,7 @@ class LangGraphRunner:
         *,
         checkpointer: Optional[BaseCheckpointSaver[Any]] = None,
         requires_approval: Optional[ApprovalPredicate] = None,
-        max_steps: int = 20,
+        max_steps: int = 100,
     ) -> None:
         self.model = model
         self.tool_executor = tool_executor
@@ -249,38 +251,11 @@ class LangGraphRunner:
         self.checkpointer = checkpointer or InMemorySaver()
         self.tools = self._build_tools(tool_definitions)
         self.tools_by_name = {tool.name: tool for tool in self.tools}
-        self.model_with_tools = self._bind_tools(self.tools)
-        self.tools_without_plan = [
-            tool
-            for tool in self.tools
-            if tool.name not in {"todo_write", "update_plan"}
-        ]
-        self.model_without_plan = (
-            self.model_with_tools
-            if len(self.tools_without_plan) == len(self.tools)
-            else self._bind_tools(self.tools_without_plan)
-        )
-        self.tools_without_question = [
-            tool for tool in self.tools if tool.name != "question"
-        ]
-        self.model_without_question = (
-            self.model_with_tools
-            if len(self.tools_without_question) == len(self.tools)
-            else self._bind_tools(self.tools_without_question)
-        )
-        self.tools_without_plan_or_question = [
-            tool for tool in self.tools_without_plan if tool.name != "question"
-        ]
-        if len(self.tools_without_plan_or_question) == len(self.tools_without_plan):
-            self.model_without_plan_or_question = self.model_without_plan
-        elif len(self.tools_without_plan_or_question) == len(
-            self.tools_without_question
-        ):
-            self.model_without_plan_or_question = self.model_without_question
-        else:
-            self.model_without_plan_or_question = self._bind_tools(
-                self.tools_without_plan_or_question
-            )
+        self._model_bindings: dict[frozenset[str], Any] = {}
+        self._model_bindings_lock = threading.RLock()
+        # Preserve the historical public attribute while all mode-specific
+        # bindings now share one hidden-tool cache.
+        self.model_with_tools = self._model_for_hidden_tools(frozenset())
         self._bindings: dict[str, _RuntimeBinding] = {}
         self._bindings_lock = threading.RLock()
         self.graph = self._build_graph()
@@ -544,18 +519,8 @@ class LangGraphRunner:
             if callable(cancellation_scope)
             else nullcontext()
         )
-        if binding.runtime.get("voice_mode", False):
-            model = (
-                self.model_without_question
-                if binding.runtime.get("plan_enabled", True)
-                else self.model_without_plan_or_question
-            )
-        else:
-            model = (
-                self.model_with_tools
-                if binding.runtime.get("plan_enabled", True)
-                else self.model_without_plan
-            )
+        hidden_tools = self._hidden_tools_for_runtime(binding.runtime)
+        model = self._model_for_hidden_tools(hidden_tools)
         with scope:
             for chunk in model.stream(messages):
                 self._raise_if_cancelled(binding)
@@ -603,12 +568,32 @@ class LangGraphRunner:
             pending_calls.append(call)
         if pending_calls != response.tool_calls:
             response = response.model_copy(update={"tool_calls": pending_calls})
+        finish_block_message = (
+            None
+            if pending_calls
+            else self._finish_guard_message(
+                binding, state, self._message_text(response)
+            )
+        )
+        emitted_calls = pending_calls
+        if finish_block_message:
+            # Desktop stream consumers already interpret a non-empty tool call
+            # list as "task continues". This marker is event-only and is never
+            # checkpointed or executed as a tool.
+            emitted_calls = [
+                {
+                    "id": f"finish-guard-{state.get('run_id', '')}-{next_step}",
+                    "name": "__finish_guard__",
+                    "args": {},
+                }
+            ]
         self._emit(
             binding,
             "model_end",
             stream_id=stream_id,
             content=self._message_text(response),
-            tool_calls=pending_calls,
+            tool_calls=emitted_calls,
+            finish_blocked=bool(finish_block_message),
         )
         if pending_calls:
             return {
@@ -617,6 +602,25 @@ class LangGraphRunner:
                 "pending_index": 0,
                 "step_count": next_step,
                 "status": "running",
+                "tool_prepared_at": prepared_at,
+            }
+        if finish_block_message:
+            self._emit(
+                binding,
+                "finish_blocked",
+                stream_id=stream_id,
+                content=finish_block_message,
+            )
+            return {
+                "messages": [
+                    response,
+                    HumanMessage(content=finish_block_message),
+                ],
+                "pending_calls": [],
+                "pending_index": 0,
+                "step_count": next_step,
+                "status": "running",
+                "final_content": "",
                 "tool_prepared_at": prepared_at,
             }
         return {
@@ -644,11 +648,9 @@ class LangGraphRunner:
         prepared_id = f"{state.get('run_id', '')}:{state.get('step_count', 0)}:{index}"
         stream_id = f"{state.get('run_id', '')}:{state.get('step_count', 0)}"
 
-        if (
-            name in {"todo_write", "update_plan"}
-            and not binding.runtime.get("plan_enabled", True)
-        ):
-            content = f"Error: {name} is disabled because Plan Mode is off"
+        disabled_reason = self._disabled_tool_reason(name, binding.runtime)
+        if disabled_reason:
+            content = disabled_reason
             self._emit(
                 binding,
                 "tool_end",
@@ -675,38 +677,10 @@ class LangGraphRunner:
                 "pending_index": index + 1,
             }
 
-        if name == "question" and binding.runtime.get("voice_mode", False):
-            content = "Error: question is disabled in voice conversation mode"
-            self._emit(
-                binding,
-                "tool_end",
-                tool=name,
-                params=args,
-                result=content,
-                failed=True,
-                disabled=True,
-                tool_call_id=tool_call_id,
-                prepared_tool_call_id=prepared_id,
-                stream_id=stream_id,
-                duration_ms=0,
-                execution_duration_ms=0,
-            )
-            return {
-                "messages": [
-                    ToolMessage(
-                        content=content,
-                        name=name,
-                        tool_call_id=tool_call_id,
-                        status="error",
-                    )
-                ],
-                "pending_index": index + 1,
-            }
-
-        if name == "question":
+        if name in QUESTION_TOOL_NAMES:
             questions = self._normalize_questions(args)
             if not questions:
-                content = "question 工具没有提供可显示的选项，请重新发起提问"
+                content = f"{name} 工具没有提供可显示的选项，请重新发起提问"
                 self._emit(
                     binding,
                     "tool_end",
@@ -914,6 +888,24 @@ class LangGraphRunner:
             "tool_prepared_at": {},
             "last_compression_step": step,
         }
+        collaboration_messages = self._take_collaboration_messages(binding, state)
+        collaboration_context = ""
+        if collaboration_messages:
+            collaboration_context = (
+                "## New Collaboration Messages\n\n"
+                "These are explicit public handoffs from the team. Use only "
+                "their stated content and references; do not infer or request "
+                "private history.\n\n"
+                + "\n\n---\n\n".join(collaboration_messages)
+            )
+            base_update["messages"] = [
+                HumanMessage(content=collaboration_context)
+            ]
+            self._emit(
+                binding,
+                "collaboration_messages",
+                count=len(collaboration_messages),
+            )
         last_compression_step = state.get("last_compression_step")
         if (
             last_compression_step is not None
@@ -1008,6 +1000,8 @@ class LangGraphRunner:
             return base_update
 
         messages = list(replacement_messages or [])
+        if collaboration_context:
+            messages.append(HumanMessage(content=collaboration_context))
         base_update.update(
             {
                 "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages],
@@ -1018,6 +1012,43 @@ class LangGraphRunner:
         if refreshed_system_prompt is not None:
             base_update["system_prompt"] = str(refreshed_system_prompt)
         return base_update
+
+    @staticmethod
+    def _take_collaboration_messages(
+        binding: _RuntimeBinding, state: AgentState
+    ) -> list[str]:
+        """Take bounded, explicit team handoffs immediately before a model turn."""
+        callback = binding.runtime.get("collaboration_messages")
+        if not callable(callback):
+            return []
+        try:
+            signature = inspect.signature(callback)
+            if signature.bind(dict(state)):
+                raw_messages = callback(dict(state))
+            else:
+                raw_messages = callback()
+        except TypeError:
+            try:
+                raw_messages = callback()
+            except Exception:
+                return []
+        except Exception:
+            return []
+        if isinstance(raw_messages, str):
+            raw_messages = [raw_messages]
+        if not isinstance(raw_messages, Sequence):
+            return []
+        messages: list[str] = []
+        total = 0
+        for raw_message in raw_messages[:8]:
+            message = str(raw_message or "").strip()[:9000]
+            if not message:
+                continue
+            if total + len(message) > 24000:
+                break
+            messages.append(message)
+            total += len(message)
+        return messages
 
     @staticmethod
     def _route_after_model(state: AgentState) -> str:
@@ -1185,6 +1216,130 @@ class LangGraphRunner:
         return self.model.bind_tools(
             list(tools), tool_choice="auto", parallel_tool_calls=False
         )
+
+    def _model_for_hidden_tools(self, hidden_tools: frozenset[str]) -> Any:
+        """Return a cached model binding for one exact hidden-tool policy."""
+        actual_hidden = frozenset(
+            name for name in hidden_tools if name in self.tools_by_name
+        )
+        with self._model_bindings_lock:
+            cached = self._model_bindings.get(actual_hidden)
+            if cached is not None:
+                return cached
+            visible_tools = [
+                tool for tool in self.tools if tool.name not in actual_hidden
+            ]
+            model = self._bind_tools(visible_tools)
+            self._model_bindings[actual_hidden] = model
+            return model
+
+    @staticmethod
+    def _hidden_tools_for_runtime(runtime: Mapping[str, Any]) -> frozenset[str]:
+        """Resolve all task-mode tool exclusions into one immutable cache key."""
+        hidden: set[str] = set()
+        configured = runtime.get("hidden_tools")
+        if isinstance(configured, str):
+            hidden.add(configured)
+        elif isinstance(configured, Sequence):
+            hidden.update(str(name) for name in configured if str(name).strip())
+        if not runtime.get("plan_enabled", True):
+            hidden.update({"todo_write", "update_plan"})
+        if runtime.get("voice_mode", False):
+            hidden.update(QUESTION_TOOL_NAMES)
+        if not runtime.get("multi_agent_enabled", False):
+            hidden.update(MULTI_AGENT_TOOL_NAMES)
+        return frozenset(hidden)
+
+    @classmethod
+    def _disabled_tool_reason(
+        cls, name: str, runtime: Mapping[str, Any]
+    ) -> str:
+        """Reject stale checkpoint calls using the same policy as bind_tools."""
+        if (
+            name in {"todo_write", "update_plan"}
+            and not runtime.get("plan_enabled", True)
+        ):
+            return f"Error: {name} is disabled because Plan Mode is off"
+        if name in QUESTION_TOOL_NAMES and runtime.get("voice_mode", False):
+            return f"Error: {name} is disabled in voice conversation mode"
+        if (
+            name in MULTI_AGENT_TOOL_NAMES
+            and not runtime.get("multi_agent_enabled", False)
+        ):
+            return (
+                f"Error: {name} is disabled because Multi-Agent Mode is off"
+            )
+        if name in cls._hidden_tools_for_runtime(runtime):
+            return f"Error: {name} is disabled for this task"
+        return ""
+
+    def _finish_guard_message(
+        self,
+        binding: _RuntimeBinding,
+        state: AgentState,
+        final_content: str,
+    ) -> Optional[str]:
+        """Return a continuation instruction when a runtime blocks completion.
+
+        ``finish_guard`` may return a boolean, a blocking message, or a mapping
+        containing ``allow``/``can_finish`` and ``message``. A team snapshot is
+        also accepted directly: a positive ``active_count`` blocks completion.
+        Guard failures are emitted as diagnostics and fail open so a faulty UI
+        callback cannot trap the graph in an infinite loop.
+        """
+        guard = binding.runtime.get("finish_guard")
+        if not callable(guard):
+            return None
+        try:
+            signature = inspect.signature(guard)
+            candidates = (
+                (dict(state), final_content),
+                (dict(state),),
+                (),
+            )
+            decision: Any = None
+            matched = False
+            for candidate in candidates:
+                try:
+                    signature.bind(*candidate)
+                except TypeError:
+                    continue
+                decision = guard(*candidate)
+                matched = True
+                break
+            if not matched:
+                raise TypeError(
+                    "finish_guard must accept (), (state), or (state, final_content)"
+                )
+        except Exception as exc:
+            self._emit(binding, "finish_guard_error", error=str(exc))
+            return None
+
+        default_message = (
+            "One or more child agents are still running. Use `wait_agents` or "
+            "`list_agents`, incorporate their results, and only then provide "
+            "the final answer."
+        )
+        if decision is None or decision is True:
+            return None
+        if decision is False:
+            return default_message
+        if isinstance(decision, str):
+            return decision.strip() or None
+        if isinstance(decision, Mapping):
+            message = str(decision.get("message", "") or "").strip()
+            if "allow" in decision:
+                allowed = bool(decision.get("allow"))
+            elif "can_finish" in decision:
+                allowed = bool(decision.get("can_finish"))
+            elif "active_count" in decision:
+                allowed = int(decision.get("active_count", 0) or 0) <= 0
+            elif "all_terminal" in decision:
+                allowed = bool(decision.get("all_terminal"))
+            else:
+                allowed = True
+            return None if allowed else message or default_message
+        return None if bool(decision) else default_message
 
     def _emit_message_chunk(
         self,

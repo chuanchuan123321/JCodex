@@ -6,8 +6,6 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="jcodex",
     version="1.0.0",
-    author="chuanchuan123321",
-    author_email="2774421277@qq.com",
     description="JCodex - coding and system automation agent with local tools, web search, and long-term memory",
     long_description=long_description,
     long_description_content_type="text/markdown",
