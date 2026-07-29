@@ -23,20 +23,41 @@ This repository is more than a chat wrapper. Its core is a durable LangGraph mod
 
 ## Product Preview
 
-<table>
-  <tr>
-    <td width="50%" align="center"><img src="docs/assets/desktop-home.png" alt="JCodex desktop home"><br><sub>Desktop workbench</sub></td>
-    <td width="50%" align="center"><img src="docs/assets/terminal-mode.png" alt="JCodex terminal mode"><br><sub>Terminal mode</sub></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="docs/assets/project-task-mode.png" alt="JCodex project task mode"><br><sub>Project task mode</sub></td>
-    <td width="50%" align="center"><img src="docs/assets/split-task.png" alt="JCodex split-task workspace"><br><sub>Split-task workspace</sub></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="docs/assets/multi-agent-collaboration.png" alt="JCodex multi-agent collaboration"><br><sub>Multi-agent collaboration</sub></td>
-    <td width="50%" align="center"><img src="docs/assets/voice-and-change-review-dark.png" alt="JCodex voice input and change review"><br><sub>Voice input and change review</sub></td>
-  </tr>
-</table>
+### Desktop workbench
+
+![JCodex desktop home](docs/assets/desktop-home.png)
+
+The home workspace keeps tasks, projects, runtime status, access controls, voice input, and model selection in one operational view. Long-running work can be resumed from the sidebar without reconstructing its context.
+
+### Project task mode
+
+![JCodex project task mode](docs/assets/project-task-mode.png)
+
+Bind an existing local directory to a persistent task and attach project-level instructions. JCodex works against the original directory while keeping task history, checkpoints, and project metadata separate.
+
+### Terminal mode
+
+![JCodex terminal mode](docs/assets/terminal-mode.png)
+
+The lightweight shell interface streams reasoning status, tool calls, memory retrieval, and results. It is suited to direct local automation and remote SSH sessions.
+
+### Split-task workspace
+
+![JCodex split-task workspace](docs/assets/split-task.png)
+
+Open a persistent child task beside the primary task. Both panes keep independent conversation and continuation state, while the split width and visibility survive application restarts.
+
+### Multi-agent collaboration
+
+![JCodex multi-agent collaboration](docs/assets/multi-agent-collaboration.png)
+
+The primary agent can coordinate isolated workers, inspect public tool activity, exchange directed messages, and collect shared artifacts. Write-enabled workers are restricted to explicitly assigned, non-overlapping paths.
+
+### Voice input and change review
+
+![JCodex voice input and change review](docs/assets/voice-and-change-review-dark.png)
+
+Voice input can be used alongside the dark desktop theme, while the integrated review panel presents tracked file changes before delivery. The same task can move between conversation, execution, and review without leaving the workspace.
 
 ## Why JCodex
 
@@ -65,47 +86,111 @@ This repository is more than a chat wrapper. Its core is a durable LangGraph mod
 
 ## Architecture
 
-### System overview
+The diagrams below separate the major concerns so each one remains readable on GitHub and on narrow screens.
+
+### System architecture
 
 ```mermaid
 flowchart TB
-    UI["Runtime surfaces<br/>Terminal · Desktop · Feishu"] --> Core["JCodex runtime<br/>Prompt · Model · LangGraph"]
-    Core --> Control["Task control<br/>Approval · Plans · Compaction"]
-    Control --> Tools["Tool layer<br/>Code · Shell · Web · Documents · Agents"]
-    Core <--> State["Local state<br/>Tasks · Checkpoints · Memory · Knowledge"]
-    Core <--> APIs["External services<br/>Model API · Tavily"]
-    Tools <--> State
+    CLI["Terminal"] --> Session["Session and task orchestration"]
+    Desktop["Desktop workbench"] --> Session
+    Gateway["Feishu / Lark gateway"] --> Session
+    Session --> Graph["LangGraph runner"]
+    Graph <--> Model["Model adapter"]
+    Model <--> Provider["AI provider"]
+    Graph --> Control["Approval · limits · cancellation"]
+    Control --> Executor["Structured tool executor"]
+    Executor --> Host["Files · shell · web · documents · preview"]
+    Graph <--> State["Conversations · checkpoints · projects"]
+    Executor <--> State
 ```
 
-All three interfaces share the same execution core. The core builds context, calls the model, applies task controls, dispatches structured tools, and persists enough local state to resume interrupted work.
+All interfaces share the same session orchestration, model adapter, durable graph, tool executor, and persistence layer. Interface-specific features change routing and visible tools without duplicating the execution core.
 
-### Task lifecycle
+### Task execution architecture
 
 ```mermaid
 flowchart TD
-    Input["Goal, attachment, or reply"] --> Context["Build task context"]
-    Context --> Model["Model step"]
-    Model --> Next{"Next action"}
-    Next -->|Use a tool| Execute["Approve when needed<br/>then execute"]
-    Execute --> Save["Save events and state"]
-    Save --> Model
-    Next -->|Need user input| Pause["Pause at checkpoint"]
-    Pause --> Model
-    Next -->|Complete| Result["Return final result"]
+    Request["Goal, attachment, or reply"] --> Context["Build prompt context"]
+    Context --> Graph["Start or resume graph"]
+    Graph --> Model["Stream model response"]
+    Model --> Decision{"Next action"}
+    Decision -->|Tool call| Guard["Validate scope, limits, and approval"]
+    Guard -->|Allowed| Tool["Execute tool"]
+    Tool --> Persist["Save result and events"]
+    Persist --> Graph
+    Guard -->|Approval required| Interrupt["Save checkpoint and pause"]
+    Decision -->|User answer required| Interrupt
+    Interrupt --> Resume["Resume with user decision"]
+    Resume --> Graph
+    Decision -->|Complete| Final["Return final result"]
 ```
 
-Tool results loop back into the model until the task completes. Approval and question interrupts save a checkpoint, so the same task can resume after the user responds.
+Model and tool rounds repeat in order. Approval and question interrupts persist the active state before pausing, so execution resumes from the same graph thread instead of starting over.
 
-### Modes and local data
+### Memory architecture
 
-| Area | Responsibility |
-| --- | --- |
-| Approval / full access | Confirm sensitive operations or auto-approve them for the current runtime |
-| Plan / voice / multi-agent | Change the visible tools and interaction policy without starting a separate runtime |
-| Conversations | Reconstruct task messages, attachments, review state, and split-task state |
-| Checkpoints and short-term memory | Resume graph execution and retain compacted task context |
-| Long-term memory and knowledge | Retrieve reusable facts, preferences, and structured project knowledge |
-| Skills and output | Load file-based capability packages and store generated artifacts |
+```mermaid
+flowchart TB
+    Task["Current task<br/>messages · attachments · tool results"] --> Context["Context builder"]
+    Project["Project context<br/>instructions · discovered files"] --> Context
+    Short["Short-term memory<br/>history · summaries · archives"] --> Context
+    Knowledge["Knowledge and preferences"] --> Retrieve["Memory retrieval"]
+    Long["Long-term memory<br/>Markdown · FTS5 · vectors"] --> Retrieve
+    Retrieve --> Context
+    Context --> Model["Model and tool loop"]
+    Model --> Events["New events and memory candidates"]
+    Events --> Short
+    Events --> Long
+    Context <--> Checkpoint["LangGraph checkpoint"]
+    Context --> Compact["Threshold-based compaction"]
+    Compact --> Short
+```
+
+Short-term state exists to continue one task; long-term memory retrieves reusable information across runs. Project instructions, structured knowledge, preferences, and hybrid memory search enter the prompt through distinct paths rather than being merged into one opaque store.
+
+### Multi-agent architecture
+
+```mermaid
+flowchart TB
+    Coordinator["Primary coordinator"] --> Plan["Decompose work and define dependencies"]
+    Plan --> Team["Create up to four isolated workers"]
+    Team --> Reader["Read-only researcher or reviewer"]
+    Team --> Writer["Scoped-write implementer"]
+    Writer --> Scope["Non-overlapping write roots<br/>no shell access"]
+    Reader --> Activity["Public activity and results"]
+    Scope --> Activity
+    Coordinator <--> Inbox["Directed agent messages"]
+    Reader <--> Inbox
+    Writer <--> Inbox
+    Activity --> Board["Shared artifacts and collaboration board"]
+    Board --> Coordinator
+    Coordinator --> Verify["Integrate, verify, and deliver"]
+```
+
+Workers receive only their assigned task, role, workspace, dependencies, and necessary context. They cannot recursively create agents; the primary coordinator retains integration, verification, cancellation, and final-delivery responsibility.
+
+### Interaction-mode architecture
+
+```mermaid
+flowchart TB
+    Task["Persistent desktop task"] --> Modes["Select composable modes"]
+    Modes --> Access["Approval or full access"]
+    Modes --> Plan["Plan mode"]
+    Modes --> Voice["Voice mode"]
+    Modes --> Team["Multi-agent mode"]
+    Access --> Policy["Per-run policy"]
+    Plan --> Policy
+    Voice --> Policy
+    Team --> Policy
+    Policy --> Prompt["Prompt instructions"]
+    Policy --> Tools["Visible tool schemas"]
+    Policy --> UI["Approval and progress UI"]
+    Task --> Split["Optional split child task"]
+    Split --> Child["Independent conversation and checkpoints"]
+```
+
+Modes are policies applied to a task, not separate executables. They adjust instructions, tool visibility, approvals, and UI behavior; a split child task is different because it owns an independent continuation state.
 
 ## Runtime Surfaces
 
@@ -351,40 +436,6 @@ MAX_WEB_SEARCHES=8
 ```
 
 `API_BASE_URL` may include `/v1`; JCodex normalizes common Chat Completions suffixes. Zhipu BigModel endpoints use `/v4/chat/completions`; other providers use `/v1/chat/completions`.
-
-### Main environment variables
-
-The values below are the defaults or template values used by this repository.
-
-| Variable | Default | Purpose |
-| --- | ---: | --- |
-| `API_BASE_URL` | provider-specific | OpenAI-compatible API base URL |
-| `API_KEY` | required | Provider bearer token |
-| `API_MODEL` | `gpt-4` fallback | Model identifier sent to the provider |
-| `TEMPERATURE` | `0.7` | Sampling temperature |
-| `MAX_STEPS` | `100` | Maximum model/tool steps per task |
-| `MAX_TOKENS` | `50000` | Maximum generated tokens requested for a normal model response |
-| `CONTEXT_WINDOW` | `256000` in `.env.example` | Context budget used for usage and compaction calculations |
-| `AUTO_COMPACT_THRESHOLD_PERCENT` | `85` | Context utilization that triggers replacement compaction |
-| `COMPACTION_PREFIRE_LEAD_PERCENT` | `10` | Starts speculative summary work this many percentage points before the trigger |
-| `COMPACTION_TWO_PASS` | `true` | Enables staged compaction for large histories |
-| `COMPACTION_MAX_ATTEMPTS` | `3` | Maximum summary validation attempts |
-| `MAX_WEB_SEARCHES` | `8` | Per-task public Web-search limit |
-| `TAVILY_API_KEY` | empty | Enables Tavily Web search |
-| `MINIBOT_DESKTOP_PORT` | `8000` | Preferred loopback desktop port; the next free port is used when occupied |
-| `MINIBOT_DESKTOP_MODE` | `chrome` | `chrome`, `browser`, `server`, or `none` |
-| `MEMORY_EMBEDDING_MODEL` | empty | Enables vector memory when configured |
-| `MEMORY_EMBEDDING_BASE_URL` | API base fallback | Separate OpenAI-compatible embedding endpoint |
-| `MEMORY_EMBEDDING_API_KEY` | API key fallback | Separate embedding credential |
-| `MEMORY_EMBEDDING_DIMENSIONS` | `1024` in template | Expected embedding size |
-| `MEMORY_VECTOR_WEIGHT` | `0.7` | Hybrid vector relevance weight |
-| `MEMORY_TEXT_WEIGHT` | `0.3` | Hybrid text relevance weight |
-| `MEMORY_MMR_ENABLED` | `false` | Enables diversity-aware reranking |
-| `FEISHU_ENABLED` | `false` | Enables the Feishu channel |
-| `FEISHU_APP_ID` | empty | Feishu application ID |
-| `FEISHU_APP_SECRET` | empty | Feishu application secret |
-
-The desktop settings dialog edits the core provider/search/runtime values in the project `.env`. Named API profiles are stored under `~/.os-agent/configs/`.
 
 ## Security and Isolation Boundaries
 

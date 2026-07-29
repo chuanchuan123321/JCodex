@@ -23,20 +23,41 @@ JCodex 可以把一个自然语言目标转化为可观察、可暂停、可恢�
 
 ## 产品预览
 
-<table>
-  <tr>
-    <td width="50%" align="center"><img src="docs/assets/desktop-home.png" alt="JCodex 桌面主页"><br><sub>桌面工作台</sub></td>
-    <td width="50%" align="center"><img src="docs/assets/terminal-mode.png" alt="JCodex 终端模式"><br><sub>终端模式</sub></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="docs/assets/project-task-mode.png" alt="JCodex 项目任务模式"><br><sub>项目任务模式</sub></td>
-    <td width="50%" align="center"><img src="docs/assets/split-task.png" alt="JCodex 分屏子任务"><br><sub>分屏子任务</sub></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="docs/assets/multi-agent-collaboration.png" alt="JCodex 多智能体协作"><br><sub>多智能体协作</sub></td>
-    <td width="50%" align="center"><img src="docs/assets/voice-and-change-review-dark.png" alt="JCodex 语音输入与改动审核"><br><sub>语音输入与改动审核</sub></td>
-  </tr>
-</table>
+### 桌面工作台
+
+![JCodex 桌面主页](docs/assets/desktop-home.png)
+
+主页把任务、项目、运行状态、访问控制、语音输入和模型选择集中在一个操作界面中。长时间任务可直接从侧栏恢复，不需要重新构建上下文。
+
+### 项目任务模式
+
+![JCodex 项目任务模式](docs/assets/project-task-mode.png)
+
+把已有本地目录绑定为持久任务，并补充项目级长期说明。JCodex 直接在原目录中工作，同时独立保存任务历史、检查点和项目元数据。
+
+### 终端模式
+
+![JCodex 终端模式](docs/assets/terminal-mode.png)
+
+轻量终端界面会流式展示思考状态、工具调用、记忆检索和执行结果，适合直接进行本地自动化，也适合通过 SSH 远程使用。
+
+### 分屏子任务
+
+![JCodex 分屏子任务](docs/assets/split-task.png)
+
+在主任务旁打开一个持久化子任务。两边拥有独立的对话与续接状态，分屏宽度和显示状态在应用重启后仍会保留。
+
+### 多智能体协作
+
+![JCodex 多智能体协作](docs/assets/multi-agent-collaboration.png)
+
+主智能体可以协调隔离的工作者、查看公开工具活动、发送定向消息并汇集共享工件。允许写入的工作者只能操作明确分配且互不重叠的路径。
+
+### 语音输入与改动审核
+
+![JCodex 语音输入与改动审核](docs/assets/voice-and-change-review-dark.png)
+
+深色桌面主题支持语音输入，集成式审核面板则会在交付前展示被跟踪的文件改动。同一任务可以在对话、执行与审核之间自然切换，无需离开工作台。
 
 ## 为什么选择 JCodex
 
@@ -65,47 +86,111 @@ JCodex 可以把一个自然语言目标转化为可观察、可暂停、可恢�
 
 ## 架构设计
 
-### 系统总览
+下面按主题拆分架构图，使每张图在 GitHub 和窄屏设备上都能保持清晰。
+
+### 系统架构
 
 ```mermaid
 flowchart TB
-    UI["运行界面<br/>终端 · 桌面端 · 飞书"] --> Core["JCodex 运行时<br/>Prompt · 模型 · LangGraph"]
-    Core --> Control["任务控制<br/>审批 · 计划 · 上下文压缩"]
-    Control --> Tools["工具层<br/>代码 · 终端 · 网页 · 文档 · 智能体"]
-    Core <--> State["本地状态<br/>任务 · 检查点 · 记忆 · 知识"]
-    Core <--> APIs["外部服务<br/>模型 API · Tavily"]
-    Tools <--> State
+    CLI["终端"] --> Session["会话与任务编排"]
+    Desktop["桌面工作台"] --> Session
+    Gateway["飞书网关"] --> Session
+    Session --> Graph["LangGraph 运行器"]
+    Graph <--> Model["模型适配器"]
+    Model <--> Provider["AI 服务"]
+    Graph --> Control["审批 · 限制 · 取消"]
+    Control --> Executor["结构化工具执行器"]
+    Executor --> Host["文件 · 终端 · 网页 · 文档 · 预览"]
+    Graph <--> State["对话 · 检查点 · 项目"]
+    Executor <--> State
 ```
 
-三种界面共享同一套执行核心。核心负责构建上下文、调用模型、执行任务控制、分派结构化工具，并保存足够的本地状态以恢复被中断的工作。
+三种界面共享同一套会话编排、模型适配、持久化图、工具执行与数据层。界面专属能力只改变路由和可见工具，不会复制执行核心。
 
-### 任务生命周期
+### 任务执行架构
 
 ```mermaid
 flowchart TD
-    Input["目标、附件或回复"] --> Context["构建任务上下文"]
-    Context --> Model["模型步骤"]
-    Model --> Next{"下一步"}
-    Next -->|调用工具| Execute["必要时审批<br/>然后执行"]
-    Execute --> Save["保存事件与状态"]
-    Save --> Model
-    Next -->|需要用户输入| Pause["在检查点暂停"]
-    Pause --> Model
-    Next -->|任务完成| Result["返回最终结果"]
+    Request["目标、附件或回复"] --> Context["构建 Prompt 上下文"]
+    Context --> Graph["启动或恢复图"]
+    Graph --> Model["流式模型响应"]
+    Model --> Decision{"下一步"}
+    Decision -->|工具调用| Guard["检查范围、限制与审批"]
+    Guard -->|允许执行| Tool["执行工具"]
+    Tool --> Persist["保存结果与事件"]
+    Persist --> Graph
+    Guard -->|需要审批| Interrupt["保存检查点并暂停"]
+    Decision -->|需要用户回答| Interrupt
+    Interrupt --> Resume["携带用户决定恢复"]
+    Resume --> Graph
+    Decision -->|任务完成| Final["返回最终结果"]
 ```
 
-工具结果会持续回到模型，直到任务完成。审批和提问中断会保存检查点，因此用户作出响应后可以继续同一个任务。
+模型与工具按顺序循环。审批和提问中断会先持久化当前状态再暂停，因此恢复时会继续同一个图线程，而不是重新开始。
 
-### 模式与本地数据
+### 记忆架构
 
-| 范畴 | 职责 |
-| --- | --- |
-| 询问 / 完全访问 | 确认敏感操作，或在当前运行中自动批准 |
-| 计划 / 语音 / 多智能体 | 调整可见工具和交互策略，不需要启动独立运行时 |
-| 对话 | 重建任务消息、附件、审核状态和分屏状态 |
-| 检查点与短期记忆 | 恢复图执行并保留压缩后的任务上下文 |
-| 长期记忆与知识 | 检索可复用事实、偏好和结构化项目知识 |
-| Skill 与输出 | 加载文件式能力包并保存生成工件 |
+```mermaid
+flowchart TB
+    Task["当前任务<br/>消息 · 附件 · 工具结果"] --> Context["上下文构建器"]
+    Project["项目上下文<br/>说明 · 已发现文件"] --> Context
+    Short["短期记忆<br/>历史 · 摘要 · 归档"] --> Context
+    Knowledge["知识库与偏好"] --> Retrieve["记忆检索"]
+    Long["长期记忆<br/>Markdown · FTS5 · 向量"] --> Retrieve
+    Retrieve --> Context
+    Context --> Model["模型与工具循环"]
+    Model --> Events["新事件与记忆候选"]
+    Events --> Short
+    Events --> Long
+    Context <--> Checkpoint["LangGraph 检查点"]
+    Context --> Compact["按阈值压缩上下文"]
+    Compact --> Short
+```
+
+短期状态负责续接单个任务，长期记忆负责跨任务检索可复用信息。项目说明、结构化知识、偏好和混合记忆检索通过不同路径进入 Prompt，不会被混成一个不透明的数据仓库。
+
+### 多智能体架构
+
+```mermaid
+flowchart TB
+    Coordinator["主协调智能体"] --> Plan["拆分任务并定义依赖"]
+    Plan --> Team["创建最多四个隔离工作者"]
+    Team --> Reader["只读调研或审核智能体"]
+    Team --> Writer["限定范围的实现智能体"]
+    Writer --> Scope["互不重叠的写入根目录<br/>无终端权限"]
+    Reader --> Activity["公开活动与结果"]
+    Scope --> Activity
+    Coordinator <--> Inbox["智能体定向消息"]
+    Reader <--> Inbox
+    Writer <--> Inbox
+    Activity --> Board["共享工件与协作黑板"]
+    Board --> Coordinator
+    Coordinator --> Verify["集成、验证与交付"]
+```
+
+工作者只接收被分配的任务、角色、工作区、依赖和必要上下文，不能递归创建更多智能体。主协调智能体始终负责集成、验证、取消控制与最终交付。
+
+### 交互模式架构
+
+```mermaid
+flowchart TB
+    Task["持久化桌面任务"] --> Modes["选择可组合模式"]
+    Modes --> Access["询问或完全访问"]
+    Modes --> Plan["计划模式"]
+    Modes --> Voice["语音模式"]
+    Modes --> Team["多智能体模式"]
+    Access --> Policy["单次运行策略"]
+    Plan --> Policy
+    Voice --> Policy
+    Team --> Policy
+    Policy --> Prompt["Prompt 指令"]
+    Policy --> Tools["可见工具 Schema"]
+    Policy --> UI["审批与进度界面"]
+    Task --> Split["可选分屏子任务"]
+    Split --> Child["独立对话与检查点"]
+```
+
+各种模式是应用到任务上的策略，并不是不同的启动程序。它们调整指令、工具可见性、审批和界面行为；分屏子任务则不同，因为它拥有独立的续接状态。
 
 ## 三种运行界面
 
@@ -351,40 +436,6 @@ MAX_WEB_SEARCHES=8
 ```
 
 `API_BASE_URL` 可以包含 `/v1`，JCodex 会归一化常见 Chat Completions 后缀。智谱 BigModel 地址使用 `/v4/chat/completions`，其他 Provider 使用 `/v1/chat/completions`。
-
-### 主要环境变量
-
-下表为本仓库当前使用的默认值或 `.env.example` 模板值。
-
-| 变量 | 默认值 | 作用 |
-| --- | ---: | --- |
-| `API_BASE_URL` | 取决于服务 | 兼容 OpenAI 的 API Base URL |
-| `API_KEY` | 必填 | Provider Bearer Token |
-| `API_MODEL` | 回退为 `gpt-4` | 发送给 Provider 的模型标识 |
-| `TEMPERATURE` | `0.7` | 采样温度 |
-| `MAX_STEPS` | `100` | 单个任务最大模型/工具步骤数 |
-| `MAX_TOKENS` | `50000` | 普通模型响应请求的最大生成 Token |
-| `CONTEXT_WINDOW` | `.env.example` 为 `256000` | Token 用量和压缩计算使用的上下文预算 |
-| `AUTO_COMPACT_THRESHOLD_PERCENT` | `85` | 触发替换式压缩的上下文占用率 |
-| `COMPACTION_PREFIRE_LEAD_PERCENT` | `10` | 提前多少个百分点开始推测性摘要 |
-| `COMPACTION_TWO_PASS` | `true` | 对大型历史启用分阶段压缩 |
-| `COMPACTION_MAX_ATTEMPTS` | `3` | 摘要校验最大尝试次数 |
-| `MAX_WEB_SEARCHES` | `8` | 单个任务公共网页搜索次数上限 |
-| `TAVILY_API_KEY` | 空 | 配置后启用 Tavily 网页搜索 |
-| `MINIBOT_DESKTOP_PORT` | `8000` | 桌面端首选回环端口；被占用时自动寻找下一个 |
-| `MINIBOT_DESKTOP_MODE` | `chrome` | 可选 `chrome`、`browser`、`server`、`none` |
-| `MEMORY_EMBEDDING_MODEL` | 空 | 配置后启用向量记忆 |
-| `MEMORY_EMBEDDING_BASE_URL` | 回退到主 API 地址 | 独立的兼容 OpenAI Embedding 地址 |
-| `MEMORY_EMBEDDING_API_KEY` | 回退到主 API Key | 独立 Embedding 凭据 |
-| `MEMORY_EMBEDDING_DIMENSIONS` | 模板为 `1024` | 期望向量维度 |
-| `MEMORY_VECTOR_WEIGHT` | `0.7` | 混合检索中的向量权重 |
-| `MEMORY_TEXT_WEIGHT` | `0.3` | 混合检索中的文本权重 |
-| `MEMORY_MMR_ENABLED` | `false` | 是否启用多样性重排 |
-| `FEISHU_ENABLED` | `false` | 是否启用飞书通道 |
-| `FEISHU_APP_ID` | 空 | 飞书应用 ID |
-| `FEISHU_APP_SECRET` | 空 | 飞书应用 Secret |
-
-桌面设置弹窗会修改项目 `.env` 中的主要 Provider、搜索与运行参数。命名 API 配置保存在 `~/.os-agent/configs/`。
 
 ## 安全与隔离边界
 
