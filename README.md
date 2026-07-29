@@ -192,6 +192,10 @@ The systems deliberately have different responsibilities:
 
 ### Terminal
 
+![JCodex terminal mode](docs/assets/terminal-mode.png)
+
+*The lightweight terminal interface exposes streamed reasoning, tool execution, memory lookup, and task interruption directly in the shell.*
+
 ```bash
 python chat.py
 ```
@@ -208,6 +212,14 @@ The terminal is the lightest interface and is useful for direct local automation
 Installing the project with `pip install -e .` also provides `os-agent`, which starts the terminal interface.
 
 ### Desktop workbench
+
+![JCodex desktop home screen](docs/assets/desktop-home.png)
+
+*The desktop home screen: task and project navigation, quick actions, runtime status, access mode, voice input, and model selection.*
+
+![Project task mode](docs/assets/project-task-mode.png)
+
+*Bind an existing local directory as a project, add durable project instructions, and immediately open a project-scoped task without copying the project's source files.*
 
 ```bash
 python chat.py desktop
@@ -279,13 +291,25 @@ Plan mode exposes `todo_write` and `update_plan`, injects a planning policy into
 
 ### Voice mode
 
+![Voice input and change review in dark mode](docs/assets/voice-and-change-review-dark.png)
+
+*Voice input and the integrated change-review panel are both available in the dark theme.*
+
 Voice mode provides push-to-talk input in the desktop overlay using browser speech-recognition support. Recognized text is shown before submission. Since a voice interaction should not block on click-heavy structured questions, question tools are removed from that run's visible tool inventory.
 
 ### Split-task mode
 
+![Split-task workspace](docs/assets/split-task.png)
+
+*A primary task and its persistent child task run side by side with independent continuation state and composer controls.*
+
 A primary desktop task can create one persistent internal child conversation in a resizable side pane. The child receives forked continuation memory at creation, then evolves independently. Deleting the split task also removes its private conversation state and related checkpoints.
 
 ### Multi-agent collaboration
+
+![Multi-agent collaboration workspace](docs/assets/multi-agent-collaboration.png)
+
+*The primary task shows assigned child agents while the side panel exposes a selected child's public tool activity and output.*
 
 Multi-agent mode gives the primary model coordinator tools for creating and supervising up to four child agents.
 

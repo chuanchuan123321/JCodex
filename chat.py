@@ -287,7 +287,7 @@ class NaturalTaskExecutor:
         # Initialize tool executor with skills loader
         self.tool_executor = ExtendedToolExecutor(
             skills_loader=self.skills_loader,
-            protected_root=project_root,
+            protected_root=PROJECT_ROOT,
         )
         self.available_tools = self.tool_executor.get_available_tools(
             include_gateway_tools=bus is not None
@@ -296,7 +296,7 @@ class NaturalTaskExecutor:
         # Task analytics remain separate from Grok-style long-term memory.
         from agent.core.data_integrator import DataIntegrator
         self.data_integrator = DataIntegrator()
-        self.memory_store = MemoryStore(workspace_path / "memory", project_root)
+        self.memory_store = MemoryStore(workspace_path / "memory", PROJECT_ROOT)
         self.tool_executor.memory_store = self.memory_store
         self._memory_context_by_session: dict[str, str] = {}
 
@@ -2739,21 +2739,24 @@ def _print_terminal_header() -> None:
     width = shutil.get_terminal_size(fallback=(100, 24)).columns
     if width >= 92:
         ascii_art = """
-    ██████╗ ███████╗       █████╗  ██████╗  ███████╗███╗   ██╗████████╗
-    ██╔═══██╗██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝
-    ██║   ██║███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║
-    ██║   ██║╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║
-    ╚██████╔╝███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║
-    ╚═════╝ ╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
+     ██╗ ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗
+     ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝
+     ██║██║     ██║   ██║██║  ██║█████╗   ╚███╔╝
+██   ██║██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗
+╚█████╔╝╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
+ ╚════╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
 """
         print(Colors.CYAN + ascii_art.rstrip() + Colors.RESET)
     else:
         print(f"\n{Colors.CYAN}{Colors.BOLD}JCodex{Colors.RESET}")
 
-    print(f"{Colors.BOLD}系统自动化与知识记忆工作台{Colors.RESET}")
+    print(f"{Colors.BOLD}本地优先的 AI 编程、调研与系统自动化工作台{Colors.RESET}")
     print(
-        f"{Colors.DIM}/clear 清空会话  /compact 压缩记忆  "
-        f"Ctrl+C 中断任务  exit 退出{Colors.RESET}\n"
+        f"{Colors.DIM}持久任务 · 项目记忆 · 工具执行 · 多智能体协作{Colors.RESET}"
+    )
+    print(
+        f"{Colors.DIM}/clear 清空当前会话  /compact 整理上下文  "
+        f"Ctrl+C 中断当前任务  exit 退出{Colors.RESET}\n"
     )
 
 
