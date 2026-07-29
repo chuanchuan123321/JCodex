@@ -21,6 +21,23 @@ This repository is more than a chat wrapper. Its core is a durable LangGraph mod
 > [!WARNING]
 > JCodex can execute commands and change files on the host machine. Approval mode is a human-control layer, not an operating-system sandbox. Use trusted workspaces, review requested actions, and protect your `.env` file.
 
+## Product Preview
+
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="docs/assets/desktop-home.png" alt="JCodex desktop home"><br><sub>Desktop workbench</sub></td>
+    <td width="50%" align="center"><img src="docs/assets/terminal-mode.png" alt="JCodex terminal mode"><br><sub>Terminal mode</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/assets/project-task-mode.png" alt="JCodex project task mode"><br><sub>Project task mode</sub></td>
+    <td width="50%" align="center"><img src="docs/assets/split-task.png" alt="JCodex split-task workspace"><br><sub>Split-task workspace</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/assets/multi-agent-collaboration.png" alt="JCodex multi-agent collaboration"><br><sub>Multi-agent collaboration</sub></td>
+    <td width="50%" align="center"><img src="docs/assets/voice-and-change-review-dark.png" alt="JCodex voice input and change review"><br><sub>Voice input and change review</sub></td>
+  </tr>
+</table>
+
 ## Why JCodex
 
 - **One execution core, three runtime surfaces**: terminal, desktop, and Feishu/Lark gateway runs share the same model adapter, tool executor, LangGraph state machine, compaction policy, and memory pipeline.
@@ -52,149 +69,47 @@ This repository is more than a chat wrapper. Its core is a durable LangGraph mod
 
 ```mermaid
 flowchart TB
-    subgraph Surfaces["Runtime surfaces"]
-        CLI["Interactive terminal"]
-        Desktop["Desktop workbench<br/>Eel + HTML/CSS/JavaScript"]
-        Feishu["Feishu/Lark gateway<br/>WebSocket long connection"]
-    end
-
-    subgraph Runtime["Shared agent runtime"]
-        Prompt["Prompt builder<br/>environment + skills + memory"]
-        Model["AIEngineChatModel<br/>OpenAI-compatible transport"]
-        Graph["LangGraphRunner<br/>durable model/tool state machine"]
-        Guard["Approval, question, loop and cancellation guards"]
-        Tools["ExtendedToolExecutor<br/>mode-aware structured tools"]
-        Compact["ContextCompactor<br/>prefire + validated replacement"]
-    end
-
-    subgraph Persistence["Local persistence"]
-        Conversations["ConversationStore<br/>messages, attachments, split state"]
-        Checkpoints["SQLite LangGraph checkpoints"]
-        Memory["MemoryManager + MemoryStore<br/>Markdown + SQLite FTS5/vector index"]
-        Domain["Projects, knowledge, preferences and task data"]
-    end
-
-    subgraph External["External and host systems"]
-        Provider["Chat Completions provider"]
-        Host["Filesystem, shell and local processes"]
-        Web["Web pages, Tavily and code references"]
-    end
-
-    CLI --> Prompt
-    Desktop --> Prompt
-    Feishu --> Prompt
-    Prompt --> Graph
-    Graph <--> Model
-    Model <--> Provider
-    Graph --> Guard --> Tools
-    Tools --> Host
-    Tools --> Web
-    Graph <--> Compact
-    Graph <--> Checkpoints
-    Desktop <--> Conversations
-    Prompt <--> Memory
-    Desktop <--> Domain
-    Tools <--> Memory
+    UI["Runtime surfaces<br/>Terminal · Desktop · Feishu"] --> Core["JCodex runtime<br/>Prompt · Model · LangGraph"]
+    Core --> Control["Task control<br/>Approval · Plans · Compaction"]
+    Control --> Tools["Tool layer<br/>Code · Shell · Web · Documents · Agents"]
+    Core <--> State["Local state<br/>Tasks · Checkpoints · Memory · Knowledge"]
+    Core <--> APIs["External services<br/>Model API · Tavily"]
+    Tools <--> State
 ```
 
-### One task run
+All three interfaces share the same execution core. The core builds context, calls the model, applies task controls, dispatches structured tools, and persists enough local state to resume interrupted work.
+
+### Task lifecycle
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant UI as CLI / Desktop / Feishu
-    participant R as LangGraphRunner
-    participant M as Model adapter
-    participant G as Guard and interrupt layer
-    participant T as Tool executor
-    participant C as Context compactor
-    participant P as Local persistence
-
-    U->>UI: Submit a goal, attachment, or response
-    UI->>P: Persist task input and runtime metadata
-    UI->>R: Start or resume a graph thread
-    loop Model and tool rounds
-        R->>M: System prompt + messages + visible tools
-        M-->>R: Streamed content and structured tool calls
-        R->>G: Validate ordering, limits, cancellation, and approval
-        alt Approval or answer required
-            G->>P: Save durable interrupt checkpoint
-            G-->>UI: Request approval or structured answer
-            UI-->>R: Resume with the user's decision
-        else Tool is allowed
-            G->>T: Execute normalized tool call
-            T-->>R: Ordered result or error string
-            R->>P: Save events, history, and task data
-        end
-        opt Context reaches the configured threshold
-            R->>C: Snapshot the exact active prompt state
-            C-->>R: Validated continuation summary
-            R->>P: Archive old context and store replacement state
-        end
-    end
-    R-->>UI: Final, waiting, cancelled, or failed result
+flowchart TD
+    Input["Goal, attachment, or reply"] --> Context["Build task context"]
+    Context --> Model["Model step"]
+    Model --> Next{"Next action"}
+    Next -->|Use a tool| Execute["Approve when needed<br/>then execute"]
+    Execute --> Save["Save events and state"]
+    Save --> Model
+    Next -->|Need user input| Pause["Pause at checkpoint"]
+    Pause --> Model
+    Next -->|Complete| Result["Return final result"]
 ```
 
-The runner processes model-selected tools in order, even when a provider returns several calls in one response. Checkpoints are keyed by task/thread, while each user submission has a separate run identifier. The UI receives normalized public events rather than direct access to graph internals.
+Tool results loop back into the model until the task completes. Approval and question interrupts save a checkpoint, so the same task can resume after the user responds.
 
-### Desktop tasks and modes
+### Modes and local data
 
-```mermaid
-flowchart LR
-    Task["Persistent desktop task"] --> Project["Optional bound project<br/>root + instructions"]
-    Task --> Conversation["Messages, attachments,<br/>short-term memory and review state"]
-    Task --> Split["Optional split child task<br/>forked continuation state"]
-    Task --> Modes["Composable interaction modes"]
-
-    Modes --> Approval["Approval mode<br/>confirm sensitive tools"]
-    Modes --> Access["Full-access toggle<br/>auto-approve for this runtime"]
-    Modes --> Plan["Plan mode<br/>visible todo/progress contract"]
-    Modes --> Voice["Voice mode<br/>push-to-talk browser speech input"]
-    Modes --> Team["Multi-agent mode<br/>coordinator + isolated workers"]
-
-    Team --> A1["Read-only worker"]
-    Team --> A2["Scoped-write worker"]
-    Team --> Board["Messages, artifacts<br/>and public activity"]
-```
-
-Modes are not separate executables. They change the prompt policy, visible tool schemas, approval behavior, or UI interaction for a desktop task. Plan tools are hidden outside plan mode; question tools are hidden in voice mode; collaboration tools are hidden unless multi-agent mode is enabled.
-
-### Local data model
-
-```mermaid
-flowchart TB
-    Workspace["workspace/"] --> Conversations["conversations/<task-id>/"]
-    Workspace --> MemoryRoot["memory/<workspace-scope>/"]
-    Workspace --> Projects["projects/index.json"]
-    Workspace --> Knowledge["knowledge/*.json"]
-    Workspace --> Preferences["preferences/*.json + snapshots/"]
-    Workspace --> Data["data/*.json + langgraph_checkpoints.sqlite3"]
-    Workspace --> Skills["skills/<skill>/SKILL.md"]
-    Workspace --> Output["output/ and temp/"]
-
-    Conversations --> Events["conversation.json and UI events"]
-    Conversations --> Attachments["private task attachments"]
-    Conversations --> ShortTerm["execution history, context and compaction archives"]
-    MemoryRoot --> Markdown["durable Markdown memories"]
-    MemoryRoot --> Search["SQLite FTS5 and optional vectors"]
-```
-
-The systems deliberately have different responsibilities:
-
-- **Conversation storage** reconstructs desktop UI state and task history.
-- **Short-term memory** continues one task and stores compaction artifacts.
-- **Long-term memory** retrieves reusable global, workspace, and session knowledge.
-- **Knowledge base** stores typed, versioned entries and conflict metadata.
-- **Preferences** store versioned user operating and output choices with snapshots.
-- **Data integration** normalizes tool results, user events, configuration, and task records for inspection.
+| Area | Responsibility |
+| --- | --- |
+| Approval / full access | Confirm sensitive operations or auto-approve them for the current runtime |
+| Plan / voice / multi-agent | Change the visible tools and interaction policy without starting a separate runtime |
+| Conversations | Reconstruct task messages, attachments, review state, and split-task state |
+| Checkpoints and short-term memory | Resume graph execution and retain compacted task context |
+| Long-term memory and knowledge | Retrieve reusable facts, preferences, and structured project knowledge |
+| Skills and output | Load file-based capability packages and store generated artifacts |
 
 ## Runtime Surfaces
 
 ### Terminal
-
-![JCodex terminal mode](docs/assets/terminal-mode.png)
-
-*The lightweight terminal interface exposes streamed reasoning, tool execution, memory lookup, and task interruption directly in the shell.*
 
 ```bash
 python chat.py
@@ -212,14 +127,6 @@ The terminal is the lightest interface and is useful for direct local automation
 Installing the project with `pip install -e .` also provides `os-agent`, which starts the terminal interface.
 
 ### Desktop workbench
-
-![JCodex desktop home screen](docs/assets/desktop-home.png)
-
-*The desktop home screen: task and project navigation, quick actions, runtime status, access mode, voice input, and model selection.*
-
-![Project task mode](docs/assets/project-task-mode.png)
-
-*Bind an existing local directory as a project, add durable project instructions, and immediately open a project-scoped task without copying the project's source files.*
 
 ```bash
 python chat.py desktop
@@ -291,25 +198,13 @@ Plan mode exposes `todo_write` and `update_plan`, injects a planning policy into
 
 ### Voice mode
 
-![Voice input and change review in dark mode](docs/assets/voice-and-change-review-dark.png)
-
-*Voice input and the integrated change-review panel are both available in the dark theme.*
-
 Voice mode provides push-to-talk input in the desktop overlay using browser speech-recognition support. Recognized text is shown before submission. Since a voice interaction should not block on click-heavy structured questions, question tools are removed from that run's visible tool inventory.
 
 ### Split-task mode
 
-![Split-task workspace](docs/assets/split-task.png)
-
-*A primary task and its persistent child task run side by side with independent continuation state and composer controls.*
-
 A primary desktop task can create one persistent internal child conversation in a resizable side pane. The child receives forked continuation memory at creation, then evolves independently. Deleting the split task also removes its private conversation state and related checkpoints.
 
 ### Multi-agent collaboration
-
-![Multi-agent collaboration workspace](docs/assets/multi-agent-collaboration.png)
-
-*The primary task shows assigned child agents while the side panel exposes a selected child's public tool activity and output.*
 
 Multi-agent mode gives the primary model coordinator tools for creating and supervising up to four child agents.
 

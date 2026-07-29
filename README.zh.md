@@ -21,6 +21,23 @@ JCodex 可以把一个自然语言目标转化为可观察、可暂停、可恢�
 > [!WARNING]
 > JCodex 能够在宿主电脑上执行命令和修改文件。询问模式属于人工控制层，并不是操作系统沙箱。请只在可信目录中使用，认真检查敏感操作，并妥善保护 `.env`。
 
+## 产品预览
+
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="docs/assets/desktop-home.png" alt="JCodex 桌面主页"><br><sub>桌面工作台</sub></td>
+    <td width="50%" align="center"><img src="docs/assets/terminal-mode.png" alt="JCodex 终端模式"><br><sub>终端模式</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/assets/project-task-mode.png" alt="JCodex 项目任务模式"><br><sub>项目任务模式</sub></td>
+    <td width="50%" align="center"><img src="docs/assets/split-task.png" alt="JCodex 分屏子任务"><br><sub>分屏子任务</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/assets/multi-agent-collaboration.png" alt="JCodex 多智能体协作"><br><sub>多智能体协作</sub></td>
+    <td width="50%" align="center"><img src="docs/assets/voice-and-change-review-dark.png" alt="JCodex 语音输入与改动审核"><br><sub>语音输入与改动审核</sub></td>
+  </tr>
+</table>
+
 ## 为什么选择 JCodex
 
 - **一套执行核心，三种运行界面**：终端、桌面端和飞书网关共用模型适配器、工具执行器、LangGraph 状态机、压缩策略与记忆管线。
@@ -52,149 +69,47 @@ JCodex 可以把一个自然语言目标转化为可观察、可暂停、可恢�
 
 ```mermaid
 flowchart TB
-    subgraph Surfaces["运行界面"]
-        CLI["交互式终端"]
-        Desktop["桌面工作台<br/>Eel + HTML/CSS/JavaScript"]
-        Feishu["飞书网关<br/>WebSocket 长连接"]
-    end
-
-    subgraph Runtime["共享智能体运行时"]
-        Prompt["Prompt 构建器<br/>环境 + Skill + 记忆"]
-        Model["AIEngineChatModel<br/>兼容 OpenAI 的模型适配"]
-        Graph["LangGraphRunner<br/>持久化模型/工具状态机"]
-        Guard["审批、提问、循环与取消守卫"]
-        Tools["ExtendedToolExecutor<br/>按模式暴露结构化工具"]
-        Compact["ContextCompactor<br/>预热 + 校验后替换"]
-    end
-
-    subgraph Persistence["本地持久化"]
-        Conversations["ConversationStore<br/>消息、附件、分屏状态"]
-        Checkpoints["SQLite LangGraph 检查点"]
-        Memory["MemoryManager + MemoryStore<br/>Markdown + SQLite FTS5/向量索引"]
-        Domain["项目、知识、偏好与任务数据"]
-    end
-
-    subgraph External["外部与宿主系统"]
-        Provider["Chat Completions 服务"]
-        Host["文件系统、终端与本地进程"]
-        Web["网页、Tavily 与编程资料"]
-    end
-
-    CLI --> Prompt
-    Desktop --> Prompt
-    Feishu --> Prompt
-    Prompt --> Graph
-    Graph <--> Model
-    Model <--> Provider
-    Graph --> Guard --> Tools
-    Tools --> Host
-    Tools --> Web
-    Graph <--> Compact
-    Graph <--> Checkpoints
-    Desktop <--> Conversations
-    Prompt <--> Memory
-    Desktop <--> Domain
-    Tools <--> Memory
+    UI["运行界面<br/>终端 · 桌面端 · 飞书"] --> Core["JCodex 运行时<br/>Prompt · 模型 · LangGraph"]
+    Core --> Control["任务控制<br/>审批 · 计划 · 上下文压缩"]
+    Control --> Tools["工具层<br/>代码 · 终端 · 网页 · 文档 · 智能体"]
+    Core <--> State["本地状态<br/>任务 · 检查点 · 记忆 · 知识"]
+    Core <--> APIs["外部服务<br/>模型 API · Tavily"]
+    Tools <--> State
 ```
 
-### 单次任务执行链
+三种界面共享同一套执行核心。核心负责构建上下文、调用模型、执行任务控制、分派结构化工具，并保存足够的本地状态以恢复被中断的工作。
+
+### 任务生命周期
 
 ```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant UI as 终端 / 桌面端 / 飞书
-    participant R as LangGraphRunner
-    participant M as 模型适配器
-    participant G as 守卫与中断层
-    participant T as 工具执行器
-    participant C as 上下文压缩器
-    participant P as 本地持久化
-
-    U->>UI: 提交目标、附件或中断回答
-    UI->>P: 保存任务输入与运行元数据
-    UI->>R: 启动或恢复图线程
-    loop 模型与工具循环
-        R->>M: 系统 Prompt + 消息 + 当前可见工具
-        M-->>R: 流式内容与结构化工具调用
-        R->>G: 检查顺序、限制、取消和审批
-        alt 需要审批或用户回答
-            G->>P: 保存持久中断检查点
-            G-->>UI: 请求审批或结构化回答
-            UI-->>R: 携带用户决定恢复执行
-        else 允许执行工具
-            G->>T: 执行标准化工具调用
-            T-->>R: 返回有序结果或错误字符串
-            R->>P: 保存事件、历史和任务数据
-        end
-        opt 上下文达到配置阈值
-            R->>C: 快照当前真实 Prompt 状态
-            C-->>R: 返回校验后的续接摘要
-            R->>P: 归档旧上下文并保存替换状态
-        end
-    end
-    R-->>UI: 完成、等待、取消或失败结果
+flowchart TD
+    Input["目标、附件或回复"] --> Context["构建任务上下文"]
+    Context --> Model["模型步骤"]
+    Model --> Next{"下一步"}
+    Next -->|调用工具| Execute["必要时审批<br/>然后执行"]
+    Execute --> Save["保存事件与状态"]
+    Save --> Model
+    Next -->|需要用户输入| Pause["在检查点暂停"]
+    Pause --> Model
+    Next -->|任务完成| Result["返回最终结果"]
 ```
 
-即使模型在一次响应中返回多个工具调用，运行器也会按顺序执行。检查点以任务/线程为作用域，每次用户提交则有独立的 Run ID。桌面前端接收标准化公开事件，不直接依赖 LangGraph 内部数据结构。
+工具结果会持续回到模型，直到任务完成。审批和提问中断会保存检查点，因此用户作出响应后可以继续同一个任务。
 
-### 桌面任务与交互模式
+### 模式与本地数据
 
-```mermaid
-flowchart LR
-    Task["持久化桌面任务"] --> Project["可选项目绑定<br/>根目录 + 长期说明"]
-    Task --> Conversation["消息、附件、<br/>短期记忆与审核状态"]
-    Task --> Split["可选分屏子任务<br/>从当前续接状态派生"]
-    Task --> Modes["可组合交互模式"]
-
-    Modes --> Approval["询问模式<br/>敏感工具先确认"]
-    Modes --> Access["完全访问开关<br/>当前运行自动批准"]
-    Modes --> Plan["计划模式<br/>可见 Todo/进度契约"]
-    Modes --> Voice["语音模式<br/>按住说话并识别输入"]
-    Modes --> Team["多智能体模式<br/>协调者 + 隔离工作者"]
-
-    Team --> A1["只读工作者"]
-    Team --> A2["限定路径写入工作者"]
-    Team --> Board["消息、工件<br/>与公开活动"]
-```
-
-这些模式不是不同的启动程序，而是改变当前桌面任务的 Prompt 策略、可见工具、审批行为或 UI 交互。非计划模式会隐藏计划工具；语音模式会隐藏提问工具；只有启用多智能体模式时才会暴露协作工具。
-
-### 本地数据模型
-
-```mermaid
-flowchart TB
-    Workspace["workspace/"] --> Conversations["conversations/<task-id>/"]
-    Workspace --> MemoryRoot["memory/<workspace-scope>/"]
-    Workspace --> Projects["projects/index.json"]
-    Workspace --> Knowledge["knowledge/*.json"]
-    Workspace --> Preferences["preferences/*.json + snapshots/"]
-    Workspace --> Data["data/*.json + langgraph_checkpoints.sqlite3"]
-    Workspace --> Skills["skills/<skill>/SKILL.md"]
-    Workspace --> Output["output/ 与 temp/"]
-
-    Conversations --> Events["conversation.json 与 UI 事件"]
-    Conversations --> Attachments["任务私有附件"]
-    Conversations --> ShortTerm["执行历史、上下文与压缩归档"]
-    MemoryRoot --> Markdown["长期 Markdown 记忆"]
-    MemoryRoot --> Search["SQLite FTS5 与可选向量"]
-```
-
-这些系统的职责并不重叠：
-
-- **对话存储**用于重建桌面 UI 状态和任务历史。
-- **短期记忆**用于续接单个任务，并保存上下文压缩产物。
-- **长期记忆**用于检索可复用的全局、工作区和会话知识。
-- **知识库**保存有类型、有版本、带冲突信息的结构化条目。
-- **偏好系统**保存带历史和快照的用户操作与输出偏好。
-- **数据整合**把工具结果、用户事件、配置和任务记录标准化，供桌面端查看。
+| 范畴 | 职责 |
+| --- | --- |
+| 询问 / 完全访问 | 确认敏感操作，或在当前运行中自动批准 |
+| 计划 / 语音 / 多智能体 | 调整可见工具和交互策略，不需要启动独立运行时 |
+| 对话 | 重建任务消息、附件、审核状态和分屏状态 |
+| 检查点与短期记忆 | 恢复图执行并保留压缩后的任务上下文 |
+| 长期记忆与知识 | 检索可复用事实、偏好和结构化项目知识 |
+| Skill 与输出 | 加载文件式能力包并保存生成工件 |
 
 ## 三种运行界面
 
 ### 终端模式
-
-![JCodex 终端模式](docs/assets/terminal-mode.png)
-
-*轻量终端界面直接展示流式思考、工具执行、记忆检索与任务中断状态。*
 
 ```bash
 python chat.py
@@ -212,14 +127,6 @@ python chat.py
 执行 `pip install -e .` 后还会注册 `os-agent` 命令，它同样启动终端界面。
 
 ### 桌面工作台
-
-![JCodex 桌面主页](docs/assets/desktop-home.png)
-
-*桌面主页包含任务和项目导航、快捷操作、运行状态、访问模式、语音输入与模型选择。*
-
-![项目任务模式](docs/assets/project-task-mode.png)
-
-*绑定已有本地目录为项目，补充长期项目说明后即可直接创建项目作用域任务，不会复制或修改项目源码。*
 
 ```bash
 python chat.py desktop
@@ -291,25 +198,13 @@ FEISHU_VERIFICATION_TOKEN=
 
 ### 语音模式
 
-![深色模式下的语音输入与代码审核](docs/assets/voice-and-change-review-dark.png)
-
-*深色主题同时支持语音输入和集成式代码改动审核面板。*
-
 语音模式使用浏览器的语音识别能力，在桌面浮层中提供按住说话体验，识别文本会在发送前展示。为避免语音任务被依赖点击操作的结构化提问卡阻塞，该次运行不会向模型暴露提问工具。
 
 ### 分屏子任务
 
-![分屏子任务工作区](docs/assets/split-task.png)
-
-*主任务与持久化子任务可并排运行，两边拥有独立的续接状态和输入控制。*
-
 一个主桌面任务可以创建一个持久化内部子对话，并在可调宽度的侧栏中运行。创建时会从主任务派生续接记忆，之后两边独立演进。删除分屏子任务时，也会清理它的私有对话状态和相关检查点。
 
 ### 多智能体协作
-
-![多智能体协作工作区](docs/assets/multi-agent-collaboration.png)
-
-*主任务中展示已分配的子智能体；侧栏显示所选子智能体的公开工具活动和输出。*
 
 启用多智能体模式后，主模型会获得创建和监督最多四个子智能体的协调工具。
 
