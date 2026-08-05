@@ -17,15 +17,23 @@ import locale
 os.environ["PYTHONIOENCODING"] = "utf-8"
 locale.setlocale(locale.LC_ALL, "")
 
+DATA_ROOT = Path(os.getenv("JCODEX_DATA_DIR", "") or PROJECT_ROOT).expanduser().resolve()
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
+
 # 加载环境变量
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
-load_dotenv(PROJECT_ROOT / ".env", override=True)
+load_dotenv(DATA_ROOT / ".env", override=True)
+if not (DATA_ROOT / ".env").exists():
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from agent.core.ai_engine import AIEngine
 from agent.core.context_compactor import ContextCompactor
-from agent.core.extended_tool_executor import ExtendedToolExecutor
+from agent.core.extended_tool_executor import (
+    ExtendedToolExecutor,
+    strip_disabled_vision_prompt,
+)
 from agent.core.langchain_model import AIEngineChatModel
 from agent.core.langgraph_runner import (
     LangGraphRunner,
@@ -35,6 +43,7 @@ from agent.core.langgraph_runner import (
 from agent.core.skills import SkillsLoader
 from agent.core.memory_store import MemoryStore
 from agent.core.memory_manager import MemoryManager
+from agent.core.env_utils import env_float, env_int
 from agent.core.tool_loop_guard import ToolLoopGuard
 from agent.bus.queue import MessageBus
 from agent.bus.events import OutboundMessage
@@ -264,9 +273,9 @@ class Toast:
 
 
 # 从环境变量读取配置
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "50000"))
-MAX_STEPS = int(os.getenv("MAX_STEPS", "100"))
-MAX_WEB_SEARCHES = int(os.getenv("MAX_WEB_SEARCHES", "8"))
+MAX_TOKENS = env_int("MAX_TOKENS", 50000)
+MAX_STEPS = env_int("MAX_STEPS", 100)
+MAX_WEB_SEARCHES = env_int("MAX_WEB_SEARCHES", 8)
 
 
 class NaturalTaskExecutor:
@@ -276,11 +285,11 @@ class NaturalTaskExecutor:
         self.ai_engine = AIEngine()
 
         # Initialize memory manager
-        memory_dir = Path(__file__).parent / "Memory"
+        memory_dir = DATA_ROOT / "Memory"
         self.memory_manager = MemoryManager(str(memory_dir))
 
         # Initialize skills loader
-        workspace_path = Path(__file__).parent / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
         workspace_path.mkdir(exist_ok=True)
         self.skills_loader = SkillsLoader(workspace_path)
 
@@ -288,6 +297,7 @@ class NaturalTaskExecutor:
         self.tool_executor = ExtendedToolExecutor(
             skills_loader=self.skills_loader,
             protected_root=PROJECT_ROOT,
+            data_root=DATA_ROOT,
         )
         self.available_tools = self.tool_executor.get_available_tools(
             include_gateway_tools=bus is not None
@@ -322,8 +332,8 @@ class NaturalTaskExecutor:
         self.web_search_count = 0  # 网络搜索计数
         self.max_web_searches = MAX_WEB_SEARCHES  # 从环境变量读取
         self.max_steps = MAX_STEPS  # 从环境变量读取
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
-        self.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
+        self.max_tokens = env_int("MAX_TOKENS", 50000)
+        self.context_window = env_int("CONTEXT_WINDOW", 128000)
         self.context_compactor = ContextCompactor(
             ContextCompactor.policy_from_runtime(self.context_window, None)
         )
@@ -585,7 +595,7 @@ class NaturalTaskExecutor:
         from agent.tools.time_tool import TimeTool
 
         project_root = Path(__file__).parent
-        workspace_path = project_root / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
         values = {
             "step_count": "1",
             "max_steps": str(self.max_steps),
@@ -648,6 +658,7 @@ class NaturalTaskExecutor:
         else:
             system_prompt = template
             user_message = "{user_request}\n\n{context}"
+        system_prompt = strip_disabled_vision_prompt(system_prompt)
         for key, value in values.items():
             placeholder = "{" + key + "}"
             system_prompt = system_prompt.replace(placeholder, str(value))
@@ -707,7 +718,7 @@ class NaturalTaskExecutor:
             [{"role": "user", "content": prompt}],
             tools=None,
             temperature=0.1,
-            timeout=max(1, int(os.getenv("COMPACTION_TIMEOUT_SECONDS", "300"))),
+            timeout=max(1, env_int("COMPACTION_TIMEOUT_SECONDS", 300)),
             max_retries=1,
         )
         if result.get("finish_reason") in {"error", "length"}:
@@ -720,7 +731,7 @@ class NaturalTaskExecutor:
             messages,
             tools=None,
             temperature=0.1,
-            timeout=max(1, int(os.getenv("MEMORY_FLUSH_TIMEOUT_SECONDS", "180"))),
+            timeout=max(1, env_int("MEMORY_FLUSH_TIMEOUT_SECONDS", 180)),
             max_retries=1,
         )
         if result.get("finish_reason") in {"error", "length"}:
@@ -811,7 +822,7 @@ class NaturalTaskExecutor:
         import hashlib
 
         digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:20]
-        return MemoryManager(str(PROJECT_ROOT / "Memory" / "gateway" / digest))
+        return MemoryManager(str(DATA_ROOT / "Memory" / "gateway" / digest))
 
     def _data_integrator_for_session(self, session_key: Optional[str]):
         """Return analytics storage isolated to one gateway chat."""
@@ -823,7 +834,7 @@ class NaturalTaskExecutor:
 
         digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:20]
         return DataIntegrator(
-            data_dir=PROJECT_ROOT / "workspace" / "data" / "gateway" / digest
+            data_dir=DATA_ROOT / "workspace" / "data" / "gateway" / digest
         )
 
     def _execute_langgraph_tool(
@@ -1450,7 +1461,7 @@ class NaturalTaskExecutor:
 
         # 3. Get project paths
         project_root = Path(__file__).parent
-        workspace_path = project_root / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
         builtin_skills_path = project_root / "agent" / "skills"
         workspace_skills_path = workspace_path / "skills"
         output_path = workspace_path / "output"
@@ -1481,7 +1492,7 @@ class NaturalTaskExecutor:
             user_message_template = ""
 
         # 替换系统提示词中的变量
-        system_prompt = system_prompt_template
+        system_prompt = strip_disabled_vision_prompt(system_prompt_template)
         system_prompt = system_prompt.replace("{step_count}", str(self.step_count))
         system_prompt = system_prompt.replace("{max_steps}", str(self.max_steps))
         system_prompt = system_prompt.replace(
@@ -2519,7 +2530,7 @@ AI 想要执行以下操作：
         """Automatically clean up temporary files after task completion"""
         import shutil
 
-        workspace_path = Path(__file__).parent / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
         temp_path = workspace_path / "temp"
 
         try:

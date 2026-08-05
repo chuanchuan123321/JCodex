@@ -273,6 +273,7 @@ class ConversationStore:
             "split_pane_width": self._clean_split_pane_width(split_pane_width),
             "created_at": now,
             "updated_at": now,
+            "last_user_message_at": "",
             "messages": [],
             "unread_completion": False,
             "last_completed_message_id": 0,
@@ -462,6 +463,7 @@ class ConversationStore:
             ),
             "created_at": conversation.get("created_at", ""),
             "updated_at": conversation.get("updated_at", ""),
+            "last_user_message_at": conversation.get("last_user_message_at", ""),
             "message_count": len(conversation.get("messages", [])),
             "unread_completion": conversation["unread_completion"],
             "last_completed_message_id": conversation[
@@ -482,6 +484,22 @@ class ConversationStore:
             self._write_json(self._conversation_file(conversation_id), conversation)
         return conversation
 
+    @staticmethod
+    def _index_sort_time(item: Dict[str, Any]) -> str:
+        """Return the recency key for sidebar ordering.
+
+        Only the user's latest message reorders a task; background assistant,
+        tool, plan and team events keep the task in place while still touching
+        ``updated_at`` for date display. Tasks without a user message yet fall
+        back to their creation time so background activity never moves them.
+        """
+        return str(
+            item.get("last_user_message_at")
+            or item.get("created_at", "")
+            or item.get("updated_at", "")
+            or ""
+        )
+
     def _update_index_metadata(self, conversation: Dict[str, Any]) -> None:
         index = self._read_index()
         metadata = self._metadata(conversation)
@@ -491,7 +509,7 @@ class ConversationStore:
             if item.get("id") != conversation["id"]
         ]
         items.append(metadata)
-        items.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+        items.sort(key=self._index_sort_time, reverse=True)
         index["conversations"] = items
         if not index.get("active_id"):
             index["active_id"] = conversation["id"]
@@ -501,7 +519,7 @@ class ConversationStore:
         with self._lock:
             index = self._read_index()
             items = list(index.get("conversations", []))
-            items.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+            items.sort(key=self._index_sort_time, reverse=True)
             return {"active_id": index.get("active_id"), "conversations": items}
 
     def create(
@@ -517,9 +535,7 @@ class ConversationStore:
             index = self._read_index()
             index["active_id"] = conversation["id"]
             index.setdefault("conversations", []).append(self._metadata(conversation))
-            index["conversations"].sort(
-                key=lambda item: item.get("updated_at", ""), reverse=True
-            )
+            index["conversations"].sort(key=self._index_sort_time, reverse=True)
             self._write_index(index)
             return conversation
 
@@ -605,9 +621,7 @@ class ConversationStore:
             ]
             index["conversations"].append(self._metadata(source))
             index.setdefault("conversations", []).append(self._metadata(child))
-            index["conversations"].sort(
-                key=lambda item: item.get("updated_at", ""), reverse=True
-            )
+            index["conversations"].sort(key=self._index_sort_time, reverse=True)
             self._write_index(index)
             return child
 
@@ -742,9 +756,7 @@ class ConversationStore:
                     )
                     detached.append(conversation_id)
                 metadata_items.append(self._metadata(conversation))
-            metadata_items.sort(
-                key=lambda entry: entry.get("updated_at", ""), reverse=True
-            )
+            metadata_items.sort(key=self._index_sort_time, reverse=True)
             index["conversations"] = metadata_items
             self._write_index(index)
             return detached
@@ -883,11 +895,10 @@ class ConversationStore:
             event.setdefault("id", str(uuid.uuid4()))
             event.setdefault("timestamp", self._now())
             conversation.setdefault("messages", []).append(event)
-            if (
-                event.get("type") == "user"
-                and conversation.get("title") == "新任务"
-            ):
-                conversation["title"] = self._clean_title(event.get("content", ""))
+            if event.get("type") == "user":
+                conversation["last_user_message_at"] = self._now()
+                if conversation.get("title") == "新任务":
+                    conversation["title"] = self._clean_title(event.get("content", ""))
             conversation["updated_at"] = self._now()
             self._write_json(self._conversation_file(conversation_id), conversation)
             self._update_index_metadata(conversation)

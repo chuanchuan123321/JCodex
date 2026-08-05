@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from io import BytesIO
 from types import SimpleNamespace
+from urllib.parse import urlencode
+from wsgiref.util import setup_testing_defaults
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, HumanMessage
@@ -16,6 +20,12 @@ from agent.core.conversation_store import ConversationStore
 from agent.core.memory_store import MemoryStore
 from agent.core.project_store import ProjectStore
 from agent.ui.desktop import main as desktop
+
+
+def _use_tmp_workspace(monkeypatch, tmp_path) -> None:
+    """Isolate both runtime roots so tests never touch the real repo/data dir."""
+    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(desktop, "DATA_ROOT", tmp_path)
 
 
 class _DataIntegrator:
@@ -326,7 +336,7 @@ def test_desktop_startup_does_not_import_terminal_memory(
         def __init__(self, **_kwargs) -> None:
             pass
 
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(desktop, "conversation_store", store)
     monkeypatch.setattr(desktop, "AIEngine", _AIEngine)
     monkeypatch.setattr(desktop, "SkillsLoader", _SkillsLoader)
@@ -356,7 +366,7 @@ def test_desktop_conversation_memory_store_is_task_scoped(monkeypatch, tmp_path)
     store = ConversationStore(tmp_path / "conversations")
     first = store.active_id()
     second = store.create("second")["id"]
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(desktop, "conversation_store", store)
 
     executor = desktop.DesktopTaskExecutor()
@@ -393,7 +403,7 @@ def test_desktop_memory_cleanup_preserves_tasks_projects_and_cli_scope(
             title=f"Scope {index}",
             user_requests=[f"memory {index}"],
         )
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(desktop, "conversation_store", conversation_store)
     monkeypatch.setattr(desktop, "project_store", project_store)
 
@@ -414,7 +424,7 @@ def test_desktop_project_memory_store_is_shared_between_project_tasks(
     second = store.create("second")["id"]
     project_root = tmp_path / "project"
     project_root.mkdir()
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(desktop, "conversation_store", store)
 
     executor = desktop.DesktopTaskExecutor()
@@ -435,7 +445,7 @@ def test_desktop_split_task_long_term_store_is_isolated_for_ordinary_tasks(
     store = ConversationStore(tmp_path / "conversations")
     parent = store.create("parent")
     child = store.create_split(parent["id"])
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(desktop, "conversation_store", store)
 
     parent_memory = desktop._memory_store_for_conversation(store.load(parent["id"]))
@@ -547,9 +557,71 @@ def test_desktop_security_headers_allow_only_same_origin_split_tasks(
         after_request()
 
         assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
-        assert "frame-ancestors 'self'" in response.headers[
-            "Content-Security-Policy"
-        ]
+        content_security_policy = response.headers["Content-Security-Policy"]
+        assert "frame-ancestors 'self'" in content_security_policy
+        assert "img-src 'self' https: http: data: blob:" in content_security_policy
+        assert "media-src 'self' https: http: blob:" in content_security_policy
+        assert any(route.rule == "/__jcodex_media" for route in app.routes)
+    finally:
+        desktop.eel.BOTTLE_ROUTES = original_routes
+
+
+def test_desktop_media_route_streams_unicode_filename_ranges(
+    monkeypatch, tmp_path
+) -> None:
+    temp_root = tmp_path / "workspace" / "temp"
+    temp_root.mkdir(parents=True)
+    video_path = temp_root / "新 概 念 [BV1Qy3v6JE7G].mp4"
+    video_content = bytes(range(256)) * 8
+    video_path.write_bytes(video_content)
+    _use_tmp_workspace(monkeypatch, tmp_path)
+
+    original_routes = dict(desktop.eel.BOTTLE_ROUTES)
+    try:
+        monkeypatch.setattr(
+            desktop.eel,
+            "BOTTLE_ROUTES",
+            {
+                "/eel.js": (
+                    lambda: "websocket_addr += ('?page=' + page);",
+                    {},
+                ),
+                "/eel": (lambda _ws: None, {}),
+            },
+        )
+        app, token = desktop._create_secured_eel_app(8123)
+        environ = {}
+        setup_testing_defaults(environ)
+        environ.update(
+            {
+                "HTTP_HOST": "127.0.0.1:8123",
+                "HTTP_RANGE": "bytes=0-1023",
+                "PATH_INFO": "/__jcodex_media",
+                "QUERY_STRING": urlencode(
+                    {
+                        "path": str(video_path),
+                        "conversation_id": "unicode-media-test",
+                        "session": token,
+                    }
+                ),
+                "REQUEST_METHOD": "GET",
+                "SERVER_NAME": "127.0.0.1",
+                "SERVER_PORT": "8123",
+                "wsgi.input": BytesIO(),
+            }
+        )
+        captured = {}
+
+        def start_response(status, headers, _exc_info=None):
+            captured["status"] = status
+            captured["headers"] = dict(headers)
+
+        body = b"".join(app(environ, start_response))
+
+        assert captured["status"] == "206 Partial Content"
+        assert captured["headers"]["Content-Type"] == "video/mp4"
+        assert captured["headers"]["Content-Range"] == "bytes 0-1023/2048"
+        assert body == video_content[:1024]
     finally:
         desktop.eel.BOTTLE_ROUTES = original_routes
 
@@ -780,7 +852,7 @@ def test_desktop_emits_one_persisted_modified_files_summary_at_task_end(
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("edited files")
     monkeypatch.setattr(desktop, "conversation_store", store)
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -1062,7 +1134,7 @@ def test_desktop_finalization_barrier_opens_after_task_end_summary_persists(
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("completion barrier")
     monkeypatch.setattr(desktop, "conversation_store", store)
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -1164,7 +1236,7 @@ def test_desktop_stop_persists_completed_file_changes_once(
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("stopped write")
     monkeypatch.setattr(desktop, "conversation_store", store)
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -2022,6 +2094,119 @@ def test_desktop_token_indicator_uses_compaction_snapshot_metric(
     assert response["tokens"] == snapshot["tokens_before"]
     assert response["compress_at"] == snapshot["threshold"]
     assert response["tool_tokens"] > 0
+
+def test_save_settings_refreshes_token_indicator_context_window(
+    monkeypatch, tmp_path
+) -> None:
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+    )
+    executor.tool_executor = SimpleNamespace(
+        get_available_tools=lambda: [_simple_tool("read")]
+    )
+    _register_executor("ctx-save", executor)
+    executor.get_graph_compression_snapshot(
+        {
+            "system_prompt": "system rules " * 100,
+            "messages": [HumanMessage(content="current task " * 200)],
+            "step_count": 3,
+        }
+    )
+    assert executor.get_current_token_usage()["source"] == "graph_snapshot"
+
+    class _FakePolicy:
+        trigger_tokens = 0
+
+    class _FakeCompactor:
+        policy = _FakePolicy()
+
+        def refresh_policy(self, context_window, trigger_percent):
+            self.policy.trigger_tokens = int(int(context_window) * 0.85)
+
+    class _FakeOSAgent:
+        memory_manager = None
+        accumulated_compression = ""
+        ai_engine = None
+        max_steps = 100
+        max_tokens = 50000
+        max_web_searches = 8
+        context_window = 256000
+        show_knowledge_appendix = True
+        context_compactor = _FakeCompactor()
+
+    monkeypatch.setattr(desktop, "_write_env_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(desktop, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(desktop, "os_agent", _FakeOSAgent())
+
+    previous_context_window = os.environ.get("CONTEXT_WINDOW")
+    try:
+        result = desktop.save_settings(
+            {
+                "api_base_url": "https://api.deepseek.com",
+                "api_model": "deepseek-v4-pro",
+                "max_steps": "100",
+                "max_tokens": "50000",
+                "context_window": "512000",
+                "max_web_searches": "8",
+                "auto_compact_threshold_percent": "85",
+            }
+        )
+    finally:
+        if previous_context_window is None:
+            os.environ.pop("CONTEXT_WINDOW", None)
+        else:
+            os.environ["CONTEXT_WINDOW"] = previous_context_window
+
+    assert result == {"success": True}
+    response = desktop.get_token_count("ctx-save")
+    expected_compress_at = (
+        512000 * int(os.getenv("AUTO_COMPACT_THRESHOLD_PERCENT", "85")) // 100
+    )
+    assert response["max_tokens"] == 512000
+    assert response["compress_at"] == expected_compress_at
+    assert response["compress_at"] == 435200
+
+
+def test_preview_context_window_refreshes_token_indicator_live(
+    monkeypatch, tmp_path
+) -> None:
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+    )
+    executor.tool_executor = SimpleNamespace(
+        get_available_tools=lambda: [_simple_tool("read")]
+    )
+    _register_executor("ctx-preview", executor)
+    executor.get_graph_compression_snapshot(
+        {
+            "system_prompt": "system rules " * 100,
+            "messages": [HumanMessage(content="current task " * 200)],
+            "step_count": 3,
+        }
+    )
+    assert executor.get_current_token_usage()["source"] == "graph_snapshot"
+
+    previous_context_window = os.environ.get("CONTEXT_WINDOW")
+    try:
+        result = desktop.preview_context_window(512000)
+    finally:
+        if previous_context_window is None:
+            os.environ.pop("CONTEXT_WINDOW", None)
+        else:
+            os.environ["CONTEXT_WINDOW"] = previous_context_window
+
+    assert result == {"success": True, "context_window": 512000, "compress_at": 435200}
+    assert executor.context_window == 512000
+    assert executor.compress_at == 435200
+    assert executor._latest_context_usage is None
+
+    response = desktop.get_token_count("ctx-preview")
+    assert response["max_tokens"] == 512000
+    assert response["compress_at"] == 435200
 
 
 def test_desktop_compaction_metric_uses_plan_mode_tool_binding(

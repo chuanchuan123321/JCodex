@@ -12,6 +12,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
 
+from agent.core.env_utils import env_int
+
 
 SummarySampler = Callable[[str], str]
 ProgressCallback = Callable[[str, str], None]
@@ -107,34 +109,21 @@ class ContextCompactor:
         max_tokens: int, _legacy_compress_at: Optional[int] = None
     ) -> ContextPolicy:
         """Resolve Grok's percentage-based compaction policy."""
-        context_window = max(
-            1,
-            int(os.getenv("CONTEXT_WINDOW", str(max_tokens or 30_000))),
-        )
-        trigger_percent = int(
-            os.getenv("AUTO_COMPACT_THRESHOLD_PERCENT", str(DEFAULT_TRIGGER_PERCENT))
+        context_window = max(1, env_int("CONTEXT_WINDOW", max_tokens or 30_000))
+        trigger_percent = env_int(
+            "AUTO_COMPACT_THRESHOLD_PERCENT", DEFAULT_TRIGGER_PERCENT
         )
         return ContextPolicy(
             context_window=context_window,
             trigger_percent=max(1, min(100, trigger_percent)),
             prefire_lead_percent=max(
                 0,
-                int(
-                    os.getenv(
-                        "COMPACTION_PREFIRE_LEAD_PERCENT",
-                        str(DEFAULT_PREFIRE_LEAD_PERCENT),
-                    )
-                ),
+                env_int("COMPACTION_PREFIRE_LEAD_PERCENT", DEFAULT_PREFIRE_LEAD_PERCENT),
             ),
-            max_attempts=max(1, int(os.getenv("COMPACTION_MAX_ATTEMPTS", "3"))),
+            max_attempts=max(1, env_int("COMPACTION_MAX_ATTEMPTS", 3)),
             min_summary_chars=max(
                 1,
-                int(
-                    os.getenv(
-                        "COMPACTION_MIN_SUMMARY_CHARS",
-                        str(MIN_SUMMARY_SEED_CHARS),
-                    )
-                ),
+                env_int("COMPACTION_MIN_SUMMARY_CHARS", MIN_SUMMARY_SEED_CHARS),
             ),
             two_pass_enabled=os.getenv("COMPACTION_TWO_PASS", "true").lower()
             in {"1", "true", "yes", "on"},

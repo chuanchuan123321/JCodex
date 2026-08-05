@@ -55,7 +55,12 @@ let voiceSessionToken = 0;
 let voicePendingSendToken = 0;
 let voicePointerId = null;
 let voiceModeHintTimer = 0;
+let voiceEdgeTtsVoice = 'zh-CN-XiaoxiaoNeural';
+let voiceEdgeTtsAudio = null;
+let voiceEdgeTtsAudioUrl = null;
+let voiceEdgeTtsFailed = false;
 let lastFocusedElement = null;
+let imageLightboxLastFocusedElement = null;
 let activeConversationId = null;
 let conversations = [];
 let projects = [];
@@ -114,6 +119,12 @@ const CHAT_BOTTOM_VIEWPORT_RATIO = 0.25;
 const STREAM_RENDER_INTERVAL_MS = 50;
 const STREAM_RENDER_MAX_INTERVAL_MS = 120;
 const VOICE_RECOGNITION_LANGUAGE = 'zh-CN';
+const CONTEXT_WINDOW_OPTIONS = [128000, 256000, 512000, 1000000];
+const CONTEXT_WINDOW_LABELS = ['128K', '256K', '512K', '1M'];
+const EDGE_TTS_VOICES = [
+    {id: 'zh-CN-XiaoxiaoNeural', name: '晓晓（女·普通话）'},
+    {id: 'zh-CN-XiaoyiNeural', name: '晓伊（女·普通话）'},
+];
 const AGENT_TEAM_MAX_MEMBERS = 12;
 const AGENT_TEAM_MAX_SNAPSHOTS = 64;
 const AGENT_ACTIVITY_MAX_ITEMS = 80;
@@ -279,7 +290,7 @@ function markEelConnectionLost() {
     if (!eelConnectionNoticeShown) {
         eelConnectionNoticeShown = true;
         setAppStatus('error', '桌面服务连接已断开');
-        showToast('桌面服务连接已断开；请重新打开当前服务地址。', 'error', 5000);
+        showToast('桌面服务连接已断开；发送消息时将自动重新连接。', 'error', 5000);
     }
 }
 
@@ -296,6 +307,92 @@ function canCallEel() {
     // Before Eel's first socket opens, its generated mock functions queue
     // startup calls. After a real disconnect, do not keep scheduling calls.
     return typeof eel !== 'undefined' && !eelConnectionLost;
+}
+
+const PENDING_SEND_KEY = 'jcodex-pending-send';
+const LAST_AUTO_RELOAD_KEY = 'jcodex-last-auto-reload';
+
+function eelBridgeReady() {
+    // The bridge is usable only when the backend function is registered and
+    // the websocket is actually open. After sleep the socket silently closes,
+    // which makes eel.send_message fail with "is not a function" or a
+    // "WebSocket is already in CLOSING or CLOSED state" error.
+    if (typeof eel === 'undefined') return false;
+    if (typeof eel.send_message !== 'function') return false;
+    const ws = eel._websocket;
+    return Boolean(ws) && ws.readyState === WebSocket.OPEN;
+}
+
+function stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll) {
+    const base = {
+        v: 1,
+        message,
+        conversationId,
+        planMode: Boolean(planMode),
+        voiceMode: Boolean(voiceMode),
+        multiAgentMode: Boolean(multiAgentMode),
+        allowAll: Boolean(allowAll),
+        ts: Date.now(),
+    };
+    try {
+        sessionStorage.setItem(PENDING_SEND_KEY, JSON.stringify({...base, attachments}));
+        return;
+    } catch (_quotaError) {
+        // Attachments too large for sessionStorage: keep the text and retry
+        // without attachments so the user's message is never lost.
+    }
+    try {
+        sessionStorage.setItem(
+            PENDING_SEND_KEY,
+            JSON.stringify({...base, attachments: [], droppedAttachments: true})
+        );
+    } catch (_error) {
+        // sessionStorage unavailable entirely; the send below will surface the
+        // original connection error so the user can retry manually.
+    }
+}
+
+function autoRecoverEelBridge(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll) {
+    const lastReload = Number(sessionStorage.getItem(LAST_AUTO_RELOAD_KEY) || 0);
+    if (Date.now() - lastReload < 8000) {
+        showToast('桌面服务尚未恢复，请稍后重试', 'error', 3000);
+        return;
+    }
+    stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll);
+    sessionStorage.setItem(LAST_AUTO_RELOAD_KEY, String(Date.now()));
+    setAppStatus('info', '桌面服务连接断开，正在自动重新连接…');
+    location.reload();
+}
+
+async function restorePendingSend() {
+    const raw = sessionStorage.getItem(PENDING_SEND_KEY);
+    if (!raw) return;
+    let payload;
+    try {
+        payload = JSON.parse(raw);
+    } catch (_error) {
+        sessionStorage.removeItem(PENDING_SEND_KEY);
+        return;
+    }
+    sessionStorage.removeItem(PENDING_SEND_KEY);
+    sessionStorage.removeItem(LAST_AUTO_RELOAD_KEY);
+    const pendingAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+    if (!String(payload.message || '').trim() && !pendingAttachments.length) return;
+    // Let the freshly restored UI settle before auto-submitting.
+    setTimeout(() => {
+        sendMessageWithText(
+            String(payload.message || '请解析附件'),
+            pendingAttachments,
+            String(payload.conversationId || activeConversationId || ''),
+            payload.planMode,
+            payload.voiceMode,
+            payload.multiAgentMode,
+            payload.allowAll
+        );
+        if (payload.droppedAttachments) {
+            showToast('附件过大未能保留，已自动重发文字消息', 'info', 4000);
+        }
+    }, 400);
 }
 
 function getChatDistanceFromBottom(chatMessages = document.getElementById('chatMessages')) {
@@ -404,6 +501,89 @@ function initializeVoiceSpeechVoices() {
     voiceVoicesListenerBound = true;
 }
 
+function loadVoiceTtsPrefs() {
+    voiceEdgeTtsVoice = localStorage.getItem('jcodex.voiceEdgeVoice') || 'zh-CN-XiaoxiaoNeural';
+    if (!EDGE_TTS_VOICES.some(entry => entry.id === voiceEdgeTtsVoice)) {
+        voiceEdgeTtsVoice = 'zh-CN-XiaoxiaoNeural';
+    }
+    voiceEdgeTtsFailed = false;
+}
+
+function saveVoiceTtsPrefs() {
+    localStorage.setItem('jcodex.voiceEdgeVoice', voiceEdgeTtsVoice);
+    voiceEdgeTtsFailed = false;
+}
+
+function _voiceEdgeTtsAudioUrl(audioBase64) {
+    const binary = atob(String(audioBase64 || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+    }
+    return URL.createObjectURL(new Blob([bytes], {type: 'audio/mpeg'}));
+}
+
+function populateVoiceTtsSettings() {
+    const voiceSelect = document.getElementById('settingVoiceEdgeVoice');
+    if (!voiceSelect) return;
+    voiceSelect.innerHTML = '';
+    for (const entry of EDGE_TTS_VOICES) {
+        const option = document.createElement('option');
+        option.value = entry.id;
+        option.textContent = entry.name;
+        voiceSelect.appendChild(option);
+    }
+    voiceSelect.value = voiceEdgeTtsVoice;
+    voiceSelect.onchange = () => {
+        voiceEdgeTtsVoice = voiceSelect.value;
+        saveVoiceTtsPrefs();
+    };
+}
+
+function contextWindowIndexFor(value) {
+    const target = Number(value);
+    if (!Number.isFinite(target) || target <= 0) return 1;
+    let bestIndex = 1;
+    let bestDistance = Infinity;
+    CONTEXT_WINDOW_OPTIONS.forEach((option, index) => {
+        const distance = Math.abs(option - target);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = index;
+        }
+    });
+    return bestIndex;
+}
+
+function updateContextWindowLabel() {
+    const slider = document.getElementById('settingContextWindow');
+    const label = document.getElementById('settingContextWindowValue');
+    if (!slider || !label) return;
+    const index = Number(slider.value);
+    if (!Number.isInteger(index) || index < 0 || index >= CONTEXT_WINDOW_LABELS.length) return;
+    label.textContent = CONTEXT_WINDOW_LABELS[index];
+}
+
+let contextWindowPreviewTimer = null;
+
+async function previewContextWindow() {
+    const slider = document.getElementById('settingContextWindow');
+    if (!slider) return;
+    const option = CONTEXT_WINDOW_OPTIONS[Number(slider.value)];
+    if (!option) return;
+    clearTimeout(contextWindowPreviewTimer);
+    contextWindowPreviewTimer = window.setTimeout(async () => {
+        try {
+            const result = await eel.preview_context_window(option)();
+            if (result && result.success) {
+                await updateTokenIndicator();
+            }
+        } catch (e) {
+            console.error('Failed to preview context window:', e);
+        }
+    }, 200);
+}
+
 function setVoiceModeStatus(message, state = 'idle') {
     const overlay = document.getElementById('voiceModeOverlay');
     const status = document.getElementById('voiceModeStatus');
@@ -478,139 +658,35 @@ function resetVoiceAmplitude(level = 0.18) {
     voiceAmplitudeTimestamp = 0;
 }
 
-const VOICE_STRANDS_VERTEX_SHADER = `#version 300 es
-in vec2 position;
-void main() {
-    gl_Position = vec4(position, 0.0, 1.0);
-}`;
+const VOICE_BAR_COUNT = 9;
 
-const VOICE_STRANDS_FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-
-uniform float uTime;
-uniform vec2 uResolution;
-uniform float uEnergy;
-
-out vec4 fragColor;
-
-const float PI = 3.14159265;
-
-vec3 palette(float t) {
-    vec3 magenta = vec3(1.0, 0.08, 0.82);
-    vec3 purple = vec3(0.52, 0.16, 1.0);
-    vec3 cyan = vec3(0.02, 0.86, 1.0);
-    vec3 amber = vec3(1.0, 0.63, 0.06);
-    float x = fract(t) * 4.0;
-    if (x < 1.0) return mix(magenta, purple, x);
-    if (x < 2.0) return mix(purple, cyan, x - 1.0);
-    if (x < 3.0) return mix(cyan, amber, x - 2.0);
-    return mix(amber, magenta, x - 3.0);
+function _voiceRoundRectPath(ctx, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + width, y, x + width, y + height, r);
+    ctx.arcTo(x + width, y + height, x, y + height, r);
+    ctx.arcTo(x, y + height, x, y, r);
+    ctx.arcTo(x, y, x + width, y, r);
+    ctx.closePath();
 }
 
-void main() {
-    vec2 uv = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
-
-    float energy = 0.16 + uEnergy * 0.84;
-    float env = pow(max(cos(uv.x * PI * 0.5), 0.0), 2.75);
-    vec3 color = vec3(0.0);
-    float time = uTime * (0.18 + energy * 0.22);
-    float sharedWave = sin(uv.x * 1.34 + time * 0.92) * 0.68
-                     + sin(uv.x * 2.18 - time * 0.48) * 0.32;
-
-    for (int index = 0; index < 4; index++) {
-        float fi = float(index);
-        float strand = 1.5 - fi;
-        float phase = fi * 0.54;
-        float ripple = sin(uv.x * (1.72 + fi * 0.11) - time * (0.52 + fi * 0.08) + phase);
-        float fan = strand * (0.10 + energy * 0.04);
-        float y = (fan
-                 + sharedWave * (0.075 + energy * 0.105)
-                 + ripple * (0.022 + energy * 0.035)) * env;
-        float distanceToStrand = abs(uv.y - y);
-        float thickness = (0.022 + energy * 0.042) * (0.42 + env) * (0.9 + energy * 0.38);
-        float glow = thickness / (distanceToStrand + thickness * 0.52);
-        glow = pow(glow, 1.78);
-        float halo = exp(-distanceToStrand / max(thickness * 4.2, 0.0001)) * 0.14;
-        float hue = fi / 4.0 + uv.x * 0.042 + uTime * 0.009;
-        vec3 strandColor = palette(hue);
-        color += strandColor * (glow + halo) * env;
-    }
-
-    float mergeY = sharedWave * env * (0.052 + energy * 0.050);
-    float mergeDistance = abs(uv.y - mergeY);
-    float mergeGlow = exp(-mergeDistance / (0.047 + energy * 0.028)) * env;
-    color += vec3(1.0, 0.97, 1.0) * mergeGlow * (0.16 + energy * 0.09);
-
-    color *= 0.47 + energy * 0.68;
-    color = 1.0 - exp(-color * (2.45 + energy * 1.85));
-    float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = max(mix(vec3(gray), color, 1.42), 0.0);
-    float luminance = max(max(color.r, color.g), color.b);
-    float alpha = pow(clamp(luminance, 0.0, 1.0), 2.1)
-                * smoothstep(0.035, 0.12, luminance)
-                * smoothstep(0.0, 0.06, env);
-    float verticalFade = 1.0 - smoothstep(0.64, 0.98, abs(uv.y));
-    alpha *= verticalFade;
-    if (alpha <= 0.001) discard;
-    vec3 tint = clamp(color / max(luminance, 0.0001), 0.0, 1.0);
-    fragColor = vec4(tint * alpha, alpha);
-}`;
-
-function compileVoiceShader(gl, type, source) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        const message = gl.getShaderInfoLog(shader) || 'Unable to compile voice shader';
-        gl.deleteShader(shader);
-        throw new Error(message);
-    }
-    return shader;
+function _voiceBarPalette() {
+    const isDark = document.body.classList.contains('theme-dark');
+    return isDark
+        ? {top: 'rgba(238, 238, 234, 0.95)', bottom: 'rgba(115, 115, 110, 0.5)'}
+        : {top: 'rgba(31, 31, 29, 0.9)', bottom: 'rgba(111, 111, 106, 0.48)'};
 }
 
 function createVoiceStrandsRenderer() {
     const canvas = document.getElementById('voiceStrandsCanvas');
-    const gl = canvas?.getContext('webgl2', {
-        alpha: true,
-        antialias: true,
-        premultipliedAlpha: true,
-    });
-    if (!canvas || !gl) return null;
-    const vertexShader = compileVoiceShader(gl, gl.VERTEX_SHADER, VOICE_STRANDS_VERTEX_SHADER);
-    const fragmentShader = compileVoiceShader(gl, gl.FRAGMENT_SHADER, VOICE_STRANDS_FRAGMENT_SHADER);
-    const program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-    gl.deleteShader(vertexShader);
-    gl.deleteShader(fragmentShader);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        const message = gl.getProgramInfoLog(program) || 'Unable to link voice shader';
-        gl.deleteProgram(program);
-        throw new Error(message);
-    }
-    const position = gl.getAttribLocation(program, 'position');
-    const buffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(
-        gl.ARRAY_BUFFER,
-        new Float32Array([-1, -1, 3, -1, -1, 3]),
-        gl.STATIC_DRAW
-    );
-    gl.useProgram(program);
-    gl.enableVertexAttribArray(position);
-    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-    gl.clearColor(0, 0, 0, 0);
-    gl.disable(gl.BLEND);
+    const ctx = canvas?.getContext('2d', {alpha: true});
+    if (!canvas || !ctx) return null;
     return {
         canvas,
-        gl,
-        program,
-        buffer,
-        time: gl.getUniformLocation(program, 'uTime'),
-        resolution: gl.getUniformLocation(program, 'uResolution'),
-        energy: gl.getUniformLocation(program, 'uEnergy'),
+        ctx,
         timeOrigin: null,
+        barHeights: Array(VOICE_BAR_COUNT).fill(0),
     };
 }
 
@@ -623,24 +699,60 @@ function resizeVoiceStrands(renderer) {
         renderer.canvas.width = width;
         renderer.canvas.height = height;
     }
-    renderer.gl.viewport(0, 0, width, height);
     return {width, height};
 }
 
 function drawVoiceStrands(timestamp = performance.now()) {
     if (!voiceStrandsRenderer) return;
     const renderer = voiceStrandsRenderer;
-    const {gl, program} = renderer;
+    const {ctx, barHeights} = renderer;
     const {width, height} = resizeVoiceStrands(renderer);
     const energy = getSmoothedVoiceAmplitude(timestamp);
     renderer.timeOrigin ??= timestamp;
     const animationTime = (timestamp - renderer.timeOrigin) * 0.001;
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(program);
-    gl.uniform1f(renderer.time, animationTime);
-    gl.uniform2f(renderer.resolution, width, height);
-    gl.uniform1f(renderer.energy, energy);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    ctx.clearRect(0, 0, width, height);
+
+    const listening = Boolean(voiceListening || voiceRecognitionRunning);
+    const barWidth = Math.max(4, Math.round(height * 0.05));
+    const gap = Math.max(3, Math.round(barWidth * 0.85));
+    const totalWidth = VOICE_BAR_COUNT * barWidth + (VOICE_BAR_COUNT - 1) * gap;
+    const startX = (width - totalWidth) / 2;
+    const baseY = height * 0.56;
+    const maxHeight = height * 0.46;
+    const minHeight = Math.max(2, height * 0.04);
+    const centerIndex = (VOICE_BAR_COUNT - 1) / 2;
+    const palette = _voiceBarPalette();
+    const gradient = ctx.createLinearGradient(0, baseY - maxHeight, 0, baseY);
+    gradient.addColorStop(0, palette.top);
+    gradient.addColorStop(1, palette.bottom);
+    ctx.fillStyle = gradient;
+
+    for (let index = 0; index < VOICE_BAR_COUNT; index += 1) {
+        const centerBias = 1 - Math.abs(index - centerIndex) / centerIndex;
+        const idleMotion = 0.5 + 0.5 * Math.sin(animationTime * 2.1 + index * 0.85);
+        let target;
+        if (listening) {
+            const envelope = 0.3 + 0.7 * centerBias;
+            target =
+                minHeight
+                + (maxHeight - minHeight) * (0.18 + 0.82 * energy) * envelope;
+        } else {
+            target = minHeight + (maxHeight - minHeight) * 0.12 * idleMotion;
+        }
+        const eased = barHeights[index] + (target - barHeights[index]) * 0.16;
+        barHeights[index] = eased;
+        const barX = startX + index * (barWidth + gap);
+        const barHeight = Math.max(minHeight, eased);
+        _voiceRoundRectPath(
+            ctx,
+            barX,
+            baseY - barHeight,
+            barWidth,
+            barHeight,
+            barWidth / 2
+        );
+        ctx.fill();
+    }
     voiceStrandsPhase = (
         voiceStrandsPhase + 0.012 + energy * 0.018
     ) % (Math.PI * 10);
@@ -657,10 +769,7 @@ function positionVoiceStrands() {
 
     const inputRect = inputContainer.getBoundingClientRect();
     const mainRect = mainContent.getBoundingClientRect();
-    const width = Math.max(
-        320,
-        Math.min(mainRect.width - 28, inputRect.width * 1.35, 1180)
-    );
+    const width = Math.max(200, Math.min(mainRect.width - 28, 240));
     const bottom = Math.max(8, window.innerHeight - inputRect.top + 10);
     overlay.style.setProperty(
         '--voice-strands-center-x',
@@ -690,9 +799,14 @@ function stopVoiceStrands() {
     if (!voiceStrandsRenderer) return;
     voiceStrandsRenderer.timeOrigin = null;
     voiceStrandsPhase = 0;
-    const {gl} = voiceStrandsRenderer;
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.flush();
+    const {ctx, barHeights} = voiceStrandsRenderer;
+    ctx.clearRect(
+        0,
+        0,
+        voiceStrandsRenderer.canvas.width,
+        voiceStrandsRenderer.canvas.height
+    );
+    barHeights.fill(0);
 }
 
 async function startVoiceAudioMeter(sessionToken = voiceSessionToken) {
@@ -741,6 +855,18 @@ function cancelVoiceSpeech() {
     voiceSpeechQueue.length = 0;
     voiceSpeechKeys.clear();
     voiceCurrentUtterance = null;
+    if (voiceEdgeTtsAudio) {
+        try {
+            voiceEdgeTtsAudio.pause();
+        } catch (_error) {
+            // The audio element may already have ended.
+        }
+        voiceEdgeTtsAudio = null;
+    }
+    if (voiceEdgeTtsAudioUrl) {
+        URL.revokeObjectURL(voiceEdgeTtsAudioUrl);
+        voiceEdgeTtsAudioUrl = null;
+    }
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     voiceSpeechActive = false;
     document.getElementById('voiceModeOverlay')?.classList.remove('is-speaking');
@@ -766,7 +892,6 @@ function pauseActiveOutputForVoiceInput() {
 
 function playNextVoiceResponse() {
     if (!voiceModeActive || voiceListening || voiceCurrentUtterance) return;
-    if (!('speechSynthesis' in window)) return;
     const next = voiceSpeechQueue.shift();
     if (!next) {
         voiceSpeechActive = false;
@@ -776,8 +901,69 @@ function playNextVoiceResponse() {
         }
         return;
     }
-
     const generation = voiceSpeechGeneration;
+
+    if (
+        !voiceEdgeTtsFailed
+        && typeof eel !== 'undefined'
+        && eel.voice_tts_speak
+    ) {
+        voiceCurrentUtterance = {generation, key: next.key, kind: 'edge'};
+        eel.voice_tts_speak(next.content, voiceEdgeTtsVoice)(result => {
+            if (
+                generation !== voiceSpeechGeneration
+                || voiceCurrentUtterance?.key !== next.key
+            ) {
+                return;
+            }
+            if (!result || !result.success || !result.audio_base64) {
+                voiceEdgeTtsFailed = true;
+                voiceCurrentUtterance = null;
+                voiceSpeechQueue.unshift(next);
+                window.setTimeout(playNextVoiceResponse, 0);
+                return;
+            }
+            if (voiceEdgeTtsAudioUrl) {
+                URL.revokeObjectURL(voiceEdgeTtsAudioUrl);
+                voiceEdgeTtsAudioUrl = null;
+            }
+            voiceEdgeTtsAudioUrl = _voiceEdgeTtsAudioUrl(result.audio_base64);
+            const audio = new Audio(voiceEdgeTtsAudioUrl);
+            voiceEdgeTtsAudio = audio;
+            const finish = () => {
+                if (voiceEdgeTtsAudio === audio) voiceEdgeTtsAudio = null;
+                if (voiceEdgeTtsAudioUrl) {
+                    URL.revokeObjectURL(voiceEdgeTtsAudioUrl);
+                    voiceEdgeTtsAudioUrl = null;
+                }
+                if (
+                    generation !== voiceSpeechGeneration
+                    || voiceCurrentUtterance?.key !== next.key
+                ) {
+                    return;
+                }
+                voiceCurrentUtterance = null;
+                if (voiceSpeechQueue.length && voiceModeActive && !voiceListening) {
+                    window.setTimeout(playNextVoiceResponse, 45);
+                    return;
+                }
+                playNextVoiceResponse();
+            };
+            audio.onended = finish;
+            audio.onerror = finish;
+            voiceSpeechActive = true;
+            document.getElementById('voiceModeOverlay')?.classList.add('is-speaking');
+            setVoiceModeStatus('正在为你朗读回答', 'speaking');
+            audio.play().catch(finish);
+        });
+        return;
+    }
+
+    if (!('speechSynthesis' in window)) {
+        voiceCurrentUtterance = null;
+        window.setTimeout(playNextVoiceResponse, 0);
+        return;
+    }
     const preferredVoice = voicePreferredSpeechVoice || refreshPreferredSpeechVoice();
     const utterance = new SpeechSynthesisUtterance(next.content);
     voiceCurrentUtterance = utterance;
@@ -806,7 +992,7 @@ function playNextVoiceResponse() {
 }
 
 function enqueueVoiceSpeech(content, speechKey) {
-    if (!voiceModeActive || !('speechSynthesis' in window)) return false;
+    if (!voiceModeActive) return false;
     const speechText = String(content || '').replace(/\s+/g, ' ').trim();
     if (!speechText) return false;
     const key = String(speechKey || speechText);
@@ -2557,8 +2743,13 @@ function renderComposerAttachments() {
     const container = document.getElementById('composerAttachments');
     if (!container) return;
     container.classList.toggle('is-visible', composerAttachments.length > 0);
-    container.innerHTML = composerAttachments.map(item => `
-        <div class="composer-attachment ${item.status === 'error' ? 'has-error' : ''}">
+    container.innerHTML = composerAttachments.map(item => {
+        const previewable = isImageAttachment(item) && Boolean(getImagePreview(item));
+        const previewAttributes = previewable
+            ? ` data-image-attachment="true" role="button" tabindex="0" aria-label="预览图片 ${escapeHtml(item.name)}"`
+            : '';
+        return `
+        <div class="composer-attachment ${item.status === 'error' ? 'has-error' : ''}" data-attachment-name="${escapeHtml(item.name)}"${previewAttributes}>
             ${renderAttachmentVisual(item, 'composer-attachment-icon')}
             <span class="composer-attachment-copy">
                 <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
@@ -2566,7 +2757,8 @@ function renderComposerAttachments() {
             </span>
             <button type="button" class="composer-attachment-remove" onclick="removeComposerAttachment('${item.id}')" aria-label="移除 ${escapeHtml(item.name)}">×</button>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 function removeComposerAttachment(id) {
@@ -2928,6 +3120,7 @@ function initializeUI() {
     const composerAddMenu = document.getElementById('composerAddMenu');
     const attachmentInput = document.getElementById('attachmentInput');
     const skillFolderInput = document.getElementById('skillFolderInput');
+    const skillStoreSearch = document.getElementById('skillStoreSearch');
     const clearQueueButton = document.getElementById('clearQueueButton');
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarBackdrop = document.getElementById('sidebarBackdrop');
@@ -2945,6 +3138,8 @@ function initializeUI() {
     const planProgressTrigger = document.getElementById('planProgressTrigger');
     const inputContainer = messageInput.closest('.input-container');
     const chatMessages = document.getElementById('chatMessages');
+    const imageLightbox = document.getElementById('imageLightbox');
+    const imageLightboxClose = document.getElementById('imageLightboxClose');
     const previewFrame = document.getElementById('browserPreviewFrame');
     const changeReviewPanel = document.getElementById('changeReviewPanel');
     const voiceInputArea = document.querySelector('.main-content .input-area');
@@ -2957,6 +3152,7 @@ function initializeUI() {
     applyPlanModeToggleState(planModeEnabled);
     applyMultiAgentModeToggleState(multiAgentModeEnabled);
     initializeVoiceSpeechVoices();
+    loadVoiceTtsPrefs();
     syncAutoAllowAll(autoAllowAll);
     updateModelBadge();
 
@@ -3026,8 +3222,27 @@ function initializeUI() {
         });
     }
     if (modelBadge) {
-        modelBadge.addEventListener('click', openSettings);
+        modelBadge.addEventListener('click', toggleModelQuickSwitch);
+        window.addEventListener('resize', positionModelQuickSwitch);
     }
+
+    // 点击菜单外部时关闭 API 配置下拉框与模型上拉框
+    document.addEventListener('click', event => {
+        const configMenu = document.getElementById('configSelectMenu');
+        const configTrigger = document.getElementById('configSelectTrigger');
+        if (configMenu && !configMenu.hidden
+            && !configTrigger?.contains(event.target)
+            && !configMenu.contains(event.target)) {
+            closeApiConfigMenu();
+        }
+        const modelMenu = document.getElementById('modelQuickSwitch');
+        const badgeEl = document.getElementById('modelBadge');
+        if (modelMenu && !modelMenu.hidden
+            && !badgeEl?.contains(event.target)
+            && !modelMenu.contains(event.target)) {
+            closeModelQuickSwitch();
+        }
+    });
     voiceModeButton?.addEventListener('click', toggleVoiceMode);
     window.addEventListener('resize', positionVoiceStrands);
     if ('ResizeObserver' in window && voiceInputArea && voiceMainContent) {
@@ -3144,6 +3359,9 @@ function initializeUI() {
     skillFolderInput?.addEventListener('change', async () => {
         await importSkillFolder(Array.from(skillFolderInput.files || []));
         skillFolderInput.value = '';
+    });
+    skillStoreSearch?.addEventListener('input', () => {
+        renderSkillStore(skillStoreSearch.value);
     });
     inputContainer?.addEventListener('dragenter', (event) => {
         if (!hasDraggedFiles(event.dataTransfer)) return;
@@ -3267,6 +3485,18 @@ function initializeUI() {
     });
     chatMessages?.addEventListener('click', handleAgentTeamClick);
     chatMessages?.addEventListener('click', handlePreviewLinkClick);
+    document.addEventListener('click', handleImagePreviewClick);
+    document.addEventListener('keydown', handleImagePreviewKeydown);
+    imageLightboxClose?.addEventListener('click', () => closeImageLightbox());
+    imageLightbox?.addEventListener('click', event => {
+        if (event.target === imageLightbox) closeImageLightbox();
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && imageLightbox && !imageLightbox.hidden) {
+            event.preventDefault();
+            closeImageLightbox();
+        }
+    });
     chatMessages?.addEventListener('scroll', () => {
         updateChatAutoFollow(chatMessages);
     }, {passive: true});
@@ -4077,6 +4307,7 @@ function bindQuickActions() {
 
 function resetConversationView(conversation = getActiveConversation()) {
     if (voiceModeActive) cancelVoiceSpeech();
+    closeImageLightbox({restoreFocus: false});
     closeAgentDetail({restoreFocus: false});
     closeChangeReview({restoreFocus: false});
     closeBrowserPreview(false);
@@ -4426,6 +4657,10 @@ async function switchConversation(conversationId) {
         markConversationReadLocally(conversationId);
         renderConversationList();
         syncActiveConversationProcessingUI({showPlaceholder: true});
+        // Split-pane state and execution placeholders can reflow the chat after
+        // its history is first rendered. A task switch should always end at the
+        // newest message instead of retaining the previous task's scroll anchor.
+        pinChatToBottom(document.getElementById('chatMessages'), {force: true});
         updateTokenIndicator();
         closeMobileSidebar();
     } catch (error) {
@@ -4508,6 +4743,10 @@ function openConversationMenu(event, conversationId) {
         const loaded = await eel.load_conversation(nextActiveId)();
         if (loaded?.success) renderConversation(loaded.conversation);
         await restoreSplitTaskForConversation(nextActiveId);
+        // Restoring the split pane can reflow the chat after its history is
+        // rendered, so a deleted task switch must always end at the newest
+        // message instead of retaining the previous task's scroll anchor.
+        pinChatToBottom(document.getElementById('chatMessages'), {force: true});
     };
     setTimeout(() => document.addEventListener('click', () => menu.remove(), {once: true}), 0);
 }
@@ -4745,7 +4984,7 @@ async function updateEmbeddingStatus() {
         badge.classList.toggle('sdk-fallback', isFtsOnly);
         badge.classList.toggle('sdk-error', !isApi && !isFtsOnly);
         label.textContent = isApi
-            ? `Hybrid ${dimension || ''}D`
+            ? (dimension ? `Hybrid ${dimension}D` : 'Hybrid')
             : isFtsOnly
                 ? 'FTS5 / BM25'
                 : '记忆检索异常';
@@ -4796,6 +5035,7 @@ async function initializeOSAgent() {
                 await restoreSplitTaskForConversation(initialConversationId);
             }
             await restoreExecutionState();
+            await restorePendingSend();
             if (!isProcessing) setAppStatus('ready', '就绪');
             document.getElementById('messageInput').focus();
         } else {
@@ -5172,6 +5412,20 @@ async function sendMessage() {
     const allowAll = autoAllowAll;
 
     if (!message && !attachments.length) return;
+
+    if (!eelBridgeReady()) {
+        autoRecoverEelBridge(
+            message,
+            attachments,
+            String(activeConversationId || ''),
+            planMode,
+            voiceMode,
+            multiAgentMode,
+            allowAll
+        );
+        return;
+    }
+
     const pendingStop = pendingStopRequests.get(String(activeConversationId || ''));
     if (pendingStop) {
         try {
@@ -5266,6 +5520,18 @@ async function sendMessage() {
         }
         ensureExecutionPolling(conversationId, currentMessageId);
     } catch (error) {
+        if (handleEelConnectionError(error) || !eelBridgeReady()) {
+            autoRecoverEelBridge(
+                message,
+                attachments,
+                String(conversationId || ''),
+                planMode,
+                voiceMode,
+                multiAgentMode,
+                allowAll
+            );
+            return;
+        }
         removeThinking();
         addMessage('ai', '任务提交失败：' + error.message, true);
         composerAttachments = attachments;
@@ -5291,6 +5557,20 @@ async function sendMessageWithText(
 
     // 生成新的消息ID
     const targetConversationId = String(conversationId || activeConversationId || '');
+
+    if (!eelBridgeReady()) {
+        autoRecoverEelBridge(
+            message,
+            attachments,
+            targetConversationId,
+            planMode,
+            voiceMode,
+            multiAgentMode,
+            allowAll
+        );
+        return;
+    }
+
     const messageId = Date.now();
     const renderTarget = targetConversationId === String(activeConversationId || '');
     if (renderTarget) currentMessageId = messageId;
@@ -5338,6 +5618,18 @@ async function sendMessageWithText(
         refreshConversations(activeConversationId).catch(console.error);
         ensureExecutionPolling(targetConversationId, messageId);
     } catch (error) {
+        if (handleEelConnectionError(error) || !eelBridgeReady()) {
+            autoRecoverEelBridge(
+                message,
+                attachments,
+                targetConversationId,
+                planMode,
+                voiceMode,
+                multiAgentMode,
+                allowAll
+            );
+            return;
+        }
         if (renderTarget) {
             removeThinking();
             addMessage('ai', '任务提交失败：' + error.message, true);
@@ -6386,8 +6678,11 @@ function renderMessageAttachment(item) {
     const assetAttribute = item.asset_id
         ? ` data-asset-id="${escapeHtml(item.asset_id)}"`
         : '';
+    const previewAttributes = isImage
+        ? ` data-image-attachment="true" role="button" tabindex="0" aria-label="预览图片 ${escapeHtml(item.name)}"`
+        : '';
     return `
-        <div class="message-attachment ${statusClass}" data-attachment-name="${escapeHtml(item.name)}"${assetAttribute}>
+        <div class="message-attachment ${statusClass}" data-attachment-name="${escapeHtml(item.name)}"${assetAttribute}${previewAttributes}>
             ${renderAttachmentVisual(item, 'message-attachment-icon')}
             <span class="message-attachment-copy">
                 <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
@@ -8218,7 +8513,7 @@ function renderMarkdown(content) {
     if (!content) return '';
 
     const mathTokens = [];
-    const protectedContent = protectLatex(String(content), mathTokens);
+    const protectedContent = protectLatex(redactEmbeddedMediaData(String(content)), mathTokens);
     const lines = protectedContent.replace(/\r\n?/g, '\n').split('\n');
     const blocks = [];
     let index = 0;
@@ -8382,22 +8677,156 @@ function isMarkdownBlockStart(lines, index) {
 
 function renderInlineMarkdown(content) {
     const codeTokens = [];
+    const markupTokens = [];
     let escaped = escapeHtml(content).replace(/`([^`\n]+)`/g, (_, code) => {
         const token = `\u0000CODE${codeTokens.length}\u0000`;
         codeTokens.push(`<code>${code}</code>`);
         return token;
     });
 
+    const protectMarkup = (html) => {
+        const token = `\u0000MARKUP${markupTokens.length}\u0000`;
+        markupTokens.push(html);
+        return token;
+    };
+
     escaped = escaped
-        .replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+&quot;[^&]*&quot;)?\)/g, '$1')
-        .replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, label, url) => renderSafeLink(label, url))
+        .replace(
+            /!\[([^\]]*)\]\((?:&lt;((?:(?!&gt;).)+)&gt;|([^\s)]+))(?:\s+&quot;[^&]*&quot;)?\)/g,
+            (_, label, bracketedUrl, plainUrl) => protectMarkup(
+                renderMarkdownMedia(label, bracketedUrl || plainUrl)
+            )
+        )
+        .replace(
+            /\[([^\]]+)\]\(([^\s)]+)(?:\s+&quot;[^&]*&quot;)?\)/g,
+            (_, label, url) => protectMarkup(renderSafeLink(label, url))
+        )
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
         .replace(/__([^_]+)__/g, '<strong>$1</strong>')
         .replace(/~~([^~]+)~~/g, '<del>$1</del>')
         .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
         .replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
 
-    return escaped.replace(/\u0000CODE(\d+)\u0000/g, (_, tokenIndex) => codeTokens[Number(tokenIndex)] || '');
+    return escaped
+        .replace(/\u0000CODE(\d+)\u0000/g, (_, tokenIndex) => codeTokens[Number(tokenIndex)] || '')
+        .replace(/\u0000MARKUP(\d+)\u0000/g, (_, tokenIndex) => markupTokens[Number(tokenIndex)] || '');
+}
+
+function redactEmbeddedMediaData(content) {
+    return String(content || '').replace(
+        /data:(?:image|video)\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]{256,}/gi,
+        '[已省略 Base64 媒体数据，请改用文件路径或 HTTP(S) 地址]'
+    );
+}
+
+function normalizeMarkdownMediaSource(escapedUrl) {
+    const source = String(escapedUrl || '').replace(/&amp;/g, '&').trim();
+    if (!source || /[\u0000-\u001f\u007f]/.test(source)) return '';
+    if (/^https?:\/\//i.test(source)) {
+        try {
+            const parsed = new URL(source);
+            return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+        } catch (_error) {
+            return '';
+        }
+    }
+    if (/^(?:data|blob|javascript):/i.test(source)) return '';
+    if (/^[a-z][a-z0-9+.-]*:/i.test(source) && !/^file:\/\//i.test(source)) return '';
+
+    const session = sessionStorage.getItem('minibot_eel_session') || '';
+    if (!session) return '';
+    const params = new URLSearchParams({
+        path: source,
+        conversation_id: String(activeConversationId || ''),
+        session,
+    });
+    return `/__jcodex_media?${params.toString()}`;
+}
+
+function renderMarkdownMedia(escapedLabel, escapedUrl) {
+    const source = String(escapedUrl || '').replace(/&amp;/g, '&').trim();
+    const videoPrefix = /^(?:video|视频)\s*[:：]\s*/i;
+    const isVideo = videoPrefix.test(String(escapedLabel || ''))
+        || /\.(?:m4v|mov|mp4|ogv|webm)(?:[?#]|$)/i.test(source);
+    const label = String(escapedLabel || '').replace(videoPrefix, '').trim();
+    const mediaUrl = normalizeMarkdownMediaSource(escapedUrl);
+    if (!mediaUrl) {
+        return `<span class="markdown-media-blocked">${label || (isVideo ? '视频' : '图片')}（媒体地址不可用）</span>`;
+    }
+    if (isVideo) {
+        return `<span class="markdown-media markdown-video"><video src="${escapeHtml(mediaUrl)}" controls preload="metadata" playsinline aria-label="${label || '视频'}"></video>${label ? `<span class="markdown-media-caption">${label}</span>` : ''}</span>`;
+    }
+    return `<button type="button" class="markdown-media markdown-image" aria-label="预览图片${label ? ` ${label}` : ''}"><img src="${escapeHtml(mediaUrl)}" alt="${label}" loading="lazy" decoding="async" referrerpolicy="no-referrer">${label ? `<span class="markdown-media-caption">${label}</span>` : ''}</button>`;
+}
+
+const IMAGE_PREVIEW_TRIGGER_SELECTOR = [
+    '.markdown-image',
+    '.message-attachment[data-image-attachment="true"]',
+    '.composer-attachment[data-image-attachment="true"]',
+].join(', ');
+
+function openImageLightbox(source, label = '') {
+    const lightbox = document.getElementById('imageLightbox');
+    const image = document.getElementById('imageLightboxImage');
+    const caption = document.getElementById('imageLightboxCaption');
+    if (!lightbox || !image || !caption || !source) return;
+
+    imageLightboxLastFocusedElement = document.activeElement;
+    image.src = source;
+    image.alt = label || '图片预览';
+    caption.textContent = label;
+    caption.hidden = !label;
+    lightbox.hidden = false;
+    lightbox.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('image-lightbox-open');
+    requestAnimationFrame(() => {
+        lightbox.classList.add('is-open');
+        document.getElementById('imageLightboxClose')?.focus({preventScroll: true});
+    });
+}
+
+function closeImageLightbox({restoreFocus = true} = {}) {
+    const lightbox = document.getElementById('imageLightbox');
+    if (!lightbox || lightbox.hidden) return;
+    lightbox.classList.remove('is-open');
+    lightbox.hidden = true;
+    lightbox.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('image-lightbox-open');
+    const image = document.getElementById('imageLightboxImage');
+    if (image) {
+        image.removeAttribute('src');
+        image.alt = '';
+    }
+    if (restoreFocus && imageLightboxLastFocusedElement?.isConnected) {
+        imageLightboxLastFocusedElement.focus({preventScroll: true});
+    }
+    imageLightboxLastFocusedElement = null;
+}
+
+function openImagePreviewFromTrigger(trigger) {
+    const image = trigger?.matches?.('img') ? trigger : trigger?.querySelector?.('img');
+    const source = image?.currentSrc || image?.src || '';
+    if (!source) return;
+    const label = image.alt
+        || trigger.dataset?.attachmentName
+        || trigger.querySelector?.('strong')?.textContent
+        || '';
+    openImageLightbox(source, String(label || '').trim());
+}
+
+function handleImagePreviewClick(event) {
+    if (event.target.closest('.composer-attachment-remove')) return;
+    const trigger = event.target.closest(IMAGE_PREVIEW_TRIGGER_SELECTOR);
+    if (trigger) openImagePreviewFromTrigger(trigger);
+}
+
+function handleImagePreviewKeydown(event) {
+    if (!['Enter', ' '].includes(event.key)) return;
+    if (event.target.matches('button, a, input, textarea, select')) return;
+    const trigger = event.target.closest(IMAGE_PREVIEW_TRIGGER_SELECTOR);
+    if (!trigger) return;
+    event.preventDefault();
+    openImagePreviewFromTrigger(trigger);
 }
 
 function renderSafeLink(label, escapedUrl) {
@@ -8789,11 +9218,17 @@ async function openSettings() {
         document.getElementById('settingApiBaseUrl').value = settings.api_base_url || '';
         document.getElementById('settingApiKey').value = settings.api_key || '';
         document.getElementById('settingApiModel').value = settings.api_model || '';
+        document.getElementById('settingSupportsVision').checked = settings.supports_vision !== 'false';
         document.getElementById('settingTavilyKey').value = settings.tavily_api_key || '';
         document.getElementById('settingMaxSteps').value = settings.max_steps || '';
         document.getElementById('settingMaxTokens').value = settings.max_tokens || '';
+        document.getElementById('settingContextWindow').value = contextWindowIndexFor(
+            settings.context_window
+        );
+        updateContextWindowLabel();
         document.getElementById('settingAutoCompactPercent').value = settings.auto_compact_threshold_percent || '85';
         document.getElementById('settingMaxWebSearches').value = settings.max_web_searches || '';
+        populateVoiceTtsSettings();
 
         // 加载配置列表
         await loadConfigList();
@@ -8802,7 +9237,7 @@ async function openSettings() {
         const apiFields = ['settingApiBaseUrl', 'settingApiKey', 'settingApiModel'];
         apiFields.forEach(fieldId => {
             document.getElementById(fieldId).oninput = () => {
-                document.getElementById('configSelect').value = '';
+                clearApiConfigSelection();
             };
         });
 
@@ -8814,25 +9249,179 @@ async function openSettings() {
     }
 }
 
+let apiConfigMenuSelection = '';
+
+function getSelectedApiConfig() {
+    return apiConfigMenuSelection;
+}
+
+function setApiConfigSelection(configName) {
+    apiConfigMenuSelection = configName || '';
+    const label = document.getElementById('configSelectLabel');
+    if (label) {
+        label.textContent = apiConfigMenuSelection || '选择已保存配置…';
+    }
+}
+
+function clearApiConfigSelection() {
+    setApiConfigSelection('');
+}
+
+function closeApiConfigMenu() {
+    const menu = document.getElementById('configSelectMenu');
+    const trigger = document.getElementById('configSelectTrigger');
+    if (menu) menu.hidden = true;
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function openApiConfigMenu() {
+    const menu = document.getElementById('configSelectMenu');
+    const trigger = document.getElementById('configSelectTrigger');
+    if (!menu) return;
+    menu.hidden = false;
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+}
+
+function toggleApiConfigMenu() {
+    const menu = document.getElementById('configSelectMenu');
+    if (!menu) return;
+    if (menu.hidden) openApiConfigMenu();
+    else closeApiConfigMenu();
+}
+
+function closeModelQuickSwitch() {
+    const menu = document.getElementById('modelQuickSwitch');
+    if (menu) menu.hidden = true;
+    const badge = document.getElementById('modelBadge');
+    if (badge) badge.setAttribute('aria-expanded', 'false');
+}
+
+function positionModelQuickSwitch() {
+    const menu = document.getElementById('modelQuickSwitch');
+    const badge = document.getElementById('modelBadge');
+    if (!menu || !badge || menu.hidden) return;
+    const badgeRect = badge.getBoundingClientRect();
+    menu.style.position = 'fixed';
+    menu.style.right = 'auto';
+    menu.style.bottom = 'auto';
+    menu.style.visibility = 'hidden';
+    const width = menu.offsetWidth;
+    menu.style.left = Math.max(8, badgeRect.right - width) + 'px';
+    menu.style.visibility = '';
+    const height = menu.offsetHeight;
+    menu.style.top = Math.max(8, badgeRect.top - height - 8) + 'px';
+}
+
+async function toggleModelQuickSwitch() {
+    const menu = document.getElementById('modelQuickSwitch');
+    if (!menu) return;
+    if (!menu.hidden) {
+        closeModelQuickSwitch();
+        return;
+    }
+    try {
+        const result = await eel.list_api_configs()();
+        const available = Array.isArray(result.available) ? result.available : [];
+        menu.innerHTML = '';
+
+        if (available.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'model-quick-switch-empty';
+            empty.textContent = '暂无已保存的模型配置';
+            menu.appendChild(empty);
+        } else {
+            available.forEach(configName => {
+                const config = (result.configs && result.configs[configName]) || {};
+                const model = String(config.api_model || '');
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'model-quick-switch-item';
+                if (configName === result.active) item.classList.add('is-active');
+                item.title = `${configName} · ${model || '未知模型'}`;
+                item.innerHTML =
+                    `<span class="model-quick-switch-name">${escapeHtml(model || '未知模型')}</span>`
+                    + (configName === result.active
+                        ? '<svg class="model-quick-switch-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
+                        : '');
+                item.addEventListener('click', async () => {
+                    closeModelQuickSwitch();
+                    try {
+                        const switchResult = await eel.set_active_config(configName)();
+                        if (switchResult && switchResult.success) {
+                            showToast(`已切换到 ${configName}`, 'success');
+                            await updateModelBadge();
+                        } else {
+                            showToast(`切换失败: ${switchResult?.error || '未知错误'}`, 'error');
+                        }
+                    } catch (e) {
+                        console.error('Failed to switch model:', e);
+                        showToast('切换模型失败', 'error');
+                    }
+                });
+                menu.appendChild(item);
+            });
+        }
+
+        const footer = document.createElement('button');
+        footer.type = 'button';
+        footer.className = 'model-quick-switch-footer';
+        footer.textContent = '打开运行设置…';
+        footer.addEventListener('click', () => {
+            closeModelQuickSwitch();
+            openSettings();
+        });
+        menu.appendChild(footer);
+
+        document.body.appendChild(menu);
+        menu.hidden = false;
+        const badge = document.getElementById('modelBadge');
+        if (badge) badge.setAttribute('aria-expanded', 'true');
+        positionModelQuickSwitch();
+    } catch (e) {
+        console.error('Failed to load model list:', e);
+    }
+}
+
 async function loadConfigList() {
     try {
         const result = await eel.list_api_configs()();
-        const select = document.getElementById('configSelect');
+        const menu = document.getElementById('configSelectMenu');
+        if (!menu) return;
+        menu.innerHTML = '';
+        const available = Array.isArray(result.available) ? result.available : [];
 
-        select.innerHTML = '<option value="">选择已保存配置…</option>';
-
-        if (result.available && result.available.length > 0) {
-            result.available.forEach(configName => {
-                const option = document.createElement('option');
-                option.value = configName;
-                option.textContent = configName;
-                if (configName === result.active) {
-                    option.selected = true;
-                }
-                select.appendChild(option);
-            });
-
+        if (available.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'api-config-menu-empty';
+            empty.textContent = '暂无已保存的配置';
+            menu.appendChild(empty);
+            setApiConfigSelection('');
+            return;
         }
+
+        available.forEach(configName => {
+            const config = (result.configs && result.configs[configName]) || {};
+            const model = String(config.api_model || '');
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'api-config-menu-item';
+            item.setAttribute('role', 'option');
+            item.innerHTML =
+                `<span class="api-config-menu-name">${escapeHtml(configName)}</span>`
+                + (model
+                    ? `<span class="api-config-menu-model">${escapeHtml(model)}</span>`
+                    : '');
+            if (configName === result.active) {
+                item.classList.add('is-active');
+                setApiConfigSelection(configName);
+            }
+            item.addEventListener('click', () => {
+                setApiConfigSelection(configName);
+                closeApiConfigMenu();
+                loadConfig(configName);
+            });
+            menu.appendChild(item);
+        });
     } catch (e) {
         console.error('Failed to load config list:', e);
     }
@@ -8848,7 +9437,7 @@ async function loadConfig(configName, showNotification = true) {
             document.getElementById('settingApiBaseUrl').value = result.config.api_base_url || '';
             document.getElementById('settingApiKey').value = result.config.api_key || '';
             document.getElementById('settingApiModel').value = result.config.api_model || '';
-            document.getElementById('configSelect').value = result.active || configName;
+            setApiConfigSelection(result.active || configName);
 
             if (showNotification) {
                 showToast(`已加载配置: ${configName}`, 'success');
@@ -8881,7 +9470,7 @@ async function saveCurrentConfig() {
         if (result.success) {
             showToast(`配置已保存: ${configName}`, 'success');
             await loadConfigList();
-            document.getElementById('configSelect').value = result.active || configName;
+            setApiConfigSelection(result.active || configName);
         } else {
             showToast(`保存失败: ${result.error}`, 'error');
         }
@@ -8892,7 +9481,7 @@ async function saveCurrentConfig() {
 }
 
 async function deleteCurrentConfig() {
-    const configName = document.getElementById('configSelect').value;
+    const configName = getSelectedApiConfig();
     if (!configName) {
         showToast('请先选择一个配置', 'info');
         return;
@@ -8926,9 +9515,14 @@ function collectSettingsFromForm(fallback = {}) {
         api_base_url: document.getElementById('settingApiBaseUrl').value.trim(),
         api_key: document.getElementById('settingApiKey').value.trim(),
         api_model: document.getElementById('settingApiModel').value.trim(),
+        supports_vision: document.getElementById('settingSupportsVision').checked ? 'true' : 'false',
         tavily_api_key: document.getElementById('settingTavilyKey').value.trim(),
         max_steps: document.getElementById('settingMaxSteps').value.trim() || fallback.max_steps || '100',
         max_tokens: document.getElementById('settingMaxTokens').value.trim() || fallback.max_tokens || '50000',
+        context_window: String(
+            CONTEXT_WINDOW_OPTIONS[Number(document.getElementById('settingContextWindow').value)]
+            || Number(fallback.context_window || 256000)
+        ),
         auto_compact_threshold_percent: document.getElementById('settingAutoCompactPercent').value.trim()
             || fallback.auto_compact_threshold_percent
             || '85',
@@ -8985,8 +9579,7 @@ async function updateTokenIndicator() {
         const result = await eel.get_token_count(requestedConversationId)();
         if (requestedConversationId !== String(activeConversationId || '')) return;
         const tokens = Number(result.tokens || 0);
-        const maxTokens = Math.max(Number(result.compress_at ?? result.max_tokens ?? 1), 1);
-        const thresholdPercent = Number(result.auto_compact_threshold_percent || 85);
+        const maxTokens = Math.max(Number(result.compress_at || 0), 1);
         const percentage = Math.min((tokens / maxTokens) * 100, 100);
 
         const progressBar = document.getElementById('tokenProgressBar');
@@ -8994,7 +9587,7 @@ async function updateTokenIndicator() {
 
         progressBar.style.width = percentage + '%';
 
-        // 格式化显示
+        // 格式化显示：以自动压缩阈值为上限（例如 512K 上下文 → 435.2K）
         const maxK = maxTokens / 1000;
         if (tokens >= 1000) {
             tokenText.textContent = (tokens / 1000).toFixed(1) + 'k/' + maxK + 'k';
@@ -9005,7 +9598,7 @@ async function updateTokenIndicator() {
         // 更新 tooltip
         const tooltip = document.getElementById('tokenTooltip');
         if (tooltip) {
-            tooltip.innerHTML = tokenTooltipMarkup(result, thresholdPercent, maxK);
+            tooltip.innerHTML = tokenTooltipMarkup(result);
         }
 
         // 颜色变化
@@ -9023,17 +9616,18 @@ async function updateTokenIndicator() {
     }
 }
 
-function tokenTooltipMarkup(result, thresholdPercent, maxK) {
+function tokenTooltipMarkup(result) {
     const systemTokens = Number(result.system_tokens || 0);
     const messageTokens = Number(result.message_tokens || 0);
     const toolTokens = Number(result.tool_tokens || 0);
-    const sourceNote = result.source === 'graph_snapshot'
-        ? '与自动压缩使用同一份完整上下文快照'
-        : '等待首个模型回合后生成完整上下文快照';
-    return `自动压缩阈值 ${thresholdPercent}%（${maxK}k）。${sourceNote}。<br>`
-        + `系统 ${formatCompressionTokenCount(systemTokens)} · `
-        + `消息 ${formatCompressionTokenCount(messageTokens)} · `
-        + `工具 ${formatCompressionTokenCount(toolTokens)}`;
+    const compressAt = Number(result.compress_at || 0);
+    const triggerPercent = Number(result.auto_compact_threshold_percent || 85);
+    return [
+        `压缩阈值 ${formatCompressionTokenCount(compressAt)}（${triggerPercent}%）`,
+        `系统 ${formatCompressionTokenCount(systemTokens)}`,
+        `消息 ${formatCompressionTokenCount(messageTokens)}`,
+        `工具 ${formatCompressionTokenCount(toolTokens)}`,
+    ].join(' · ');
 }
 
 function formatTokenText(tokens, maxTokens) {
@@ -9054,14 +9648,12 @@ async function toggleTokenTooltip() {
 
     try {
         const result = await eel.get_token_count(activeConversationId || '')();
-        const maxK = (result.compress_at ?? result.max_tokens) / 1000;
-        const thresholdPercent = Number(result.auto_compact_threshold_percent || 85);
 
         const indicator = document.getElementById('tokenIndicator');
         tooltip = document.createElement('div');
         tooltip.id = 'tokenTooltip';
         tooltip.className = 'token-tooltip';
-        tooltip.innerHTML = tokenTooltipMarkup(result, thresholdPercent, maxK);
+        tooltip.innerHTML = tokenTooltipMarkup(result);
 
         indicator.style.position = 'relative';
         indicator.appendChild(tooltip);
@@ -9084,9 +9676,28 @@ function closeTokenTooltip(e) {
 }
 
 // Skills Functions
+let skillStoreEntries = [];
+const skillStoreInstallsInFlight = new Set();
+
+function normalizeSkillStoreEntries(result) {
+    if (Array.isArray(result)) return result;
+    if (Array.isArray(result?.skills)) return result.skills;
+    return [];
+}
+
+function updateSkillStoreSummary(result) {
+    skillStoreEntries = normalizeSkillStoreEntries(result);
+    const count = document.getElementById('skillStoreCount');
+    if (count) count.textContent = String(skillStoreEntries.length);
+}
+
 async function refreshSkills() {
     try {
-        const skills = await eel.list_skills()();
+        const [skills, storeResult] = await Promise.all([
+            eel.list_skills()(),
+            eel.list_skill_store()(),
+        ]);
+        updateSkillStoreSummary(storeResult);
         const listEl = document.getElementById('skillsList');
 
         if (!skills || skills.length === 0) {
@@ -9187,13 +9798,144 @@ async function deleteSkill(skillName) {
 
         if (result.success) {
             showToast(`技能已删除: ${skillName}`, 'success');
-            refreshSkills();
+            await refreshSkills();
+            if (document.getElementById('skillStoreModal')?.classList.contains('active')) {
+                renderSkillStore(document.getElementById('skillStoreSearch')?.value || '');
+            }
         } else {
             showToast(`删除技能失败: ${result.error}`, 'error');
         }
     } catch (e) {
         console.error('Failed to delete skill:', e);
         showToast('删除技能失败', 'error');
+    }
+}
+
+async function openSkillStore() {
+    lastFocusedElement = document.activeElement;
+    const modal = document.getElementById('skillStoreModal');
+    const search = document.getElementById('skillStoreSearch');
+    modal?.classList.add('active');
+    if (search) search.value = '';
+    renderSkillStore('');
+    await refreshSkillStore();
+    setTimeout(() => search?.focus(), 0);
+}
+
+function closeSkillStore() {
+    document.getElementById('skillStoreModal')?.classList.remove('active');
+    lastFocusedElement?.focus?.();
+}
+
+async function refreshSkillStore() {
+    const refreshButton = document.getElementById('skillStoreRefresh');
+    const meta = document.getElementById('skillStoreMeta');
+    if (!canCallEel()) {
+        markEelConnectionLost();
+        return;
+    }
+    try {
+        if (refreshButton) refreshButton.disabled = true;
+        const result = await eel.list_skill_store()();
+        if (result?.error) {
+            if (meta) meta.textContent = `读取失败：${result.error}`;
+            return;
+        }
+        updateSkillStoreSummary(result);
+        renderSkillStore(document.getElementById('skillStoreSearch')?.value || '');
+    } catch (error) {
+        if (handleEelConnectionError(error)) return;
+        if (meta) meta.textContent = '读取技能商店失败';
+        console.error('Failed to refresh skill store:', error);
+    } finally {
+        if (refreshButton) refreshButton.disabled = false;
+    }
+}
+
+function renderSkillStore(query = '') {
+    const list = document.getElementById('skillStoreList');
+    const meta = document.getElementById('skillStoreMeta');
+    if (!list || !meta) return;
+    const normalizedQuery = String(query || '').trim().toLocaleLowerCase();
+    const visibleEntries = skillStoreEntries
+        .map((skill, index) => ({skill, index}))
+        .filter(({skill}) => {
+            if (!normalizedQuery) return true;
+            return `${skill.name || ''} ${skill.description || ''}`
+                .toLocaleLowerCase()
+                .includes(normalizedQuery);
+        });
+    const installableCount = skillStoreEntries.filter(skill => !skill.installed).length;
+    meta.textContent = `${skillStoreEntries.length} 个技能 · ${installableCount} 个可安装`;
+
+    if (!visibleEntries.length) {
+        list.innerHTML = `<div class="skill-store-empty">${
+            skillStoreEntries.length ? '没有匹配的技能' : '商店中暂无技能'
+        }</div>`;
+        return;
+    }
+
+    list.innerHTML = visibleEntries.map(({skill, index}) => {
+        const installing = skillStoreInstallsInFlight.has(skill.name);
+        let action = `
+            <button class="skill-store-install" type="button" data-store-install-index="${index}" ${installing ? 'disabled' : ''}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                <span>${installing ? '安装中' : '安装'}</span>
+            </button>`;
+        if (skill.installed) {
+            action = `<span class="skill-store-status ${skill.builtin ? 'is-builtin' : ''}">${skill.builtin ? '内置' : '已安装'}</span>`;
+        }
+        return `
+            <div class="skill-store-item">
+                <span class="skill-store-item-icon" aria-hidden="true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                </span>
+                <span class="skill-store-item-copy">
+                    <strong>${escapeHtml(skill.name)}</strong>
+                    <small>${escapeHtml(skill.description || '暂无说明')}</small>
+                </span>
+                ${action}
+            </div>`;
+    }).join('');
+
+    list.querySelectorAll('[data-store-install-index]').forEach(button => {
+        const skill = skillStoreEntries[Number(button.dataset.storeInstallIndex)];
+        button.addEventListener('click', () => installStoreSkill(skill.name));
+    });
+}
+
+async function installStoreSkill(skillName) {
+    if (!skillName || skillStoreInstallsInFlight.has(skillName)) return;
+    skillStoreInstallsInFlight.add(skillName);
+    renderSkillStore(document.getElementById('skillStoreSearch')?.value || '');
+    try {
+        const result = await eel.install_store_skill(skillName)();
+        if (!result?.success) {
+            showToast(`安装技能失败: ${result?.error || '未知错误'}`, 'error');
+            return;
+        }
+        showToast(`技能安装成功: ${skillName}`, 'success');
+        await refreshSkills();
+    } catch (error) {
+        if (handleEelConnectionError(error)) return;
+        console.error('Failed to install store skill:', error);
+        showToast('安装技能失败', 'error');
+    } finally {
+        skillStoreInstallsInFlight.delete(skillName);
+        await refreshSkillStore();
+    }
+}
+
+async function openSkillStoreFolder() {
+    try {
+        const result = await eel.open_skill_store_folder()();
+        if (!result?.success) {
+            showToast(`打开商店目录失败: ${result?.error || '未知错误'}`, 'error');
+        }
+    } catch (error) {
+        if (handleEelConnectionError(error)) return;
+        console.error('Failed to open skill store folder:', error);
+        showToast('打开商店目录失败', 'error');
     }
 }
 

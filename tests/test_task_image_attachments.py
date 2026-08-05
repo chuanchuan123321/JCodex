@@ -352,7 +352,10 @@ def test_task_reference_folder_allows_normal_local_tool_permissions(tmp_path) ->
     ) is None
 
 
-def test_view_image_only_allows_the_current_task_attachment(tmp_path) -> None:
+def test_view_image_only_allows_the_current_task_attachment(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
     image_path = tmp_path / "image.png"
     image_path.write_bytes(PNG_BYTES)
     executor = ExtendedToolExecutor(preview_manager=object())
@@ -404,9 +407,39 @@ def test_view_image_only_allows_the_current_task_attachment(tmp_path) -> None:
     ).startswith("Error:")
 
 
+def test_view_image_tool_follows_multimodal_vision_switch(monkeypatch) -> None:
+    from agent.core.langgraph_runner import LangGraphRunner
+    from agent.core.extended_tool_executor import strip_disabled_vision_prompt
+    from agent.ui.desktop import main as desktop
+
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
+    executor = ExtendedToolExecutor(preview_manager=object())
+    tool_names = [
+        tool.get("function", {}).get("name")
+        for tool in executor.get_available_tools()
+    ]
+    assert "view_image" in tool_names
+    assert "view_image" not in LangGraphRunner._hidden_tools_for_runtime({})
+    assert "view_image" in desktop._append_image_manifest("base", ["/tmp/a.png"])
+    sample_prompt = "- `view_image`: Inspect an image.\n- `read`: Read a file.\n"
+    assert "view_image" in strip_disabled_vision_prompt(sample_prompt)
+
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "false")
+    tool_names = [
+        tool.get("function", {}).get("name")
+        for tool in executor.get_available_tools()
+    ]
+    assert "view_image" not in tool_names
+    assert "view_image" in LangGraphRunner._hidden_tools_for_runtime({})
+    assert desktop._append_image_manifest("base", ["/tmp/a.png"]) == "base"
+    assert "view_image" not in strip_disabled_vision_prompt(sample_prompt)
+    assert "- `read`" in strip_disabled_vision_prompt(sample_prompt)
+
+
 def test_view_image_allows_supported_images_inside_workspace_temp_and_output(
-    tmp_path,
+    monkeypatch, tmp_path,
 ) -> None:
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
     project_root = tmp_path / "project"
     temp_image = project_root / "workspace" / "temp" / "render" / "chart.png"
     temp_image.parent.mkdir(parents=True)
@@ -447,7 +480,8 @@ def test_view_image_allows_supported_images_inside_workspace_temp_and_output(
     ).startswith("Error:")
 
 
-def test_image_tool_input_is_transient_not_checkpointed() -> None:
+def test_image_tool_input_is_transient_not_checkpointed(monkeypatch) -> None:
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
     data_url = _image_data_url()
     model = _ImageToolModel()
     events = []
@@ -485,6 +519,7 @@ def test_image_tool_input_is_transient_not_checkpointed() -> None:
 def test_desktop_image_submission_passes_path_then_viewed_image(
     monkeypatch, tmp_path
 ) -> None:
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("desktop images")
     model = _ManifestImageModel()
@@ -566,6 +601,7 @@ def test_desktop_image_submission_passes_path_then_viewed_image(
 def test_desktop_task_can_view_the_same_image_more_than_once(
     monkeypatch, tmp_path
 ) -> None:
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("repeat desktop image")
     model = _RepeatedManifestImageModel()
@@ -626,6 +662,7 @@ def test_desktop_task_can_view_the_same_image_more_than_once(
 def test_follow_up_task_rehydrates_images_from_its_conversation(
     monkeypatch, tmp_path
 ) -> None:
+    monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("follow-up desktop image")
     model = _FollowUpImageModel()

@@ -57,6 +57,7 @@ setup(
         "langchain-openai==1.1.7",
         "langgraph==1.0.7",
         "langgraph-checkpoint-sqlite==3.1.0",
+        "edge-tts>=6.1.0",
     ],
     entry_points={
         "console_scripts": [

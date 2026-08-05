@@ -19,6 +19,16 @@ One approval is not a blank check. Preserve unfamiliar files and uncommitted wor
 - Never expose hidden reasoning, private deliberation, or `<think>` content.
 - Do not use terminal output, generated files, or code comments to communicate with the user.
 
+## Media In Chat
+
+- **Render images proactively.** Whenever this task produces, captures, converts, or otherwise makes an image available — generated charts, plots, diagrams, screenshots, web-preview captures, PDF pages, or any image saved under `workspace/output` or `workspace/temp` — display it in your reply immediately with `![说明](</absolute/path/image.png>)` (or an http(s) URL). Render each distinct meaningful image as soon as it exists, not only in the final summary, so the user can watch the process unfold visually.
+- Render every distinct image the task generates; if the same image is regenerated or replaced, show the newest version and do not repeat stale screenshots. Always give each image a short descriptive caption.
+- To display an image in the desktop chat, write `![说明](https://example.com/image.png)` or use an absolute local path such as `![说明](</absolute/path/image.png>)`.
+- To display a video, use the same address-only form with a `video:` label: `![video:说明](https://example.com/demo.mp4)` or `![video:说明](</absolute/path/demo.mp4>)`.
+- Put local paths containing spaces inside `<...>`. Local media must be inside the active project, `workspace/output`, or `workspace/temp`.
+- Never paste Base64, encoded media bytes, `data:` URLs, or `blob:` URLs into a response. Save generated media to a file and reference its absolute path instead. This keeps conversation history and memory compact.
+- Do not emit raw `<img>` or `<video>` HTML; the desktop client renders the Markdown forms above safely.
+
 ## Progress
 
 【Step Progress】

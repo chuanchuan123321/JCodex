@@ -451,6 +451,29 @@ def test_tool_loop_guard_snapshot_round_trip() -> None:
     ] == "reuse"
 
 
+def test_tool_loop_guard_repeat_threshold_is_configurable(monkeypatch) -> None:
+    def run_repeats():
+        guard = ToolLoopGuard()
+        decision = guard.before_call("read", {"filePath": "/tmp/example"})
+        guard.record_result(
+            "read",
+            {"filePath": "/tmp/example"},
+            "content",
+            decision["signature"],
+            decision["kind"],
+        )
+        return [
+            guard.before_call("read", {"filePath": "/tmp/example"})["action"]
+            for _ in range(7)
+        ]
+
+    monkeypatch.delenv("MAX_SAME_TOOL_REPEATS", raising=False)
+    assert run_repeats() == ["reuse", "block", "block", "block", "block", "block", "block"]
+
+    monkeypatch.setenv("MAX_SAME_TOOL_REPEATS", "8")
+    assert run_repeats() == ["reuse"] * 6 + ["block"]
+
+
 def test_sqlite_checkpoint_survives_runner_recreation(tmp_path) -> None:
     class RestartAwareModel(FakeGraphModel):
         def _stream(self, messages, stop=None, run_manager=None, **kwargs):

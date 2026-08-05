@@ -4,9 +4,18 @@ import base64
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agent.core.config_manager import ConfigManager
 from agent.ui.desktop import main as desktop
+
+
+def _use_tmp_workspace(monkeypatch, tmp_path) -> None:
+    """Isolate both runtime roots so tests never touch the real repo/data dir."""
+    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(desktop, "DATA_ROOT", tmp_path)
 
 
 def _data_url(content: bytes, mime_type: str = "text/plain") -> str:
@@ -23,7 +32,7 @@ def test_workspace_listing_supports_nested_relative_paths(monkeypatch, tmp_path:
     nested_file.write_text("value\n1\n", encoding="utf-8")
     (tmp_path / "workspace" / "temp").mkdir(parents=True)
 
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
 
     root_items = desktop.list_workspace_files("output")
     assert any(
@@ -46,10 +55,50 @@ def test_workspace_listing_supports_nested_relative_paths(monkeypatch, tmp_path:
     assert desktop.list_workspace_files("output", "../temp") == []
 
 
+def test_chat_media_resolver_allows_output_media_and_rejects_escapes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    output_root = tmp_path / "workspace" / "output"
+    temp_root = tmp_path / "workspace" / "temp"
+    output_root.mkdir(parents=True)
+    temp_root.mkdir(parents=True)
+    image_path = output_root / "result image.png"
+    video_path = temp_root / "preview.mp4"
+    outside_path = tmp_path / "private.png"
+    image_path.write_bytes(b"png")
+    video_path.write_bytes(b"video")
+    outside_path.write_bytes(b"private")
+    _use_tmp_workspace(monkeypatch, tmp_path)
+
+    assert desktop._resolve_chat_media_file(str(image_path)) == (
+        image_path,
+        "image/png",
+    )
+    assert desktop._resolve_chat_media_file("workspace/temp/preview.mp4") == (
+        video_path,
+        "video/mp4",
+    )
+    with pytest.raises(ValueError, match="outside the active task"):
+        desktop._resolve_chat_media_file(str(outside_path))
+    with pytest.raises(ValueError, match="Only local media paths"):
+        desktop._resolve_chat_media_file("data:image/png;base64,AAAA")
+
+
+def test_large_base64_media_is_redacted_before_persistence() -> None:
+    payload = "data:image/png;base64," + ("A" * 512)
+
+    redacted = desktop._redact_embedded_media_data(f"before {payload} after")
+
+    assert redacted == (
+        "before [已省略 Base64 媒体数据，请改用文件路径或 HTTP(S) 地址] after"
+    )
+    assert "base64," not in redacted
+
+
 def test_skill_folder_import_copies_nested_browser_selected_files(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
 
     result = desktop.import_skill_folder(
         [
@@ -82,7 +131,7 @@ def test_skill_folder_import_copies_nested_browser_selected_files(
 def test_skill_folder_import_rejects_traversal_and_existing_destination(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
+    _use_tmp_workspace(monkeypatch, tmp_path)
     files = [{"path": "demo/SKILL.md", "data": _data_url(b"# Demo")}]
 
     assert desktop.import_skill_folder(files)["success"] is True
@@ -98,6 +147,94 @@ def test_skill_folder_import_rejects_traversal_and_existing_destination(
     assert rejected["success"] is False
     assert "Invalid skill folder path" in rejected["error"]
     assert not (tmp_path / "workspace" / "outside").exists()
+
+
+def test_desktop_skill_list_uses_explicit_builtin_names(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _use_tmp_workspace(monkeypatch, tmp_path)
+
+    agent_skills = tmp_path / "agent" / "skills"
+    workspace_skills = tmp_path / "workspace" / "skills"
+    for name in ("python", "web"):
+        skill_dir = agent_skills / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} description\n---\n",
+            encoding="utf-8",
+        )
+    for name in (desktop.BUILTIN_SKILL_NAMES - {"python"}) | {"custom-skill"}:
+        skill_dir = workspace_skills / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} description\n---\n",
+            encoding="utf-8",
+        )
+
+    listed = {skill["name"]: skill for skill in desktop.list_skills()}
+
+    assert {
+        name for name, skill in listed.items() if skill["builtin"]
+    } == desktop.BUILTIN_SKILL_NAMES
+    assert listed["web"]["builtin"] is False
+    assert listed["custom-skill"]["builtin"] is False
+    store_names = {skill["name"] for skill in desktop.list_skill_store()}
+    assert store_names == {"custom-skill", "web"}
+    assert (tmp_path / "workspace" / "skill-store" / "web" / "SKILL.md").exists()
+    assert desktop.delete_skill("python") == {
+        "success": False,
+        "error": "Cannot delete built-in skill",
+    }
+    assert desktop.delete_skill("web") == {"success": True}
+    assert not (agent_skills / "web").exists()
+    assert (tmp_path / "workspace" / "skill-store" / "web" / "SKILL.md").exists()
+
+
+def test_skill_store_install_delete_and_reinstall_preserves_catalog(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _use_tmp_workspace(monkeypatch, tmp_path)
+    monkeypatch.delenv("SKILL_STORE_PATH", raising=False)
+    store_skill = tmp_path / "workspace" / "skill-store" / "demo-store-skill"
+    store_skill.mkdir(parents=True)
+    (store_skill / "SKILL.md").write_text(
+        "---\nname: demo-store-skill\ndescription: Store demo\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    (store_skill / "scripts").mkdir()
+    (store_skill / "scripts" / "run.py").write_text(
+        "print('store copy')\n", encoding="utf-8"
+    )
+
+    assert desktop.list_skill_store() == [
+        {
+            "name": "demo-store-skill",
+            "description": "Store demo",
+            "installed": False,
+            "builtin": False,
+        }
+    ]
+    assert desktop.install_store_skill("demo-store-skill") == {
+        "success": True,
+        "name": "demo-store-skill",
+    }
+    installed = tmp_path / "workspace" / "skills" / "demo-store-skill"
+    assert (installed / "scripts" / "run.py").read_text(encoding="utf-8") == (
+        "print('store copy')\n"
+    )
+    assert desktop.list_skill_store()[0]["installed"] is True
+
+    duplicate = desktop.install_store_skill("demo-store-skill")
+    assert duplicate == {
+        "success": False,
+        "error": "Skill 'demo-store-skill' is already installed",
+    }
+    assert desktop.delete_skill("demo-store-skill") == {"success": True}
+    assert not installed.exists()
+    assert (store_skill / "SKILL.md").exists()
+    assert desktop.list_skill_store()[0]["installed"] is False
+    assert desktop.install_store_skill("demo-store-skill")["success"] is True
+    assert desktop.install_store_skill("../demo")["success"] is False
 
 
 def test_macos_project_folder_picker_uses_osascript(monkeypatch) -> None:
@@ -224,6 +361,64 @@ def test_saving_api_config_makes_saved_config_active(
     reloaded = ConfigManager()
     assert reloaded.list_configs()["active"] == "second"
     assert reloaded.get_active_config()["api_model"] == "model-2"
+
+
+def test_set_active_config_applies_runtime_and_persists(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    manager = ConfigManager()
+    assert manager.add_config("first", "https://first.test", "key-1", "model-1")
+    assert manager.add_config("second", "https://second.test", "key-2", "model-2")
+
+    written = []
+    monkeypatch.setattr(
+        desktop,
+        "_write_env_file",
+        lambda env_file, settings: written.append(settings),
+    )
+    monkeypatch.setattr(desktop, "load_dotenv", lambda *args, **kwargs: None)
+
+    rebuilt = []
+
+    class _FakeExecutor:
+        def __init__(self, engine):
+            self.ai_engine = engine
+
+        def rebuild_langgraph_runner(self):
+            rebuilt.append(self._name)
+
+    os_agent_engine = SimpleNamespace()
+    os_agent = _FakeExecutor(os_agent_engine)
+    os_agent._name = "os_agent"
+    monkeypatch.setattr(desktop, "os_agent", os_agent)
+
+    conversation_engine = SimpleNamespace()
+    conversation_executor = _FakeExecutor(conversation_engine)
+    conversation_executor._name = "conversation"
+    desktop.conversation_executors["switch-test"] = conversation_executor
+    try:
+        result = desktop.set_active_config("second")
+    finally:
+        desktop.conversation_executors.pop("switch-test", None)
+
+    assert result["success"] is True
+    assert result["active"] == "second"
+    assert os_agent_engine.api_key == "key-2"
+    assert os_agent_engine.api_base_url == "https://second.test"
+    assert os_agent_engine.api_path == "/v1/chat/completions"
+    assert os_agent_engine.model == "model-2"
+    assert conversation_engine.model == "model-2"
+    assert written == [
+        {
+            "api_base_url": "https://second.test",
+            "api_key": "key-2",
+            "api_model": "model-2",
+        }
+    ]
+    assert "os_agent" in rebuilt
+    assert "conversation" in rebuilt
+    assert ConfigManager().list_configs()["active"] == "second"
 
 
 def test_macos_dragged_folder_paths_are_filtered_by_directory_name(

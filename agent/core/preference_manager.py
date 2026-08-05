@@ -510,7 +510,7 @@ class PreferenceManager:
 
     def extract_preferences_from_data(self, data_entries: List[Dict[str, Any]],
                                        api_base_url: str = None, api_key: str = None,
-                                       model: str = "gpt-4") -> Dict[str, Any]:
+                                       model: str = "deepseek-v4-pro") -> Dict[str, Any]:
         """从数据条目中AI提取偏好"""
         import traceback
         import sys

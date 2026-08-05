@@ -6,7 +6,7 @@
     <title>JCodex</title>
     <link rel="icon" type="image/svg+xml" href="assets/kylin-agent-mark-light.svg" id="appFavicon">
     <link rel="stylesheet" href="vendor/katex/katex.min.css">
-    <link rel="stylesheet" href="styles.css?v=20260728-65">
+    <link rel="stylesheet" href="styles.css?v=20260731-69">
 </head>
 <body class="theme-light">
     <a class="skip-link" href="#messageInput">跳转到输入框</a>
@@ -208,6 +208,14 @@
                         </button>
                     </div>
                 </div>
+                <button class="skill-store-entry" id="skillStoreEntry" type="button" onclick="openSkillStore()" aria-haspopup="dialog" aria-controls="skillStoreModal">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                        <path d="M3 9l2-5h14l2 5"/><path d="M5 13v7h14v-7"/><path d="M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0"/>
+                    </svg>
+                    <span>技能商店</span>
+                    <span class="skill-store-count" id="skillStoreCount" aria-label="商店技能数量">0</span>
+                    <svg class="skill-store-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
+                </button>
                 <div class="workspace-section">
                     <div class="workspace-folder" id="skillsFolder">
                         <div class="folder-header">
@@ -458,12 +466,15 @@
                                 </svg>
                             </button>
                             <span class="voice-mode-button-hint" id="voiceModeHint" role="status" aria-live="polite" hidden></span>
-                            <button class="model-badge" id="modelBadge" type="button" title="当前模型">
-                                <span id="modelName">模型</span>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M6 9l6 6 6-6"/>
-                                </svg>
-                            </button>
+                            <span class="model-badge-anchor">
+                                <button class="model-badge" id="modelBadge" type="button" title="当前模型 · 点击切换已保存的模型" aria-haspopup="menu" aria-expanded="false">
+                                    <span id="modelName">模型</span>
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M6 9l6 6 6-6"/>
+                                    </svg>
+                                </button>
+                                <div class="model-quick-switch" id="modelQuickSwitch" hidden></div>
+                            </span>
                             <button class="btn-stop" id="stopButton" style="display: none;" title="停止执行" aria-label="停止执行">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                                     <rect x="6" y="6" width="12" height="12"/>
@@ -665,6 +676,33 @@
         </div>
     </div>
 
+    <div class="settings-modal" id="skillStoreModal" role="dialog" aria-modal="true" aria-labelledby="skillStoreModalTitle">
+        <div class="settings-modal-content skill-store-modal-content">
+            <div class="settings-modal-header">
+                <span id="skillStoreModalTitle">技能商店</span>
+                <button class="btn-icon" type="button" onclick="closeSkillStore()" aria-label="关闭技能商店">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="settings-modal-body skill-store-modal-body">
+                <div class="skill-store-toolbar">
+                    <label class="skill-store-search" for="skillStoreSearch">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                        <input id="skillStoreSearch" type="search" placeholder="搜索技能" autocomplete="off">
+                    </label>
+                    <button class="skill-store-tool-button" type="button" onclick="openSkillStoreFolder()" title="打开商店目录" aria-label="打开商店目录">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                    </button>
+                    <button class="skill-store-tool-button" id="skillStoreRefresh" type="button" onclick="refreshSkillStore()" title="刷新技能商店" aria-label="刷新技能商店">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                    </button>
+                </div>
+                <div class="skill-store-meta" id="skillStoreMeta" aria-live="polite">正在读取…</div>
+                <div class="skill-store-list" id="skillStoreList"></div>
+            </div>
+        </div>
+    </div>
+
     <div class="file-modal" id="fileModal" role="dialog" aria-modal="true" aria-labelledby="fileModalTitle">
         <div class="file-modal-content">
             <div class="file-modal-header">
@@ -695,9 +733,13 @@
                 <div class="settings-group">
                     <label class="settings-label">API 配置</label>
                     <div class="settings-inline-actions">
-                        <select class="settings-input" id="configSelect" onchange="loadConfig(this.value)" style="flex: 1;">
-                            <option value="">选择已保存配置…</option>
-                        </select>
+                        <div class="api-config-dropdown">
+                            <button type="button" class="api-config-trigger" id="configSelectTrigger" onclick="toggleApiConfigMenu()" aria-haspopup="listbox" aria-expanded="false" title="选择已保存的 API 配置">
+                                <span class="api-config-trigger-label" id="configSelectLabel">选择已保存配置…</span>
+                                <svg class="api-config-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                            </button>
+                            <div class="api-config-menu" id="configSelectMenu" role="listbox" hidden></div>
+                        </div>
                         <button class="btn-small" onclick="saveCurrentConfig()" title="保存当前设置">另存配置</button>
                         <button class="btn-small btn-danger" onclick="deleteCurrentConfig()" title="删除选中配置">删除</button>
                     </div>
@@ -713,7 +755,14 @@
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingApiModel">模型</label>
-                    <input type="text" class="settings-input" id="settingApiModel" placeholder="gpt-4">
+                    <input type="text" class="settings-input" id="settingApiModel" placeholder="deepseek-v4-pro">
+                </div>
+                <div class="settings-group">
+                    <label class="settings-label" for="settingSupportsVision">多模态视觉（仅支持多模态模型）</label>
+                    <label class="settings-checkbox">
+                        <input type="checkbox" id="settingSupportsVision" checked>
+                        <span>开启后模型可使用 view_image 查看图片；关闭则从模型工具中移除该工具（仅支持多模态模型）</span>
+                    </label>
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingTavilyKey">Tavily API Key <span class="settings-optional">（可选）</span></label>
@@ -729,12 +778,30 @@
                     <input type="number" class="settings-input" id="settingMaxTokens" placeholder="50000" min="1000">
                 </div>
                 <div class="settings-group">
+                    <label class="settings-label" for="settingContextWindow">最大上下文长度 <span class="settings-optional">（Token）</span></label>
+                    <div class="settings-slider-row">
+                        <input type="range" id="settingContextWindow" min="0" max="3" step="1" value="1" oninput="updateContextWindowLabel(); previewContextWindow()">
+                        <span class="settings-slider-value" id="settingContextWindowValue">256K</span>
+                    </div>
+                    <div class="settings-slider-labels">
+                        <span>128K</span>
+                        <span>256K</span>
+                        <span>512K</span>
+                        <span>1M</span>
+                    </div>
+                </div>
+                <div class="settings-group">
                     <label class="settings-label" for="settingAutoCompactPercent">自动压缩阈值 <span class="settings-optional">（上下文占用百分比，默认 85%）</span></label>
                     <input type="number" class="settings-input" id="settingAutoCompactPercent" placeholder="85" min="1" max="100">
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 8）</span></label>
                     <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="8" min="0" max="100">
+                </div>
+                <div class="settings-divider"></div>
+                <div class="settings-group">
+                    <label class="settings-label" for="settingVoiceEdgeVoice">语音回复音色 <span class="settings-optional">（edge-tts 在线语音）</span></label>
+                    <select class="settings-input" id="settingVoiceEdgeVoice"></select>
                 </div>
             </div>
             <div class="settings-modal-footer">
@@ -1011,6 +1078,18 @@
         </div>
     </div>
 
+    <div class="image-lightbox" id="imageLightbox" role="dialog" aria-modal="true" aria-label="图片预览" aria-hidden="true" hidden>
+        <button class="image-lightbox-close" id="imageLightboxClose" type="button" aria-label="关闭图片预览" title="关闭">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M18 6 6 18M6 6l12 12"/>
+            </svg>
+        </button>
+        <div class="image-lightbox-stage">
+            <img id="imageLightboxImage" src="" alt="">
+            <div class="image-lightbox-caption" id="imageLightboxCaption" hidden></div>
+        </div>
+    </div>
+
     <!-- Custom Confirm Dialog -->
     <div class="custom-dialog" id="confirmDialog">
         <div class="custom-dialog-content" style="max-width: 360px;">
@@ -1034,6 +1113,6 @@
 
     <script src="/eel.js"></script>
     <script src="vendor/katex/katex.min.js"></script>
-    <script src="app.js?v=20260728-68"></script>
+    <script src="app.js?v=20260802-70"></script>
 </body>
 </html>

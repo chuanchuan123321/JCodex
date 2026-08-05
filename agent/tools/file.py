@@ -58,9 +58,10 @@ class FileTool:
             offset = offset if offset is not None else 1
             limit = limit if limit is not None else FileTool.DEFAULT_READ_LIMIT
             try:
+                offset = int(offset)
                 limit = max(1, min(int(limit), FileTool.DEFAULT_READ_LIMIT))
             except (TypeError, ValueError):
-                return False, "limit must be a positive integer"
+                return False, "offset and limit must be positive integers"
 
             if offset < 1:
                 offset = 1

@@ -64,12 +64,12 @@ class ApiEmbeddingProvider(BaseEmbeddingProvider):
         api_base: str,
         api_key: str,
         model: str,
-        dimensions: int = 1024,
+        dimensions: Optional[int] = None,
     ) -> None:
         self.api_base = self._normalize_api_base(api_base)
         self.api_key = str(api_key or "")
         self.model = str(model or "").strip()
-        self.dimensions = max(1, int(dimensions))
+        self.dimensions = max(1, int(dimensions)) if dimensions else 0
         self.available = bool(self.api_base and self.api_key and self.model)
 
     @staticmethod
@@ -93,8 +93,9 @@ class ApiEmbeddingProvider(BaseEmbeddingProvider):
             payload = {
                 "model": self.model,
                 "input": batch,
-                "dimensions": self.dimensions,
             }
+            if self.dimensions:
+                payload["dimensions"] = self.dimensions
             last_error = ""
             for attempt in range(self.max_retries):
                 if attempt:
@@ -125,6 +126,8 @@ class ApiEmbeddingProvider(BaseEmbeddingProvider):
                         raise EmbeddingError(f"invalid embedding response: {exc}") from exc
                     if len(vectors) != len(batch):
                         raise EmbeddingError("embedding response count does not match input")
+                    if self.dimensions == 0 and vectors:
+                        self.dimensions = len(vectors[0])
                     all_embeddings.extend(vectors)
                     break
 
@@ -165,17 +168,31 @@ class MockEmbeddingProvider(BaseEmbeddingProvider):
 
 
 def create_embedding_provider() -> BaseEmbeddingProvider:
-    """Create Grok's API provider, or FTS-only mode when no model is configured."""
+    """Create the API provider, or FTS-only keyword mode when config is incomplete.
+
+    Vector retrieval is enabled only when the embedding model, base URL and API
+    key are all configured. If any of them is missing or invalid, memory search
+    degrades to FTS5/BM25 keyword retrieval instead of reusing the main chat API
+    configuration. Dimensions are optional: when left blank the embedding model's
+    default dimension is used and detected from the first API response.
+    """
     model = os.getenv("MEMORY_EMBEDDING_MODEL", "").strip()
-    if not model:
+    api_base = os.getenv("MEMORY_EMBEDDING_BASE_URL", "").strip()
+    api_key = os.getenv("MEMORY_EMBEDDING_API_KEY", "").strip()
+    if not model or not api_base or not api_key:
         return DisabledEmbeddingProvider()
+    dimensions = os.getenv("MEMORY_EMBEDDING_DIMENSIONS", "").strip()
+    dimensions_int = None
+    if dimensions:
+        try:
+            dimensions_int = int(dimensions)
+        except ValueError:
+            return DisabledEmbeddingProvider()
     return ApiEmbeddingProvider(
-        api_base=os.getenv("MEMORY_EMBEDDING_BASE_URL")
-        or os.getenv("API_BASE_URL", ""),
-        api_key=os.getenv("MEMORY_EMBEDDING_API_KEY")
-        or os.getenv("API_KEY", ""),
+        api_base=api_base,
+        api_key=api_key,
         model=model,
-        dimensions=int(os.getenv("MEMORY_EMBEDDING_DIMENSIONS", "1024")),
+        dimensions=dimensions_int,
     )
 
 

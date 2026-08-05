@@ -8,6 +8,8 @@ from typing import Optional, List, Dict, Any, Callable, Union
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
+from agent.core.env_utils import env_float, env_int
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
@@ -80,11 +82,11 @@ class AIEngine:
         except ImportError:
             pass  # 配置管理器不可用，使用环境变量
 
-        self.api_base_url = os.getenv("API_BASE_URL", "https://yunwu.ai")
+        self.api_base_url = os.getenv("API_BASE_URL", "https://api.deepseek.com")
         self.api_key = os.getenv("API_KEY")
-        self.model = os.getenv("API_MODEL", "gpt-4")
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
-        self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
+        self.model = os.getenv("API_MODEL", "deepseek-v4-pro")
+        self.max_tokens = env_int("MAX_TOKENS", 50000)
+        self.temperature = env_float("TEMPERATURE", 0.7)
 
         self.api_base_url = self.normalize_api_base_url(self.api_base_url)
         self.api_path = self.get_api_path_for_base_url(self.api_base_url)

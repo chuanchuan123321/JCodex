@@ -217,10 +217,10 @@ Installing the project with `pip install -e .` also provides `os-agent`, which s
 python chat.py desktop
 ```
 
-The desktop runtime binds to `127.0.0.1`, chooses the configured port or the next available one, and normally opens a Chrome application window. Supported launch modes:
+The desktop runtime binds to `127.0.0.1`, chooses the configured port or the next available one, and by default opens the app as a normal tab in your default system browser. Supported launch modes:
 
 ```bash
-# Open in the default system browser
+# Default: open in the default system browser
 MINIBOT_DESKTOP_MODE=browser python chat.py desktop
 
 # Start the local server without opening a window
@@ -350,7 +350,7 @@ Two-pass compaction is enabled by default. Manual `/compact` uses the same share
 
 ### Long-term memory
 
-`MemoryStore` chunks Markdown records into a workspace-specific SQLite index. Retrieval combines text relevance, optional vector similarity, source weighting, and time decay. Configure an OpenAI-compatible embedding endpoint to enable semantic retrieval; without it, FTS5/BM25 remains functional.
+`MemoryStore` chunks Markdown records into a workspace-specific SQLite index. Retrieval combines text relevance, optional vector similarity, source weighting, and time decay. Configure an OpenAI-compatible embedding model, base URL, and API key to enable semantic retrieval; if any of these is missing, retrieval automatically falls back to FTS5/BM25 keyword search. Dimensions are optional and default to the embedding model's own default.
 
 Desktop project tasks share a project memory scope. Ordinary tasks use isolated scopes. Feishu sessions are separated by channel/chat identity.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -1248,6 +1249,11 @@ class LangGraphRunner:
             hidden.update(QUESTION_TOOL_NAMES)
         if not runtime.get("multi_agent_enabled", False):
             hidden.update(MULTI_AGENT_TOOL_NAMES)
+        if (
+            os.getenv("MODEL_SUPPORTS_VISION", "true").strip().lower()
+            in {"0", "false", "no", "off"}
+        ):
+            hidden.add("view_image")
         return frozenset(hidden)
 
     @classmethod
@@ -1269,6 +1275,11 @@ class LangGraphRunner:
             return (
                 f"Error: {name} is disabled because Multi-Agent Mode is off"
             )
+        if name == "view_image" and (
+            os.getenv("MODEL_SUPPORTS_VISION", "true").strip().lower()
+            in {"0", "false", "no", "off"}
+        ):
+            return "Error: view_image is disabled because multimodal vision is off"
         if name in cls._hidden_tools_for_runtime(runtime):
             return f"Error: {name} is disabled for this task"
         return ""

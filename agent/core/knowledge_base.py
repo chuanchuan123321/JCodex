@@ -974,7 +974,7 @@ class KnowledgeBase:
         """
         api_base_url = api_base_url or os.getenv("API_BASE_URL")
         api_key = api_key or os.getenv("API_KEY")
-        model = model or os.getenv("API_MODEL", "gpt-4")
+        model = model or os.getenv("API_MODEL", "deepseek-v4-pro")
 
         if not api_base_url or not api_key:
             return {"success": False, "message": "API配置不完整", "extracted_count": 0}

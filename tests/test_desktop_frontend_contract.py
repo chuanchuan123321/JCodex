@@ -12,6 +12,139 @@ APP_JS = (
 )
 INDEX_HTML = APP_JS.with_name("index.html")
 STYLES_CSS = APP_JS.with_name("styles.css")
+AGENT_PROMPT = APP_JS.parents[3] / "Agent.md"
+
+
+
+def test_context_window_slider_and_token_indicator_contract() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    css_source = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert (
+        "const CONTEXT_WINDOW_OPTIONS = [128000, 256000, 512000, 1000000];"
+        in source
+    )
+    assert "const CONTEXT_WINDOW_LABELS = ['128K', '256K', '512K', '1M'];" in source
+
+    index_helper = source.split("function contextWindowIndexFor(value)", 1)[1].split(
+        "\nfunction updateContextWindowLabel", 1
+    )[0]
+    assert "Number(value || 256000)" not in index_helper
+
+    label_helper = source.split("function updateContextWindowLabel()", 1)[1].split(
+        "\nfunction setVoiceModeStatus", 1
+    )[0]
+    assert "Number(slider.value) || 1" not in label_helper
+    assert "CONTEXT_WINDOW_LABELS[index]" in label_helper
+
+    token_helper = source.split("async function updateTokenIndicator()", 1)[1].split(
+        "\nfunction tokenTooltipMarkup", 1
+    )[0]
+    assert "const maxTokens = Math.max(Number(result.compress_at || 0), 1);" in token_helper
+    assert "const percentage = Math.min((tokens / maxTokens) * 100, 100);" in token_helper
+    assert "k/' + maxK + 'k'" in token_helper
+
+    slider_labels_rule = css_source.split(".settings-slider-labels {", 1)[1].split(
+        "}", 1
+    )[0]
+    assert "margin-right: calc(52px + 14px);" in slider_labels_rule
+
+    assert "previewContextWindow" in source
+    assert "eel.preview_context_window(option)" in source
+    assert (
+        'oninput="updateContextWindowLabel(); previewContextWindow()"'
+        in INDEX_HTML.read_text(encoding="utf-8")
+    )
+
+
+def test_api_config_dropdown_and_model_quick_switch_contract() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    css_source = STYLES_CSS.read_text(encoding="utf-8")
+    html_source = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert 'id="configSelectMenu"' in html_source
+    assert 'id="configSelectTrigger"' in html_source
+    assert 'id="configSelectLabel"' in html_source
+    assert 'class="api-config-dropdown"' in html_source
+    assert 'id="modelQuickSwitch"' in html_source
+    assert 'class="model-badge-anchor"' in html_source
+
+    assert "function toggleApiConfigMenu()" in source
+    assert "function openApiConfigMenu()" in source
+    assert "function setApiConfigSelection(configName)" in source
+    assert "function getSelectedApiConfig()" in source
+    assert "async function toggleModelQuickSwitch()" in source
+    assert "function positionModelQuickSwitch()" in source
+    assert "document.body.appendChild(menu)" in source
+    assert "window.addEventListener('resize', positionModelQuickSwitch)" in source
+    assert "eel.set_active_config(configName)" in source
+    assert "badge.setAttribute('aria-expanded', 'true');" in source
+    assert "badge.setAttribute('aria-expanded', 'false');" in source
+    assert "item.title = `${configName} · ${model || '未知模型'}`;" in source
+    assert "model-quick-switch-model" not in source
+    assert "aria-haspopup=\"menu\" aria-expanded=\"false\"" in html_source
+    assert "modelBadge.addEventListener('click', toggleModelQuickSwitch);" in source
+    assert "modelBadge.addEventListener('click', openSettings);" not in source
+    assert "document.getElementById('configSelect').value" not in source
+
+    assert ".api-config-menu {" in css_source
+    assert ".api-config-trigger {" in css_source
+    assert ".model-quick-switch {" in css_source
+    assert "bottom: calc(100% + 8px);" in css_source
+    assert "background: var(--codex-surface-solid);" in css_source
+    assert ".model-quick-switch-item {" in css_source
+    assert ".model-badge[aria-expanded=\"true\"] svg" in css_source
+    assert "transform: rotate(180deg);" in css_source
+    assert "flex: 1 1 48%;\n    justify-content: flex-end;\n    overflow: visible;" in css_source
+
+
+def test_chat_markdown_renders_address_only_images_and_videos() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    css_source = STYLES_CSS.read_text(encoding="utf-8")
+    html_source = INDEX_HTML.read_text(encoding="utf-8")
+    prompt = AGENT_PROMPT.read_text(encoding="utf-8")
+
+    inline_renderer = source.split("function renderInlineMarkdown(content)", 1)[1]
+    inline_renderer = inline_renderer.split("\nfunction renderSafeLink", 1)[0]
+    assert "renderMarkdownMedia(label, bracketedUrl || plainUrl)" in inline_renderer
+    assert "function normalizeMarkdownMediaSource(" in inline_renderer
+    assert "function renderMarkdownMedia(" in inline_renderer
+    assert "new URLSearchParams" in inline_renderer
+    assert "/__jcodex_media?" in inline_renderer
+    assert "(?:data|blob|javascript):" in inline_renderer
+    assert '<video src="${escapeHtml(mediaUrl)}" controls' in inline_renderer
+    assert '<img src="${escapeHtml(mediaUrl)}"' in inline_renderer
+    assert 'loading="lazy"' in inline_renderer
+    assert "function redactEmbeddedMediaData(" in source
+    assert "function openImageLightbox(" in source
+    assert "function closeImageLightbox(" in source
+    assert "function handleImagePreviewClick(" in source
+    assert "function handleImagePreviewKeydown(" in source
+    assert '.message-attachment[data-image-attachment="true"]' in source
+    assert '.composer-attachment[data-image-attachment="true"]' in source
+
+    assert ".markdown-media" in css_source
+    assert ".markdown-video video" in css_source
+    assert "aspect-ratio: 16 / 9;" in css_source
+    assert "object-fit: contain;" in css_source
+    markdown_image_rule = css_source.split(".markdown-image {", 1)[1].split("}", 1)[0]
+    assert "max-width: min(100%, 640px);" in markdown_image_rule
+    assert ".image-lightbox-stage img" in css_source
+    assert "max-height: calc(100vh - 120px);" in css_source
+    for element_id in (
+        "imageLightbox",
+        "imageLightboxClose",
+        "imageLightboxImage",
+        "imageLightboxCaption",
+    ):
+        assert f'id="{element_id}"' in html_source
+
+    assert "## Media In Chat" in prompt
+    assert "Render images proactively" in prompt
+    assert "![说明](https://example.com/image.png)" in prompt
+    assert "![video:说明](https://example.com/demo.mp4)" in prompt
+    assert "Never paste Base64" in prompt
+    assert "reference its absolute path instead" in prompt
 
 
 def test_only_final_compression_end_is_a_terminal_event() -> None:
@@ -106,11 +239,11 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert ".voice-mode-button-hint" in css_source
     assert 'id="voiceStrandsCanvas"' in html_source
     assert "drawVoiceStrands" in source
-    assert "VOICE_STRANDS_FRAGMENT_SHADER" in source
-    assert "getContext('webgl2'" in source
-    assert "vec3 strandColor = palette(hue);" in source
-    assert "float fan" in source
-    assert "float halo" in source
+    assert "VOICE_BAR_COUNT" in source
+    assert "getContext('2d'" in source
+    assert "function createVoiceStrandsRenderer()" in source
+    assert "function _voiceRoundRectPath(ctx" in source
+    assert "function _voiceBarPalette()" in source
     assert "startVoiceAudioMeter" in source
     assert "getSmoothedVoiceAmplitude" in source
     assert "voiceStrandsPhase * 2.4" in source
@@ -128,12 +261,11 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert "const animationTime = (timestamp - renderer.timeOrigin) * 0.001;" in source
     assert "voiceStrandsPhase + 0.012 + energy * 0.018" in source
     assert "WEBGL_lose_context" not in source
-    assert "pow(clamp(luminance, 0.0, 1.0), 2.1)" in source
-    assert "if (alpha <= 0.001) discard;" in source
-    assert "vec3 tint = clamp(color / max(luminance, 0.0001), 0.0, 1.0);" in source
-    assert "fragColor = vec4(tint * alpha, alpha);" in source
-    assert "float verticalFade = 1.0 - smoothstep(0.64, 0.98, abs(uv.y));" in source
-    assert "alpha *= verticalFade;" in source
+    assert "const gradient = ctx.createLinearGradient(0, baseY - maxHeight, 0, baseY);" in source
+    assert "const eased = barHeights[index] + (target - barHeights[index]) * 0.16;" in source
+    assert "ctx.arcTo(x + width, y + height, x, y + height, r);" in source
+    assert "listening" in source
+    assert "palette.top" in source
     assert ".voice-strands-canvas" in css_source
 
     start_helper = source.split("function startVoiceListening()", 1)[1]
@@ -199,8 +331,7 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert "positionVoiceStrands" in source
     assert "--voice-strands-center-x" in source
     assert "window.innerHeight - inputRect.top + 10" in source
-    assert "inputRect.width * 1.35" in source
-    assert "1180" in source
+    assert "Math.max(200, Math.min(mainRect.width - 28, 240))" in source
     assert "ResizeObserver(positionVoiceStrands)" in source
     assert "voiceLayoutObserver.observe(inputContainer);" in source
     reset_view = source.split("function resetConversationView(", 1)[1]
@@ -222,8 +353,8 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert "background: transparent !important;" in final_voice_css
     assert "bottom: var(--voice-strands-bottom, 126px) !important;" in final_voice_css
     assert "left: var(--voice-strands-center-x, 50%) !important;" in final_voice_css
-    assert "width: var(--voice-strands-width, min(1080px, 92vw)) !important;" in final_voice_css
-    assert "height: clamp(280px, 26vw, 360px) !important;" in final_voice_css
+    assert "width: var(--voice-strands-width, min(240px, 80vw)) !important;" in final_voice_css
+    assert "height: clamp(96px, 14vw, 120px) !important;" in final_voice_css
 
     send_helper = source.split("async function sendMessage()", 1)[1]
     send_helper = send_helper.split("\n// 直接发送指定消息", 1)[0]
@@ -438,6 +569,40 @@ def test_skill_folder_import_uses_the_browser_picker_not_tk() -> None:
     assert "eel.select_skill_folder" not in app_source
 
 
+def test_skill_store_has_sidebar_entry_search_and_install_states() -> None:
+    app_source = APP_JS.read_text(encoding="utf-8")
+    html_source = INDEX_HTML.read_text(encoding="utf-8")
+    css_source = STYLES_CSS.read_text(encoding="utf-8")
+
+    for element_id in (
+        "skillStoreEntry",
+        "skillStoreCount",
+        "skillStoreModal",
+        "skillStoreSearch",
+        "skillStoreRefresh",
+        "skillStoreMeta",
+        "skillStoreList",
+    ):
+        assert f'id="{element_id}"' in html_source
+    assert "技能商店" in html_source
+    assert "打开商店目录" in html_source
+    assert "function openSkillStore()" in app_source
+    assert "function refreshSkillStore()" in app_source
+    assert "function renderSkillStore(query = '')" in app_source
+    assert "function installStoreSkill(skillName)" in app_source
+    assert "eel.list_skill_store()" in app_source
+    assert "eel.install_store_skill(skillName)" in app_source
+    assert "eel.open_skill_store_folder()" in app_source
+    assert "skill.installed" in app_source
+    assert "skill.builtin ? '内置' : '已安装'" in app_source
+    assert ".skill-store-entry" in css_source
+    assert ".skill-store-list" in css_source
+    assert ".skill-store-install" in css_source
+    store_entry_rule = css_source.rsplit(".skill-store-entry {", 1)[1].split("}", 1)[0]
+    assert "border: 0;" in store_entry_rule
+    assert "background: transparent;" in store_entry_rule
+
+
 def test_project_folder_picker_disables_repeated_requests_and_ignores_cancel() -> None:
     source = APP_JS.read_text(encoding="utf-8")
     handler = source.split(
@@ -512,6 +677,19 @@ def test_deleting_an_inactive_task_does_not_redraw_the_active_task() -> None:
     assert "if (!deletedWasActive) return;" in delete_handler
     assert delete_handler.index("if (!deletedWasActive) return;") < delete_handler.index(
         "eel.load_conversation(nextActiveId)"
+    )
+
+
+def test_deleting_the_active_task_finishes_at_the_latest_message() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    delete_handler = source.split(
+        "menu.querySelector('[data-action=\"delete\"]').onclick = async () => {", 1
+    )[1].split("setTimeout(() => document.addEventListener", 1)[0]
+
+    final_pin = "pinChatToBottom(document.getElementById('chatMessages'), {force: true});"
+    assert "restoreSplitTaskForConversation(nextActiveId)" in delete_handler
+    assert delete_handler.index(final_pin) > delete_handler.index(
+        "restoreSplitTaskForConversation(nextActiveId)"
     )
 
 
@@ -615,6 +793,19 @@ def test_tool_cards_show_a_safe_call_target() -> None:
     assert "values.content" not in source.split("function getToolTarget", 1)[1].split(
         "\nfunction getToolProgressCopy", 1
     )[0]
+
+
+def test_switching_conversations_finishes_at_the_latest_message() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+
+    switch_helper = source.split("async function switchConversation(conversationId)", 1)[1]
+    switch_helper = switch_helper.split("\nfunction openConversationMenu", 1)[0]
+    final_pin = "pinChatToBottom(document.getElementById('chatMessages'), {force: true});"
+
+    assert final_pin in switch_helper
+    assert switch_helper.index(final_pin) > switch_helper.index(
+        "syncActiveConversationProcessingUI({showPlaceholder: true});"
+    )
 
 
 def test_task_end_modified_files_summary_is_dedicated_and_restorable() -> None:
@@ -882,6 +1073,18 @@ def test_multi_agent_mode_renders_bounded_isolated_team_snapshots() -> None:
     assert "overflow: visible;" in token_text_rule
     assert "text-overflow: clip;" in token_text_rule
     assert "text-overflow: ellipsis;" not in token_text_rule
+    narrow_header_rule = css_source.rsplit(".chat-header {", 1)[1].split("}", 1)[0]
+    narrow_header_right_rule = css_source.rsplit(".header-right {", 1)[1].split(
+        "}", 1
+    )[0]
+    assert "overflow: visible;" in narrow_header_rule
+    assert "overflow: visible;" in narrow_header_right_rule
+    token_tooltip_helper = app_source.split("function tokenTooltipMarkup(result)", 1)[1].split(
+        "\nfunction formatTokenText", 1
+    )[0]
+    assert "系统 ${formatCompressionTokenCount(systemTokens)}" in token_tooltip_helper
+    assert "压缩阈值" in token_tooltip_helper
+    assert "<br>" not in token_tooltip_helper
     assert "function syncSplitTaskTheme(" in app_source
     assert "jcodex-theme-change" in app_source
     assert "jcodex-split-agent-detail" in app_source

@@ -1,6 +1,7 @@
 """Execution-level protection against repeated tool-call loops."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -8,6 +9,7 @@ from typing import Any, Dict, Optional
 class ToolLoopGuard:
     """Reuse successful observations and block repeated state changes."""
 
+    DEFAULT_MAX_SAME_TOOL_REPEATS = 3
     OBSERVATION_TOOLS = {
         "read",
         "file_read",
@@ -31,6 +33,15 @@ class ToolLoopGuard:
     }
     IGNORED_PARAM_KEYS = {"description", "reason", "summary"}
     ALWAYS_EXECUTE_TOOLS = {"todo_write", "update_plan", "view_image"}
+
+    @staticmethod
+    def _max_same_tool_repeats() -> int:
+        """Return how many identical calls are tolerated before blocking."""
+        raw = os.getenv("MAX_SAME_TOOL_REPEATS", "").strip()
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return ToolLoopGuard.DEFAULT_MAX_SAME_TOOL_REPEATS
 
     def __init__(self):
         self.reset()
@@ -157,7 +168,8 @@ class ToolLoopGuard:
             return {"action": "execute", "signature": signature, "kind": kind}
 
         previous["repeats"] = int(previous.get("repeats", 0)) + 1
-        if kind == "observation" and previous["repeats"] == 1:
+        max_repeats = self._max_same_tool_repeats()
+        if kind == "observation" and previous["repeats"] < max_repeats - 1:
             notice = (
                 f"防循环：{tool_name} 的相同参数已经成功执行，本次直接复用已有结果。"
                 "不要再次验证同一状态，请执行能推进任务的下一步。"
@@ -170,7 +182,7 @@ class ToolLoopGuard:
                 "result": f"{notice}\n\n已有结果：\n{previous['result']}",
             }
 
-        if kind == "mutation" and previous["repeats"] == 1:
+        if kind == "mutation" and previous["repeats"] < max_repeats - 1:
             notice = (
                 f"防循环：{tool_name} 的相同变更已经成功完成，本次不会再次执行。"
                 "请检查已有结果并进入下一步。"

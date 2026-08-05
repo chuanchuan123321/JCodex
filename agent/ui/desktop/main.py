@@ -5,6 +5,7 @@ import base64
 import difflib
 import hashlib
 import json
+import mimetypes
 import os
 import platform
 import queue
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 import bottle
 import eel
@@ -29,11 +31,17 @@ from langchain_core.messages import HumanMessage
 # 添加项目根目录到 sys.path (确保优先使用MiniBot的模块)
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+DATA_ROOT = Path(os.getenv("JCODEX_DATA_DIR", "") or PROJECT_ROOT).expanduser().resolve()
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
 from agent.core.ai_engine import AIEngine
 from agent.core.context_compactor import ContextCompactor
 from agent.core.conversation_store import ConversationStore
-from agent.core.extended_tool_executor import ExtendedToolExecutor
+from agent.core.env_utils import env_float, env_int
+from agent.core.extended_tool_executor import (
+    ExtendedToolExecutor,
+    strip_disabled_vision_prompt,
+)
 from agent.core.langchain_model import AIEngineChatModel
 from agent.core.langgraph_runner import (
     LangGraphRunner,
@@ -59,6 +67,16 @@ MAX_REUSABLE_CONVERSATION_IMAGES = 24
 MAX_SKILL_IMPORT_FILES = 512
 MAX_SKILL_IMPORT_BYTES = 30 * 1024 * 1024
 MAX_SKILL_IMPORT_FILE_BYTES = 12 * 1024 * 1024
+BUILTIN_SKILL_NAMES = frozenset(
+    {
+        "docx",
+        "frontend-design",
+        "pptx",
+        "project-setup",
+        "python",
+        "xlsx",
+    }
+)
 MAX_MODIFIED_FILE_TEXT_BYTES = 1024 * 1024
 MAX_MODIFIED_FILE_DIFF_LINES = 1200
 MAX_MODIFIED_TASK_DIFF_LINES = 4000
@@ -198,18 +216,66 @@ UNSUPPORTED_IMAGE_SUFFIXES = {
     ".tif",
     ".tiff",
 }
+CHAT_MEDIA_MIME_TYPES = {
+    ".avif": "image/avif",
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".m4v": "video/mp4",
+    ".mov": "video/quicktime",
+    ".mp4": "video/mp4",
+    ".ogv": "video/ogg",
+    ".webm": "video/webm",
+}
+_EMBEDDED_MEDIA_DATA_RE = re.compile(
+    r"data:(?:image|video)/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]{256,}",
+    flags=re.IGNORECASE,
+)
 _EEL_SESSION_COOKIE = "jcodex_eel_session"
-CONVERSATION_ROOT = PROJECT_ROOT / "workspace" / "conversations"
+CONVERSATION_ROOT = DATA_ROOT / "workspace" / "conversations"
 conversation_store = ConversationStore(CONVERSATION_ROOT)
 _short_term_memory_locks_guard = threading.RLock()
 _short_term_memory_locks: dict[str, threading.RLock] = {}
 _short_term_compression_locks: dict[str, threading.Lock] = {}
-PROJECT_STORE_ROOT = PROJECT_ROOT / "workspace" / "projects"
+PROJECT_STORE_ROOT = DATA_ROOT / "workspace" / "projects"
 project_store = ProjectStore(PROJECT_STORE_ROOT)
 
 # 加载环境变量
-project_root = PROJECT_ROOT
+project_root = DATA_ROOT
 load_dotenv(project_root / ".env", override=True)
+
+
+def _seed_bundled_skill_files() -> None:
+    """Seed bundled skills/store into the per-user data dir on first run.
+
+    In the packaged app PROJECT_ROOT points inside the app bundle while
+    DATA_ROOT is the user's Application Support folder; dev mode (same
+    folder) is a no-op. Existing entries are never overwritten.
+    """
+    if PROJECT_ROOT.resolve() == DATA_ROOT.resolve():
+        return
+    try:
+        for relative in ("skills", "skill-store"):
+            source = PROJECT_ROOT / "workspace" / relative
+            destination = DATA_ROOT / "workspace" / relative
+            if not source.exists():
+                continue
+            destination.mkdir(parents=True, exist_ok=True)
+            for item in source.iterdir():
+                if not item.is_dir() or item.name.startswith("."):
+                    continue
+                target = destination / item.name
+                if target.exists():
+                    continue
+                try:
+                    shutil.copytree(item, target)
+                    print(f"[skills] seeded {relative}/{item.name}")
+                except Exception:
+                    shutil.rmtree(target, ignore_errors=True)
+    except Exception as exc:
+        print(f"[skills] seed bundled skills failed: {exc}")
 
 
 def _short_term_memory_lock(path: Path) -> threading.RLock:
@@ -409,18 +475,31 @@ def _write_env_file(env_file: Path, settings: dict) -> None:
         "API_BASE_URL": "api_base_url",
         "API_KEY": "api_key",
         "API_MODEL": "api_model",
+        "MODEL_SUPPORTS_VISION": "supports_vision",
         "TAVILY_API_KEY": "tavily_api_key",
         "MAX_STEPS": "max_steps",
         "MAX_TOKENS": "max_tokens",
+        "CONTEXT_WINDOW": "context_window",
         "MAX_WEB_SEARCHES": "max_web_searches",
         "AUTO_COMPACT_THRESHOLD_PERCENT": "auto_compact_threshold_percent",
+    }
+    # 数值型设置留空时回退到默认值，避免写出 CONTEXT_WINDOW= 导致下次启动崩溃
+    numeric_defaults = {
+        "MAX_STEPS": "100",
+        "MAX_TOKENS": "50000",
+        "CONTEXT_WINDOW": "256000",
+        "MAX_WEB_SEARCHES": "8",
+        "AUTO_COMPACT_THRESHOLD_PERCENT": "85",
     }
     ordered_keys = list(env_key_map.keys())
 
     for env_key, setting_key in env_key_map.items():
         if setting_key in settings:
             value = str(settings.get(setting_key, ""))
-            existing_settings[env_key] = value.replace("\r", "").replace("\n", "")
+            value = value.replace("\r", "").replace("\n", "")
+            if not value.strip() and env_key in numeric_defaults:
+                value = numeric_defaults[env_key]
+            existing_settings[env_key] = value
 
     env_file.parent.mkdir(parents=True, exist_ok=True)
     temp_path = None
@@ -454,7 +533,7 @@ def _workspace_folder(folder: str) -> Path:
     """Return an allowlisted workspace folder exposed by the desktop UI."""
     if folder not in {"output", "temp"}:
         raise ValueError("Unknown workspace folder")
-    return _resolve_within(PROJECT_ROOT / "workspace", folder)
+    return _resolve_within(DATA_ROOT / "workspace", folder)
 
 
 def _project_for_conversation(conversation: dict) -> Optional[dict]:
@@ -472,6 +551,80 @@ def _project_for_conversation(conversation: dict) -> Optional[dict]:
             "instructions": "",
             "available": False,
         }
+
+
+def _redact_embedded_media_data(content: str) -> str:
+    """Keep large inline media payloads out of persisted conversation text."""
+    return _EMBEDDED_MEDIA_DATA_RE.sub(
+        "[已省略 Base64 媒体数据，请改用文件路径或 HTTP(S) 地址]",
+        str(content or ""),
+    )
+
+
+def _chat_media_roots(conversation_id: str = "") -> list[Path]:
+    """Return local roots whose media may be shown in one desktop task."""
+    roots = [
+        DATA_ROOT / "workspace" / "output",
+        DATA_ROOT / "workspace" / "temp",
+    ]
+    if conversation_id:
+        try:
+            conversation = conversation_store.load(str(conversation_id))
+        except (RuntimeError, ValueError):
+            conversation = None
+        project = _project_for_conversation(conversation) if conversation else None
+        project_path = str((project or {}).get("root_path", "")).strip()
+        if project and project.get("available") and project_path:
+            roots.insert(0, Path(project_path).expanduser())
+
+    resolved_roots = []
+    for root in roots:
+        resolved = root.resolve(strict=False)
+        if resolved not in resolved_roots:
+            resolved_roots.append(resolved)
+    return resolved_roots
+
+
+def _resolve_chat_media_file(
+    raw_path: str, conversation_id: str = ""
+) -> tuple[Path, str]:
+    """Resolve an allowlisted image or video path without following escapes."""
+    source = str(raw_path or "").strip()
+    if not source or "\x00" in source:
+        raise ValueError("Media path is invalid")
+    if source.lower().startswith("file://"):
+        parsed = urlsplit(source)
+        if parsed.netloc not in {"", "localhost"}:
+            raise ValueError("Remote file URLs are not supported")
+        source = unquote(parsed.path)
+    elif re.match(r"^[a-z][a-z0-9+.-]*:", source, flags=re.IGNORECASE):
+        raise ValueError("Only local media paths are accepted by this endpoint")
+
+    roots = _chat_media_roots(conversation_id)
+    requested = Path(source).expanduser()
+    candidates = [requested] if requested.is_absolute() else []
+    if not requested.is_absolute():
+        candidates.extend(root / requested for root in roots)
+        candidates.append(PROJECT_ROOT / requested)
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved.is_file() or not any(
+            resolved == root or root in resolved.parents for root in roots
+        ):
+            continue
+        mime_type = CHAT_MEDIA_MIME_TYPES.get(resolved.suffix.lower())
+        if not mime_type:
+            guessed_type, _encoding = mimetypes.guess_type(resolved.name)
+            if guessed_type and guessed_type.startswith(("image/", "video/")):
+                mime_type = guessed_type
+        if mime_type not in CHAT_MEDIA_MIME_TYPES.values():
+            raise ValueError("Unsupported chat media type")
+        return resolved, mime_type
+    raise ValueError("Media path is outside the active task or unavailable")
 
 
 def _project_unavailable_error(conversation: dict) -> str:
@@ -527,7 +680,7 @@ def _memory_store_for_conversation(conversation: dict) -> MemoryStore:
         scope_path = project_root
     else:
         scope_path = conversation_store.memory_dir(conversation_id)
-    return MemoryStore(PROJECT_ROOT / "workspace" / "memory", scope_path, include_global=False)
+    return MemoryStore(DATA_ROOT / "workspace" / "memory", scope_path, include_global=False)
 
 
 def _valid_long_term_memory_scope_paths() -> set[Path]:
@@ -559,7 +712,7 @@ def _cleanup_orphaned_long_term_memory() -> dict:
     """Reclaim long-term indexes left by tasks/projects deleted in old builds."""
     try:
         return MemoryStore.prune_orphaned_scopes(
-            PROJECT_ROOT / "workspace" / "memory",
+            DATA_ROOT / "workspace" / "memory",
             _valid_long_term_memory_scope_paths(),
         )
     except OSError as exc:
@@ -679,7 +832,7 @@ def _prepare_attachments(
 
     total_bytes = 0
     upload_dir = _resolve_within(
-        PROJECT_ROOT / "workspace" / "temp", "uploads", str(message_id)
+        DATA_ROOT / "workspace" / "temp", "uploads", str(message_id)
     )
     sections = []
     metadata = []
@@ -791,6 +944,11 @@ def _merge_task_images(*image_groups) -> list[dict]:
 
 def _append_image_manifest(message: str, image_paths: list[str]) -> str:
     """Tell the model which conversation images it may inspect this task run."""
+    if (
+        os.getenv("MODEL_SUPPORTS_VISION", "true").strip().lower()
+        in {"0", "false", "no", "off"}
+    ):
+        return message
     paths = [str(path).strip() for path in image_paths if str(path).strip()]
     if not paths:
         return message
@@ -831,6 +989,7 @@ def _validate_runtime_settings(settings: dict) -> dict:
     numeric_rules = {
         "max_steps": (1, 200, 100),
         "max_tokens": (1000, 200000, 50000),
+        "context_window": (8000, 2000000, 256000),
         "max_web_searches": (0, 100, 8),
         "auto_compact_threshold_percent": (1, 100, 85),
     }
@@ -846,6 +1005,13 @@ def _validate_runtime_settings(settings: dict) -> dict:
 
     normalized["api_base_url"] = api_base_url
     normalized["api_model"] = api_model
+    vision = str(normalized.get("supports_vision", "true")).strip().lower()
+    normalized["supports_vision"] = "true" if vision in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } else "false"
     return normalized
 
 
@@ -862,13 +1028,13 @@ class DesktopTaskExecutor:
         self.langgraph_checkpointer = None
         self._langgraph_max_steps = 0
         self.step_count = 0
-        self.max_steps = int(os.getenv("MAX_STEPS", "100"))
+        self.max_steps = env_int("MAX_STEPS", 100)
         self.allow_all_commands = False
         self.auto_allow_all_commands = False
         self.web_search_count = 0
-        self.max_web_searches = int(os.getenv("MAX_WEB_SEARCHES", "8"))
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
-        self.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
+        self.max_web_searches = env_int("MAX_WEB_SEARCHES", 8)
+        self.max_tokens = env_int("MAX_TOKENS", 50000)
+        self.context_window = env_int("CONTEXT_WINDOW", 256000)
         self.context_compactor = ContextCompactor(
             ContextCompactor.policy_from_runtime(self.context_window, None)
         )
@@ -899,9 +1065,10 @@ class DesktopTaskExecutor:
             if self.ai_engine is not None:
                 return True, "Already initialized"
             self.ai_engine = AIEngine()
-            project_root = PROJECT_ROOT
+            project_root = DATA_ROOT
             workspace_path = project_root / "workspace"
             workspace_path.mkdir(exist_ok=True)
+            _seed_bundled_skill_files()
             self.skills_loader = SkillsLoader(workspace_path)
             self.preview_manager = PreviewManager(
                 project_root=project_root,
@@ -914,6 +1081,7 @@ class DesktopTaskExecutor:
                 project_root=project_root,
                 workspace_root=workspace_path,
                 protected_root=PROJECT_ROOT,
+                data_root=DATA_ROOT,
                 restrict_reads_to_project=False,
             )
             checkpoint_path = workspace_path / "data" / "langgraph_checkpoints.sqlite3"
@@ -960,7 +1128,7 @@ class DesktopTaskExecutor:
             if root_path and Path(root_path).expanduser().is_dir()
             else PROJECT_ROOT
         )
-        workspace_path = PROJECT_ROOT / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
 
         # Model, graph runner, tool state, memory, and data task state are
         # intentionally per conversation. Checkpoints and app-level data remain
@@ -977,6 +1145,7 @@ class DesktopTaskExecutor:
             project_root=self.project_root,
             workspace_root=workspace_path,
             protected_root=PROJECT_ROOT,
+            data_root=DATA_ROOT,
             restrict_reads_to_project=False,
         )
         self.activate_conversation(conversation_id)
@@ -1037,7 +1206,7 @@ class DesktopTaskExecutor:
             f"{parent.conversation_id}:agent:{str(team_id)[:16]}:{str(agent_id)[:16]}"
         )
 
-        workspace_path = PROJECT_ROOT / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
         self.ai_engine = AIEngine()
         self.preview_manager = parent.preview_manager
         self.tool_executor = ExtendedToolExecutor(
@@ -1046,6 +1215,7 @@ class DesktopTaskExecutor:
             project_root=self.project_root,
             workspace_root=workspace_path,
             protected_root=PROJECT_ROOT,
+            data_root=DATA_ROOT,
             restrict_reads_to_project=False,
         )
         self.memory_manager = MemoryManager(
@@ -1109,7 +1279,7 @@ class DesktopTaskExecutor:
             raise RuntimeError("Conversation id is required for memory storage")
         if self.project and self.project.get("available"):
             return MemoryStore(
-                PROJECT_ROOT / "workspace" / "memory",
+                DATA_ROOT / "workspace" / "memory",
                 self.project_root,
                 include_global=False,
             )
@@ -1268,7 +1438,7 @@ class DesktopTaskExecutor:
         child_agent: bool = False,
     ) -> tuple:
         project_root = self.project_root
-        workspace_path = PROJECT_ROOT / "workspace"
+        workspace_path = DATA_ROOT / "workspace"
 
         skills_summary = ""
         try:
@@ -1299,7 +1469,7 @@ class DesktopTaskExecutor:
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        system_prompt = system_prompt_template
+        system_prompt = strip_disabled_vision_prompt(system_prompt_template)
         system_prompt = system_prompt.replace("{step_count}", str(self.step_count))
         system_prompt = system_prompt.replace("{max_steps}", str(self.max_steps))
         system_prompt = system_prompt.replace(
@@ -1331,8 +1501,9 @@ class DesktopTaskExecutor:
             f"This task belongs to a user-bound local project at `{project_root}`. "
             f"You may normally create, edit, move, rename, and delete files in "
             f"that project when the user request requires it. However, the "
-            f"JCodex application source tree at `{PROJECT_ROOT}` is always "
-            f"protected from file-tool mutations except under "
+            f"JCodex application source tree at `{PROJECT_ROOT}` and its data "
+            f"workspace at `{workspace_path}` are always protected from "
+            f"file-tool mutations except under "
             f"`{workspace_path / 'temp'}` and `{workspace_path / 'output'}`. "
             f"Paths outside the bound project are not globally read-only: "
             f"Desktop, Documents, Downloads, and other local paths explicitly "
@@ -1344,9 +1515,10 @@ class DesktopTaskExecutor:
             "artifacts. Normal approval rules still apply to mutating tools."
             if self.project
             else f"Protect the JCodex application source tree at "
-            f"`{project_root}`: you may inspect it, but do not create, edit, "
-            f"overwrite, append, move, rename, or delete files inside it except "
-            f"under `{workspace_path / 'temp'}` and "
+            f"`{PROJECT_ROOT}` and its data workspace at `{workspace_path}`: "
+            f"you may inspect them, but do not create, edit, overwrite, "
+            f"append, move, rename, or delete files inside them except under "
+            f"`{workspace_path / 'temp'}` and "
             f"`{workspace_path / 'output'}`. This restriction applies only to "
             "the JCodex source tree. Desktop, Documents, Downloads, dropped "
             "reference folders, and other local paths explicitly placed in "
@@ -1428,7 +1600,7 @@ class DesktopTaskExecutor:
 
     def reload_data_integrator(self) -> None:
         """Refresh the in-memory data integrator used by active chats."""
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         from agent.core.data_integrator import DataIntegrator
         self.data_integrator = DataIntegrator(data_dir=workspace_path / "data")
@@ -1766,7 +1938,7 @@ class DesktopTaskExecutor:
             [{"role": "user", "content": prompt}],
             tools=None,
             temperature=0.1,
-            timeout=max(1, int(os.getenv("COMPACTION_TIMEOUT_SECONDS", "300"))),
+            timeout=max(1, env_int("COMPACTION_TIMEOUT_SECONDS", 300)),
             # ContextCompactor owns the input-stage retry policy. Retrying here
             # multiplied one slow compression request into several minutes.
             max_retries=1,
@@ -1781,7 +1953,7 @@ class DesktopTaskExecutor:
             messages,
             tools=None,
             temperature=0.1,
-            timeout=max(1, int(os.getenv("MEMORY_FLUSH_TIMEOUT_SECONDS", "180"))),
+            timeout=max(1, env_int("MEMORY_FLUSH_TIMEOUT_SECONDS", 180)),
             max_retries=1,
         )
         if result.get("finish_reason") in {"error", "length"}:
@@ -2510,6 +2682,8 @@ def _persist_step(step: dict, message_id: int, conversation_id: str) -> None:
             "modified_files",
         }:
             continue
+        if isinstance(event.get("content"), str):
+            event["content"] = _redact_embedded_media_data(event["content"])
         event["message_id"] = message_id
         if event.get("type") == "plan_update":
             conversation_store.upsert_plan_snapshot(conversation_id, event)
@@ -3613,7 +3787,9 @@ def _run_subagent_turn(
         child.data_integrator.end_task("失败")
         raise RuntimeError(result.error or f"child agent ended with {result.status}")
     child.data_integrator.end_task("已完成")
-    visible = MemoryManager.strip_reasoning(result.content).strip()
+    visible = _redact_embedded_media_data(
+        MemoryManager.strip_reasoning(result.content)
+    ).strip()
     child.memory_manager.append_execution_step(f"最终回应: {visible}")
     return visible
 
@@ -3769,18 +3945,27 @@ def _prepare_subagent_write_scope(
         return workdir_path, resolved_write_paths
 
     writable_jcodex_roots = (
-        (PROJECT_ROOT / "workspace" / "output").resolve(strict=False),
-        (PROJECT_ROOT / "workspace" / "temp").resolve(strict=False),
+        (DATA_ROOT / "workspace" / "output").resolve(strict=False),
+        (DATA_ROOT / "workspace" / "temp").resolve(strict=False),
+    )
+    protected_jcodex_regions = tuple(
+        dict.fromkeys(
+            region.resolve(strict=False)
+            for region in (PROJECT_ROOT, DATA_ROOT)
+        )
     )
     for path_text in resolved_write_paths:
         path = Path(path_text)
-        if ExtendedToolExecutor._is_within_directory(path, PROJECT_ROOT) and not any(
+        if any(
+            ExtendedToolExecutor._is_within_directory(path, region)
+            for region in protected_jcodex_regions
+        ) and not any(
             ExtendedToolExecutor._is_within_directory(path, root)
             for root in writable_jcodex_roots
         ):
             raise ValueError(
                 f"write path '{path_text}' resolves inside the protected "
-                "JCodex source tree. Set workdir to the target project "
+                "JCodex data or source tree. Set workdir to the target project "
                 "directory, for example workspace/output/my-app."
             )
 
@@ -4684,7 +4869,9 @@ def _graph_event_publisher(
                 }
             )
             if event.get("tool_calls") and visible_commentary:
-                commentary_memory = " ".join(visible_commentary.split())[:2000]
+                commentary_memory = _redact_embedded_media_data(
+                    " ".join(visible_commentary.split())[:2000]
+                )
                 executor.memory_manager.append_execution_step(
                     f"【工作说明】{commentary_memory}"
                 )
@@ -4945,7 +5132,9 @@ def _graph_event_publisher(
 
         if event_type == "final":
             content = str(event.get("content", "") or "")
-            visible_response = MemoryManager.strip_reasoning(content)
+            visible_response = _redact_embedded_media_data(
+                MemoryManager.strip_reasoning(content)
+            )
             if visible_response:
                 executor.memory_manager.append_execution_step(
                     f"最终回应: {visible_response}"
@@ -6253,7 +6442,7 @@ def delete_project(project_id: str):
         project = project_store.load(project_id)
         project_root = Path(project["root_path"]).expanduser().resolve()
         MemoryStore(
-            PROJECT_ROOT / "workspace" / "memory",
+            DATA_ROOT / "workspace" / "memory",
             project_root,
             include_global=False,
         ).purge_scope()
@@ -6654,16 +6843,18 @@ def open_memory_file(file_type: str, conversation_id: str = ""):
 def load_settings():
     """Load settings from .env file"""
     try:
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         env_file = project_root / ".env"
 
         settings = {
             "api_base_url": "",
             "api_key": "",
             "api_model": "",
+            "supports_vision": "true",
             "tavily_api_key": "",
             "max_steps": "100",
             "max_tokens": "50000",
+            "context_window": "256000",
             "max_web_searches": "8",
             "auto_compact_threshold_percent": "85",
         }
@@ -6682,12 +6873,16 @@ def load_settings():
                             settings["api_key"] = value
                         elif key == "API_MODEL":
                             settings["api_model"] = value
+                        elif key == "MODEL_SUPPORTS_VISION":
+                            settings["supports_vision"] = value
                         elif key == "TAVILY_API_KEY":
                             settings["tavily_api_key"] = value
                         elif key == "MAX_STEPS":
                             settings["max_steps"] = value
                         elif key == "MAX_TOKENS":
                             settings["max_tokens"] = value
+                        elif key == "CONTEXT_WINDOW":
+                            settings["context_window"] = value
                         elif key == "MAX_WEB_SEARCHES":
                             settings["max_web_searches"] = value
                         elif key == "AUTO_COMPACT_THRESHOLD_PERCENT":
@@ -6703,6 +6898,7 @@ def load_settings():
             "tavily_api_key": "",
             "max_steps": "100",
             "max_tokens": "50000",
+            "context_window": "256000",
             "max_web_searches": "8",
             "auto_compact_threshold_percent": "85",
         }
@@ -6713,7 +6909,7 @@ def save_settings(settings: dict):
     """Save settings to .env file, preserving other existing settings"""
     try:
         settings = _validate_runtime_settings(settings)
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         env_file = project_root / ".env"
 
         # 写回文件，确保根目录 .env 与当前设置面板一致
@@ -6728,16 +6924,25 @@ def save_settings(settings: dict):
         configured_max_web_searches = int(
             settings.get("max_web_searches", "8")
         )
+        configured_context_window = int(
+            settings.get("context_window", "256000")
+        )
+        # refresh_policy 以环境变量 CONTEXT_WINDOW 为准，先同步再刷新压缩策略
+        os.environ["CONTEXT_WINDOW"] = str(configured_context_window)
+        os.environ["MODEL_SUPPORTS_VISION"] = str(
+            settings.get("supports_vision", "true")
+        )
         with state_lock:
             configured_executors = set(conversation_executors.values()) | {os_agent}
         for executor in configured_executors:
             executor.max_steps = configured_max_steps
             executor.max_tokens = configured_max_tokens
             executor.max_web_searches = configured_max_web_searches
-            executor.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
+            executor.context_window = configured_context_window
             executor.context_compactor.refresh_policy(executor.context_window, None)
             executor.compress_at = executor.context_compactor.policy.trigger_tokens
             executor.show_knowledge_appendix = False
+            executor._latest_context_usage = None
         if os_agent.memory_manager:
             os_agent.accumulated_compression = (
                 os_agent.memory_manager.load_accumulated_compression()
@@ -6748,7 +6953,7 @@ def save_settings(settings: dict):
             if not executor.ai_engine:
                 continue
             executor.ai_engine.api_key = os.getenv("API_KEY", "")
-            api_base_url = os.getenv("API_BASE_URL", "https://yunwu.ai")
+            api_base_url = os.getenv("API_BASE_URL", "https://api.deepseek.com")
 
             # 清理URL中可能存在的旧API路径
             api_base = api_base_url.rstrip("/")
@@ -6769,7 +6974,7 @@ def save_settings(settings: dict):
             else:
                 executor.ai_engine.api_path = "/v1/chat/completions"
 
-            executor.ai_engine.model = os.getenv("API_MODEL", "gpt-4")
+            executor.ai_engine.model = os.getenv("API_MODEL", "deepseek-v4-pro")
             executor.ai_engine.max_tokens = configured_max_tokens
             if not any(
                 run.executor is executor and run.status in {"running", "waiting"}
@@ -6793,6 +6998,10 @@ def sync_runtime_env(settings: dict):
             os.environ["API_KEY"] = settings.get("api_key", "")
         if "api_model" in settings:
             os.environ["API_MODEL"] = settings.get("api_model", "")
+        if "supports_vision" in settings:
+            os.environ["MODEL_SUPPORTS_VISION"] = settings.get(
+                "supports_vision", "true"
+            )
         if "tavily_api_key" in settings:
             os.environ["TAVILY_API_KEY"] = settings.get("tavily_api_key", "")
 
@@ -6800,6 +7009,8 @@ def sync_runtime_env(settings: dict):
             os.environ["MAX_STEPS"] = settings.get("max_steps", "100")
         if "max_tokens" in settings:
             os.environ["MAX_TOKENS"] = settings.get("max_tokens", "50000")
+        if "context_window" in settings:
+            os.environ["CONTEXT_WINDOW"] = settings.get("context_window", "256000")
         if "max_web_searches" in settings:
             os.environ["MAX_WEB_SEARCHES"] = settings.get("max_web_searches", "8")
         if "auto_compact_threshold_percent" in settings:
@@ -6807,25 +7018,26 @@ def sync_runtime_env(settings: dict):
                 "auto_compact_threshold_percent", "85"
             )
 
-        env_file = PROJECT_ROOT / ".env"
+        env_file = DATA_ROOT / ".env"
         _write_env_file(env_file, settings)
 
         if os_agent.ai_engine:
             os_agent.ai_engine.api_key = os.getenv("API_KEY", "")
-            api_base_url = os.getenv("API_BASE_URL", "https://yunwu.ai")
+            api_base_url = os.getenv("API_BASE_URL", "https://api.deepseek.com")
             os_agent.ai_engine.api_base_url = AIEngine.normalize_api_base_url(api_base_url)
             os_agent.ai_engine.api_path = AIEngine.get_api_path_for_base_url(
                 os_agent.ai_engine.api_base_url
             )
-            os_agent.ai_engine.model = os.getenv("API_MODEL", "gpt-4")
+            os_agent.ai_engine.model = os.getenv("API_MODEL", "deepseek-v4-pro")
         if os_agent:
-            os_agent.max_steps = int(os.getenv("MAX_STEPS", "100"))
-            os_agent.max_tokens = int(os.getenv("MAX_TOKENS", "50000"))
-            os_agent.context_window = int(os.getenv("CONTEXT_WINDOW", "128000"))
-            os_agent.max_web_searches = int(os.getenv("MAX_WEB_SEARCHES", "8"))
+            os_agent.max_steps = env_int("MAX_STEPS", 100)
+            os_agent.max_tokens = env_int("MAX_TOKENS", 50000)
+            os_agent.context_window = env_int("CONTEXT_WINDOW", 256000)
+            os_agent.max_web_searches = env_int("MAX_WEB_SEARCHES", 8)
             os_agent.context_compactor.refresh_policy(os_agent.context_window, None)
             os_agent.compress_at = os_agent.context_compactor.policy.trigger_tokens
             os_agent.show_knowledge_appendix = False
+            os_agent._latest_context_usage = None
             if os_agent.ai_engine:
                 os_agent.ai_engine.max_tokens = os_agent.max_tokens
             os_agent.rebuild_langgraph_runner()
@@ -6843,6 +7055,7 @@ def sync_runtime_env(settings: dict):
                 executor.context_compactor.refresh_policy(executor.context_window, None)
                 executor.compress_at = executor.context_compactor.policy.trigger_tokens
                 executor.show_knowledge_appendix = False
+                executor._latest_context_usage = None
                 if executor.ai_engine:
                     executor.ai_engine.api_key = os.getenv("API_KEY", "")
                     executor.ai_engine.api_base_url = (
@@ -6855,7 +7068,7 @@ def sync_runtime_env(settings: dict):
                             executor.ai_engine.api_base_url
                         )
                     )
-                    executor.ai_engine.model = os.getenv("API_MODEL", "gpt-4")
+                    executor.ai_engine.model = os.getenv("API_MODEL", "deepseek-v4-pro")
                     executor.ai_engine.max_tokens = executor.max_tokens
                 if not any(
                     run.executor is executor
@@ -6928,25 +7141,70 @@ def delete_api_config(config_name):
 
 @eel.expose
 def set_active_config(config_name):
-    """Set a configuration as active"""
+    """Set a configuration as active and apply it to the runtime immediately."""
     try:
         from agent.core.config_manager import ConfigManager
 
         config_manager = ConfigManager()
-        if not config_manager.set_active_config(config_name):
+        config = config_manager.get_config(config_name)
+        if not config or not config_manager.set_active_config(config_name):
             return {"success": False, "error": "Configuration not found"}
         config_manager.export_to_env(config_name)
-        if os_agent.ai_engine:
-            os_agent.ai_engine.api_key = os.getenv("API_KEY", "")
-            os_agent.ai_engine.api_base_url = AIEngine.normalize_api_base_url(
-                os.getenv("API_BASE_URL", "")
+        env_file = DATA_ROOT / ".env"
+        _write_env_file(
+            env_file,
+            {
+                "api_base_url": config.get("api_base_url", ""),
+                "api_key": config.get("api_key", ""),
+                "api_model": config.get("api_model", ""),
+            },
+        )
+        load_dotenv(env_file, override=True)
+        with state_lock:
+            executors = set(conversation_executors.values()) | {os_agent}
+        for executor in executors:
+            if not executor.ai_engine:
+                continue
+            executor.ai_engine.api_key = config.get("api_key", "")
+            executor.ai_engine.api_base_url = AIEngine.normalize_api_base_url(
+                config.get("api_base_url", "")
             )
-            os_agent.ai_engine.api_path = AIEngine.get_api_path_for_base_url(
-                os_agent.ai_engine.api_base_url
+            executor.ai_engine.api_path = AIEngine.get_api_path_for_base_url(
+                executor.ai_engine.api_base_url
             )
-            os_agent.ai_engine.model = os.getenv("API_MODEL", "gpt-4")
-            os_agent.rebuild_langgraph_runner()
-        return {"success": True}
+            executor.ai_engine.model = config.get("api_model", "")
+            if not any(
+                run.executor is executor
+                and run.status in {"running", "waiting"}
+                for run in conversation_runs.values()
+            ):
+                executor.rebuild_langgraph_runner()
+        return {"success": True, "config": config, "active": config_name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@eel.expose
+def preview_context_window(context_window):
+    """Live-preview a context window choice without persisting .env."""
+    try:
+        context_window = int(context_window or 0)
+        if context_window <= 0:
+            raise ValueError("context_window must be positive")
+        context_window = min(2_000_000, max(8_000, context_window))
+        os.environ["CONTEXT_WINDOW"] = str(context_window)
+        with state_lock:
+            executors = set(conversation_executors.values()) | {os_agent}
+        for executor in executors:
+            executor.context_window = context_window
+            executor.context_compactor.refresh_policy(context_window, None)
+            executor.compress_at = executor.context_compactor.policy.trigger_tokens
+            executor._latest_context_usage = None
+        return {
+            "success": True,
+            "context_window": context_window,
+            "compress_at": executor.compress_at,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -6969,15 +7227,15 @@ def get_token_count(conversation_id: str = ""):
         return {
             "tokens": 0,
             "compress_at": int(
-                int(os.getenv("CONTEXT_WINDOW", "128000"))
-                * int(os.getenv("AUTO_COMPACT_THRESHOLD_PERCENT", "85"))
+                env_int("CONTEXT_WINDOW", 256000)
+                * env_int("AUTO_COMPACT_THRESHOLD_PERCENT", 85)
                 / 100
             ),
-            "auto_compact_threshold_percent": int(
-                os.getenv("AUTO_COMPACT_THRESHOLD_PERCENT", "85")
+            "auto_compact_threshold_percent": env_int(
+                "AUTO_COMPACT_THRESHOLD_PERCENT", 85
             ),
-            "max_tokens": int(os.getenv("CONTEXT_WINDOW", "128000")),
-            "response_max_tokens": int(os.getenv("MAX_TOKENS", "50000")),
+            "max_tokens": env_int("CONTEXT_WINDOW", 256000),
+            "response_max_tokens": env_int("MAX_TOKENS", 50000),
         }
 
 
@@ -6994,57 +7252,235 @@ def get_embedding_status():
 
 @eel.expose
 def list_skills():
-    """列出所有skills，标记是否为内置"""
+    """List installed skills using the explicit built-in allowlist."""
     try:
-        project_root = PROJECT_ROOT
-        workspace_path = project_root / "workspace"
+        skills: dict[str, dict] = {}
+        for location, skills_path in _installed_skill_roots():
+            if not skills_path.exists():
+                continue
+            for skill_dir in skills_path.iterdir():
+                if not _is_skill_directory(skill_dir):
+                    continue
+                metadata = _skill_directory_metadata(skill_dir)
+                skills[skill_dir.name] = {
+                    **metadata,
+                    "builtin": skill_dir.name in BUILTIN_SKILL_NAMES,
+                    "location": location,
+                }
 
-        skills = []
-
-        # 内置skills
-        builtin_skills_path = project_root / "agent" / "skills"
-        if builtin_skills_path.exists():
-            for skill_dir in builtin_skills_path.iterdir():
-                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-                    skills.append(
-                        {"name": skill_dir.name, "description": "", "builtin": True}
-                    )
-
-        # 用户skills
-        user_skills_path = workspace_path / "skills"
-        if user_skills_path.exists():
-            for skill_dir in user_skills_path.iterdir():
-                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-                    skills.append(
-                        {"name": skill_dir.name, "description": "", "builtin": False}
-                    )
-
-        return skills
+        return sorted(
+            skills.values(),
+            key=lambda skill: (
+                not bool(skill["builtin"]),
+                str(skill["name"]).casefold(),
+            ),
+        )
     except Exception as e:
         print(f"Error listing skills: {e}")
         return []
+
+
+def _installed_skill_roots() -> tuple[tuple[str, Path], ...]:
+    """Return installed roots in override order (workspace wins)."""
+    return (
+        ("agent", PROJECT_ROOT / "agent" / "skills"),
+        ("workspace", DATA_ROOT / "workspace" / "skills"),
+    )
+
+
+def _valid_skill_name(skill_name: object) -> bool:
+    name = str(skill_name or "")
+    return bool(name) and Path(name).name == name and name not in {".", ".."}
+
+
+def _is_skill_directory(skill_dir: Path) -> bool:
+    return (
+        skill_dir.is_dir()
+        and not skill_dir.is_symlink()
+        and _valid_skill_name(skill_dir.name)
+        and (skill_dir / "SKILL.md").is_file()
+    )
+
+
+def _skill_directory_metadata(skill_dir: Path) -> dict[str, str]:
+    """Read the small display metadata needed by the desktop UI."""
+    metadata = {"name": skill_dir.name, "description": ""}
+    try:
+        content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        if not match:
+            return metadata
+        for line in match.group(1).splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            if key.strip() == "description":
+                metadata["description"] = value.strip().strip("\"'")
+                break
+    except (OSError, UnicodeError):
+        pass
+    return metadata
+
+
+def _find_installed_skill_dir(skill_name: str) -> Optional[Path]:
+    """Find the active installed copy, preferring workspace skills."""
+    for _, root in reversed(_installed_skill_roots()):
+        skill_dir = root / skill_name
+        if _is_skill_directory(skill_dir):
+            return skill_dir
+    return None
+
+
+def _skill_store_root() -> Path:
+    """Resolve the local catalog folder, optionally overridden by the environment."""
+    configured = os.getenv("SKILL_STORE_PATH", "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        return (
+            configured_path
+            if configured_path.is_absolute()
+            else PROJECT_ROOT / configured_path
+        )
+    return DATA_ROOT / "workspace" / "skill-store"
+
+
+def _validate_store_skill_tree(source: Path) -> None:
+    """Reject links and unexpectedly large catalog entries before copying."""
+    file_count = 0
+    total_bytes = 0
+    for item in source.rglob("*"):
+        if item.is_symlink():
+            raise ValueError("Skill store entries cannot contain symbolic links")
+        if not item.is_file():
+            continue
+        file_count += 1
+        if file_count > MAX_SKILL_IMPORT_FILES:
+            raise ValueError("Skill folder has too many files")
+        file_size = item.stat().st_size
+        if file_size > MAX_SKILL_IMPORT_FILE_BYTES:
+            raise ValueError("A skill file exceeds the 12 MB limit")
+        total_bytes += file_size
+        if total_bytes > MAX_SKILL_IMPORT_BYTES:
+            raise ValueError("Skill folder exceeds the 30 MB limit")
+
+
+def _sync_nonbuiltin_skills_to_store(store_root: Path) -> None:
+    """Seed missing catalog entries from installed non-built-in skills."""
+    installed: dict[str, Path] = {}
+    for _, skills_root in _installed_skill_roots():
+        if not skills_root.exists():
+            continue
+        for skill_dir in skills_root.iterdir():
+            if _is_skill_directory(skill_dir):
+                installed[skill_dir.name] = skill_dir
+
+    with _skill_import_lock:
+        for name, source in installed.items():
+            if name in BUILTIN_SKILL_NAMES:
+                continue
+            destination = _resolve_within(store_root, name)
+            if destination.exists():
+                continue
+            _validate_store_skill_tree(source)
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=".skill-store-seed-", dir=store_root)
+            )
+            try:
+                shutil.copytree(source, staging_dir, dirs_exist_ok=True)
+                staging_dir.replace(destination)
+            except Exception:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
+
+
+@eel.expose
+def list_skill_store():
+    """List catalog entries without modifying the installed skills directory."""
+    try:
+        store_root = _skill_store_root()
+        store_root.mkdir(parents=True, exist_ok=True)
+        _sync_nonbuiltin_skills_to_store(store_root)
+        entries = []
+        for skill_dir in store_root.iterdir():
+            if not _is_skill_directory(skill_dir):
+                continue
+            name = skill_dir.name
+            entries.append(
+                {
+                    **_skill_directory_metadata(skill_dir),
+                    "installed": _find_installed_skill_dir(name) is not None,
+                    "builtin": name in BUILTIN_SKILL_NAMES,
+                }
+            )
+        return sorted(entries, key=lambda entry: str(entry["name"]).casefold())
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc), "skills": []}
+
+
+@eel.expose
+def install_store_skill(skill_name: str):
+    """Copy one catalog skill into workspace/skills, keeping the catalog intact."""
+    if not _valid_skill_name(skill_name):
+        return {"success": False, "error": "Invalid skill name"}
+
+    try:
+        store_root = _skill_store_root()
+        source = _resolve_within(store_root, skill_name)
+        if not _is_skill_directory(source):
+            return {"success": False, "error": "Skill not found in store"}
+        _validate_store_skill_tree(source)
+
+        skills_dir = _resolve_within(DATA_ROOT / "workspace", "skills")
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        destination = _resolve_within(skills_dir, skill_name)
+        with _skill_import_lock:
+            if _find_installed_skill_dir(skill_name) is not None:
+                return {
+                    "success": False,
+                    "error": f"Skill '{skill_name}' is already installed",
+                }
+            staging_dir = Path(
+                tempfile.mkdtemp(prefix=".skill-store-install-", dir=skills_dir)
+            )
+            try:
+                shutil.copytree(source, staging_dir, dirs_exist_ok=True)
+                staging_dir.replace(destination)
+            except Exception:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
+        return {"success": True, "name": skill_name}
+    except (OSError, ValueError) as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@eel.expose
+def open_skill_store_folder():
+    """Open the backing catalog folder in the platform file manager."""
+    try:
+        store_root = _skill_store_root()
+        store_root.mkdir(parents=True, exist_ok=True)
+        abs_path = str(store_root.resolve())
+        if platform.system() == "Darwin":
+            subprocess.run(["open", abs_path], check=False)
+        elif platform.system() == "Windows":
+            os.startfile(abs_path)
+        else:
+            subprocess.run(["xdg-open", abs_path], check=False)
+        return {"success": True, "path": abs_path}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @eel.expose
 def read_skill_file(skill_name: str):
     """读取skill的SKILL.md文件"""
     try:
-        if Path(skill_name).name != skill_name:
+        if not _valid_skill_name(skill_name):
             return {"error": "Invalid skill name"}
-        project_root = PROJECT_ROOT
-        workspace_path = project_root / "workspace"
-
-        # 先检查workspace/skills
-        skill_path = workspace_path / "skills" / skill_name / "SKILL.md"
-        if not skill_path.exists():
-            # 再检查agent/skills
-            skill_path = project_root / "agent" / "skills" / skill_name / "SKILL.md"
-
-        if not skill_path.exists():
+        skill_dir = _find_installed_skill_dir(skill_name)
+        if skill_dir is None:
             return {"error": "Skill not found"}
-
-        with open(skill_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         return {"content": content}
     except Exception as e:
         return {"error": str(e)}
@@ -7057,17 +7493,10 @@ def open_skill_folder(skill_name: str):
         import subprocess
         import platform
 
-        if Path(skill_name).name != skill_name:
+        if not _valid_skill_name(skill_name):
             return {"success": False, "error": "Invalid skill name"}
-        project_root = PROJECT_ROOT
-
-        # 先检查workspace/skills
-        skill_path = project_root / "workspace" / "skills" / skill_name
-        if not skill_path.exists():
-            # 再检查agent/skills
-            skill_path = project_root / "agent" / "skills" / skill_name
-
-        if not skill_path.exists():
+        skill_path = _find_installed_skill_dir(skill_name)
+        if skill_path is None:
             return {"success": False, "error": "Skill not found"}
 
         abs_path = str(skill_path.resolve())
@@ -7156,11 +7585,11 @@ def import_skill_folder(files: object):
         if not any(path.parts[1:] == ("SKILL.md",) for path, _ in imported_files):
             raise ValueError("SKILL.md not found in selected folder")
 
-        skills_dir = _resolve_within(PROJECT_ROOT / "workspace", "skills")
+        skills_dir = _resolve_within(DATA_ROOT / "workspace", "skills")
         skills_dir.mkdir(parents=True, exist_ok=True)
         destination = _resolve_within(skills_dir, skill_name)
         with _skill_import_lock:
-            if destination.exists():
+            if _find_installed_skill_dir(skill_name) is not None:
                 return {
                     "success": False,
                     "error": f"Skill '{skill_name}' already exists",
@@ -7184,26 +7613,23 @@ def import_skill_folder(files: object):
 
 @eel.expose
 def delete_skill(skill_name: str):
-    """删除skill（只能删除用户skill）"""
+    """Delete installed non-built-in copies without touching the store."""
     try:
-        import shutil
-
-        if Path(skill_name).name != skill_name:
+        if not _valid_skill_name(skill_name):
             return {"success": False, "error": "Invalid skill name"}
-        project_root = PROJECT_ROOT
-
-        # 检查是否为内置skill
-        builtin_path = project_root / "agent" / "skills" / skill_name
-        if builtin_path.exists():
+        if skill_name in BUILTIN_SKILL_NAMES:
             return {"success": False, "error": "Cannot delete built-in skill"}
 
-        # 检查用户skill
-        skill_path = project_root / "workspace" / "skills" / skill_name
-
-        if not skill_path.exists():
+        targets = [
+            root / skill_name
+            for _, root in _installed_skill_roots()
+            if _is_skill_directory(root / skill_name)
+        ]
+        if not targets:
             return {"success": False, "error": "Skill not found"}
-
-        shutil.rmtree(skill_path)
+        with _skill_import_lock:
+            for skill_path in targets:
+                shutil.rmtree(skill_path)
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -7214,7 +7640,7 @@ def get_data_stats():
     """Get data integration statistics"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         integrator.prune_orphan_entries()
@@ -7228,7 +7654,7 @@ def get_recent_data_entries(limit: int = 20):
     """Get recent data entries"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         integrator.prune_orphan_entries()
@@ -7243,7 +7669,7 @@ def get_recent_tasks(limit: int = 20):
     """Get recent tasks (grouped)"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         integrator.prune_orphan_entries()
@@ -7258,7 +7684,7 @@ def delete_data_entry(entry_id: str):
     """Delete a data entry"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         success = integrator.delete_entry(entry_id)
@@ -7273,7 +7699,7 @@ def delete_task_data(task_id: str):
     """Delete all data for a task"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         success = integrator.delete_task(task_id)
@@ -7289,7 +7715,7 @@ def clear_all_data():
     """Clear all data (factory reset)"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         success = integrator.clear_all()
@@ -7308,7 +7734,7 @@ def extract_preferences_from_data(task_id: str = None):
         from agent.core.data_integrator import DataIntegrator
         from agent.core.preference_manager import PreferenceManager
         from agent.core.ai_engine import AIEngine
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
 
         print(f"[DEBUG] workspace_path: {workspace_path}")
@@ -7323,7 +7749,7 @@ def extract_preferences_from_data(task_id: str = None):
         # 获取API配置
         api_base_url = os.getenv("API_BASE_URL")
         api_key = os.getenv("API_KEY")
-        model = os.getenv("API_MODEL", "gpt-4")
+        model = os.getenv("API_MODEL", "deepseek-v4-pro")
         print(f"[DEBUG] API配置: base_url={api_base_url}, model={model}")
 
         if not api_base_url or not api_key:
@@ -7352,7 +7778,7 @@ def get_preference_prompt_context():
     """Get preference context for prompt"""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         return pm.generate_prompt_context()
@@ -7365,7 +7791,7 @@ def ingest_manual_config(config_type: str, config_data: dict):
     """Ingest manual configuration"""
     try:
         from agent.core.data_integrator import DataIntegrator
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         entry = integrator.ingest_manual_config(config_type, config_data)
@@ -7379,7 +7805,7 @@ def get_all_preferences():
     """Get all preferences"""
     try:
         from agent.core.preference_manager import PreferenceManager, PreferenceCategory
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         return pm.get_all_preferences()
@@ -7392,7 +7818,7 @@ def set_preference(category: str, key: str, value):
     """Set a preference"""
     try:
         from agent.core.preference_manager import PreferenceManager, PreferenceCategory
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         cat = PreferenceCategory(category)
@@ -7407,7 +7833,7 @@ def delete_preference(category: str, key: str):
     """Delete a preference"""
     try:
         from agent.core.preference_manager import PreferenceManager, PreferenceCategory
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         cat = PreferenceCategory(category)
@@ -7422,7 +7848,7 @@ def clear_all_preferences():
     """Clear all saved preferences."""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         success = pm.clear_all()
@@ -7436,7 +7862,7 @@ def list_preference_snapshots():
     """List preference snapshots"""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         return pm.list_snapshots()
@@ -7449,7 +7875,7 @@ def create_preference_snapshot(description: str = ""):
     """Create a preference snapshot"""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         snapshot = pm.create_snapshot(description)
@@ -7463,7 +7889,7 @@ def restore_preference_snapshot():
     """Restore latest preference snapshot"""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         snapshots = pm.list_snapshots()
@@ -7481,7 +7907,7 @@ def restore_preference_snapshot_by_id(snapshot_id: str):
     """Restore preference snapshot by ID"""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         success = pm.restore_snapshot(snapshot_id)
@@ -7495,7 +7921,7 @@ def delete_preference_snapshot(snapshot_id: str):
     """Delete a preference snapshot"""
     try:
         from agent.core.preference_manager import PreferenceManager
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         pm = PreferenceManager(preference_dir=workspace_path / "preferences")
         success = pm.delete_snapshot(snapshot_id)
@@ -7509,7 +7935,7 @@ def get_knowledge_stats():
     """Get knowledge base statistics"""
     try:
         from agent.core.knowledge_base import KnowledgeBase
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         kb = KnowledgeBase(knowledge_dir=workspace_path / "knowledge")
         return kb.get_knowledge_stats()
@@ -7522,7 +7948,7 @@ def list_knowledge_entries():
     """List knowledge entries"""
     try:
         from agent.core.knowledge_base import KnowledgeBase, KnowledgeType
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         kb = KnowledgeBase(knowledge_dir=workspace_path / "knowledge")
         entries = kb.list_entries()
@@ -7536,7 +7962,7 @@ def search_knowledge(query: str, knowledge_type: str = ""):
     """Search knowledge base"""
     try:
         from agent.core.knowledge_base import KnowledgeBase, KnowledgeType
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         kb = KnowledgeBase(knowledge_dir=workspace_path / "knowledge")
         ktype = KnowledgeType(knowledge_type) if knowledge_type else None
@@ -7553,7 +7979,7 @@ def add_knowledge(knowledge_type: str, title: str, content: str, tags: list = No
     """Add knowledge entry"""
     try:
         from agent.core.knowledge_base import KnowledgeBase, KnowledgeType
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         kb = KnowledgeBase(knowledge_dir=workspace_path / "knowledge")
         ktype = KnowledgeType(knowledge_type)
@@ -7572,7 +7998,7 @@ def extract_knowledge_from_memory(task_id: str = None):
         from agent.core.knowledge_base import KnowledgeBase
         from agent.core.ai_engine import AIEngine
 
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         memory_path = os_agent.memory_manager.memory_dir
 
@@ -7608,7 +8034,7 @@ def extract_knowledge_from_memory(task_id: str = None):
 
         api_base_url = os.getenv("API_BASE_URL")
         api_key = os.getenv("API_KEY")
-        model = os.getenv("API_MODEL", "gpt-4")
+        model = os.getenv("API_MODEL", "deepseek-v4-pro")
 
         result = kb.extract_knowledge_from_memory(
             memory_text=full_memory_text,
@@ -7629,7 +8055,7 @@ def get_knowledge_conflicts():
     """Get knowledge conflicts"""
     try:
         from agent.core.knowledge_base import KnowledgeBase
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         kb = KnowledgeBase(knowledge_dir=workspace_path / "knowledge")
         return kb.get_conflicts()
@@ -7642,7 +8068,7 @@ def delete_knowledge_entry(entry_id: str):
     """Delete a knowledge entry"""
     try:
         from agent.core.knowledge_base import KnowledgeBase
-        project_root = PROJECT_ROOT
+        project_root = DATA_ROOT
         workspace_path = project_root / "workspace"
         kb = KnowledgeBase(knowledge_dir=workspace_path / "knowledge")
         success = kb.delete_knowledge(entry_id)
@@ -7676,6 +8102,120 @@ def open_workspace_subfolder(folder: str, subfolder: str):
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+_EDGE_TTS_TEXT_LIMIT = 2000
+
+
+def _trim_tts_silence(mp3_bytes: bytes, max_pause: float = 0.3) -> bytes:
+    """Cap interior silences in edge-tts audio so sentence pauses stay short."""
+    if not mp3_bytes:
+        return mp3_bytes
+    source_path = ""
+    output_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as source:
+            source.write(mp3_bytes)
+            source_path = source.name
+        output_path = f"{source_path}.trim.mp3"
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                source_path,
+                "-af",
+                (
+                    "silenceremove=start_periods=0:stop_periods=-1:"
+                    f"stop_duration={max_pause:.2f}:stop_threshold=-40dB"
+                ),
+                "-c:a",
+                "libmp3lame",
+                "-q:a",
+                "5",
+                output_path,
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0 or not Path(output_path).is_file():
+            return mp3_bytes
+        trimmed = Path(output_path).read_bytes()
+        return trimmed if trimmed else mp3_bytes
+    except Exception:
+        return mp3_bytes
+    finally:
+        try:
+            if source_path:
+                os.unlink(source_path)
+        except OSError:
+            pass
+        try:
+            if output_path:
+                os.unlink(output_path)
+        except OSError:
+            pass
+
+
+def _edge_tts_speech_sync(text: str, voice: str) -> bytes:
+    """Synthesize speech with Microsoft Edge neural voices on a fresh loop."""
+    import asyncio
+
+    import edge_tts
+
+    async def _speak() -> bytes:
+        communicate = edge_tts.Communicate(text, voice)
+        audio = bytearray()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                audio.extend(chunk.get("data") or b"")
+        return bytes(audio)
+
+    last_error = None
+    for attempt in range(2):
+        loop = asyncio.new_event_loop()
+        try:
+            audio = loop.run_until_complete(_speak())
+            if audio:
+                return _trim_tts_silence(audio)
+            last_error = RuntimeError("edge-tts 未返回音频")
+        except Exception as exc:
+            last_error = exc
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+        if attempt == 0:
+            time.sleep(1.2)
+    if last_error is not None:
+        raise last_error
+    return b""
+
+
+@eel.expose
+def voice_tts_speak(text: str, voice: str = "zh-CN-XiaoxiaoNeural"):
+    """Synthesize speech for voice mode and return base64 MP3 audio.
+
+    The frontend plays the returned audio directly; on any failure it falls
+    back to the system speech synthesizer, so a missing package or network
+    outage never blocks voice mode.
+    """
+    try:
+        audio = _edge_tts_speech_sync(
+            str(text or "").strip()[:_EDGE_TTS_TEXT_LIMIT],
+            str(voice or "zh-CN-XiaoxiaoNeural").strip(),
+        )
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+    if not audio:
+        return {"success": False, "error": "edge-tts 未返回音频"}
+    return {
+        "success": True,
+        "audio_base64": base64.b64encode(audio).decode("ascii"),
+    }
 
 
 def _create_secured_eel_app(port: int):
@@ -7736,6 +8276,31 @@ def _create_secured_eel_app(port: int):
 
     app = bottle.Bottle()
 
+    @app.get("/__jcodex_media")
+    def serve_chat_media():
+        """Stream allowlisted local chat media without embedding it in messages."""
+        query_token = str(bottle.request.query.getunicode("session") or "")
+        if not query_token or not secrets.compare_digest(query_token, session_token):
+            bottle.abort(403, "Invalid desktop media session")
+        try:
+            path, mime_type = _resolve_chat_media_file(
+                str(bottle.request.query.getunicode("path") or ""),
+                str(
+                    bottle.request.query.getunicode("conversation_id") or ""
+                ),
+            )
+        except ValueError:
+            bottle.abort(404, "Chat media is unavailable")
+        response = bottle.static_file(
+            path.name,
+            root=str(path.parent),
+            mimetype=mime_type,
+            download=False,
+        )
+        response.set_header("Cache-Control", "private, max-age=300")
+        response.set_header("Content-Disposition", "inline")
+        return response
+
     @app.hook("before_request")
     def validate_host():
         host = str(bottle.request.get_header("Host") or "").lower()
@@ -7764,7 +8329,8 @@ def _create_secured_eel_app(port: int):
                     "default-src 'self'",
                     "script-src 'self' 'unsafe-inline'",
                     "style-src 'self' 'unsafe-inline'",
-                    "img-src 'self' data: blob:",
+                    "img-src 'self' https: http: data: blob:",
+                    "media-src 'self' https: http: blob:",
                     "font-src 'self' data:",
                     (
                         "connect-src 'self' "
@@ -7861,12 +8427,17 @@ def main():
     eel.init(str(ui_dir))
 
     try:
-        preferred_port = int(os.getenv("MINIBOT_DESKTOP_PORT", "8000"))
+        preferred_port = env_int("MINIBOT_DESKTOP_PORT", 8000)
     except (TypeError, ValueError):
         preferred_port = 8000
     port = _find_available_desktop_port(preferred_port)
+    # 让 Electron 壳等外部启动器能可靠地发现实际端口（数据目录可能被重定向）。
+    try:
+        (DATA_ROOT / "desktop_port.txt").write_text(str(port))
+    except Exception:
+        pass
     url = f"http://127.0.0.1:{port}/"
-    desktop_mode = os.getenv("MINIBOT_DESKTOP_MODE", "chrome").strip().lower()
+    desktop_mode = os.getenv("MINIBOT_DESKTOP_MODE", "browser").strip().lower()
     browser_mode = None if desktop_mode in {"browser", "server", "none"} else "chrome"
 
     secured_app, session_token = _create_secured_eel_app(port)
@@ -7876,9 +8447,25 @@ def main():
     print(f"Starting JCodex Desktop on {displayed_url}")
     if desktop_mode == "browser":
         import threading
-        import webbrowser
+        import subprocess
 
-        threading.Timer(0.8, lambda: webbrowser.open(launch_url)).start()
+        def _open_default_browser():
+            subprocess.Popen(["open", launch_url])
+
+            def _maximize_browser_window():
+                try:
+                    script = (
+                        'tell application "Finder" to set _b to bounds of window of desktop\n'
+                        'tell application "Google Chrome" to activate\n'
+                        'tell application "Google Chrome" to set bounds of front window to _b'
+                    )
+                    subprocess.Popen(["osascript", "-e", script])
+                except Exception:
+                    pass
+
+            threading.Timer(1.5, _maximize_browser_window).start()
+
+        threading.Timer(0.8, _open_default_browser).start()
     try:
         eel.start(
             start_page,

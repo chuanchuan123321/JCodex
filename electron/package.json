@@ -1,0 +1,15 @@
+{
+  "name": "jcodex",
+  "productName": "JCodex",
+  "version": "1.0.0",
+  "description": "JCodex desktop workbench",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-packager . JCodex --platform=darwin --arch=arm64 --icon=build/icon.icns --overwrite --out=dist"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-packager": "^17.1.2"
+  }
+}

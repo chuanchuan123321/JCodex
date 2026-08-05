@@ -352,6 +352,78 @@ def test_embedding_defaults_to_grok_fts_only_mode(monkeypatch):
     assert provider.status()["available"] is False
 
 
+def test_embedding_requires_every_parameter_or_fts_fallback(monkeypatch):
+    monkeypatch.setenv("API_BASE_URL", "https://api.main.example/v1")
+    monkeypatch.setenv("API_KEY", "sk-main")
+    monkeypatch.setenv("MEMORY_EMBEDDING_MODEL", "qwen3.7-text-embedding")
+    monkeypatch.setenv("MEMORY_EMBEDDING_DIMENSIONS", "1024")
+    monkeypatch.setenv("MEMORY_EMBEDDING_BASE_URL", "https://dashscope.example/v1")
+    monkeypatch.setenv("MEMORY_EMBEDDING_API_KEY", "sk-embed")
+
+    provider = create_embedding_provider()
+    assert provider.status()["provider"] == "api"
+    assert provider.status()["available"] is True
+    assert provider.dimensions == 1024
+
+    for var, value in [
+        ("MEMORY_EMBEDDING_MODEL", "qwen3.7-text-embedding"),
+        ("MEMORY_EMBEDDING_BASE_URL", "https://dashscope.example/v1"),
+        ("MEMORY_EMBEDDING_API_KEY", "sk-embed"),
+    ]:
+        monkeypatch.delenv(var, raising=False)
+        fallback = create_embedding_provider()
+        assert fallback.status()["provider"] == "disabled", var
+        assert fallback.status()["available"] is False, var
+        monkeypatch.setenv(var, value)
+
+    # 维度留空时使用向量模型的默认维度（0 表示未指定）
+    monkeypatch.delenv("MEMORY_EMBEDDING_DIMENSIONS", raising=False)
+    default_provider = create_embedding_provider()
+    assert default_provider.status()["provider"] == "api"
+    assert default_provider.dimensions == 0
+
+    # 维度填了非法值同样回退到关键词检索
+    monkeypatch.setenv("MEMORY_EMBEDDING_DIMENSIONS", "not-a-number")
+    assert create_embedding_provider().status()["provider"] == "disabled"
+
+
+def test_api_embedding_provider_uses_model_default_dimension(monkeypatch):
+    import agent.core.embedding_provider as embedding_provider
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.ok = True
+
+        def json(self):
+            return self._payload
+
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["payload"] = json
+        return _FakeResponse(
+            {
+                "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr(embedding_provider.requests, "post", fake_post)
+    provider = embedding_provider.ApiEmbeddingProvider(
+        api_base="https://dashscope.example/v1",
+        api_key="sk-embed",
+        model="qwen3.7-text-embedding",
+        dimensions=None,
+    )
+
+    vectors = provider.embed_batch(["hello"])
+
+    assert "dimensions" not in captured["payload"]
+    assert len(vectors[0]) == 3
+    assert provider.dimensions == 3
+
+
 def test_query_expansion_matches_grok_stop_word_rules():
     assert MemoryStore.extract_keywords("that thing we discussed about the API") == [
         "discussed",

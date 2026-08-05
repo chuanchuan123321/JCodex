@@ -7,11 +7,15 @@ from pathlib import Path
 from agent.config.schema import Config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_ROOT = Path(os.getenv("JCODEX_DATA_DIR", "") or PROJECT_ROOT).expanduser().resolve()
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
-    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    load_dotenv(DATA_ROOT / ".env", override=True)
+    if not (DATA_ROOT / ".env").exists():
+        load_dotenv(PROJECT_ROOT / ".env", override=True)
 except ImportError:
     pass
 

@@ -25,7 +25,7 @@ class ChannelsConfig(BaseModel):
 class AgentDefaults(BaseModel):
     """Default agent configuration."""
 
-    model: str = "anthropic/claude-opus-4-5"
+    model: str = "deepseek-v4-pro"
     max_tokens: int = 4096
     temperature: float = 0.7
 

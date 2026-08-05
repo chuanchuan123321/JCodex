@@ -36,6 +36,28 @@ from agent.core.tool_result import ToolExecutionResult
 MAX_TASK_IMAGE_BYTES = 12 * 1024 * 1024
 _TASK_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
+
+def _vision_tools_enabled() -> bool:
+    """Return whether the multimodal view_image tooling is enabled."""
+    return os.getenv("MODEL_SUPPORTS_VISION", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def strip_disabled_vision_prompt(prompt: str) -> str:
+    """Remove the view_image tool line when multimodal vision is off."""
+    if _vision_tools_enabled():
+        return str(prompt or "")
+    return "\n".join(
+        line
+        for line in str(prompt or "").splitlines()
+        if not line.lstrip().startswith("- `view_image`")
+    )
+
+
 # A scoped child may use these file tools only when every mutation target stays
 # beneath one of its coordinator-assigned roots. Each inner tuple represents
 # alternative parameter spellings for one required target.
@@ -98,6 +120,7 @@ class ExtendedToolExecutor:
         project_root: Optional[str] = None,
         workspace_root: Optional[str] = None,
         protected_root: Optional[str] = None,
+        data_root: Optional[str] = None,
         restrict_reads_to_project: bool = False,
     ):
         self.shell_tool = ShellTool()
@@ -119,9 +142,20 @@ class ExtendedToolExecutor:
         self.protected_root = Path(
             protected_root or Path(__file__).resolve().parents[2]
         ).resolve()
+        # Runtime data root (user Application Support dir in the packaged app).
+        # File mutations are restricted to workspace/output and workspace/temp
+        # under this root, while the source/bundle tree stays protected too.
+        self.data_root = Path(data_root or self.protected_root).resolve()
+        self._protected_regions = tuple(
+            dict.fromkeys(
+                root
+                for root in (self.protected_root, self.data_root)
+                if root
+            )
+        )
         self.protected_write_roots = (
-            (self.protected_root / "workspace" / "output").resolve(),
-            (self.protected_root / "workspace" / "temp").resolve(),
+            self.workspace_output_root,
+            self.workspace_temp_root,
         )
         # Kept for callers using the old constructor; local reads are unrestricted.
         self.restrict_reads_to_project = bool(restrict_reads_to_project)
@@ -552,6 +586,12 @@ class ExtendedToolExecutor:
             )
         tools.extend(self._grok_compatible_tool_definitions())
         tools.extend(self._multi_agent_tool_definitions())
+        if not _vision_tools_enabled():
+            tools = [
+                tool
+                for tool in tools
+                if tool.get("function", {}).get("name") != "view_image"
+            ]
         return tools
 
     def _grok_compatible_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -1587,11 +1627,13 @@ class ExtendedToolExecutor:
             lexical_path = Path(os.path.abspath(str(candidate)))
             resolved_path = candidate.resolve(strict=False)
 
-            lexical_protected = self._is_within_directory(
-                lexical_path, self.protected_root
+            lexical_protected = any(
+                self._is_within_directory(lexical_path, region)
+                for region in self._protected_regions
             )
-            resolved_protected = self._is_within_directory(
-                resolved_path, self.protected_root
+            resolved_protected = any(
+                self._is_within_directory(resolved_path, region)
+                for region in self._protected_regions
             )
             lexical_allowed = any(
                 self._is_within_directory(lexical_path, root)

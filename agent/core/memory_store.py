@@ -21,6 +21,7 @@ from agent.core.embedding_provider import (
     create_embedding_provider,
     l2_distance,
 )
+from agent.core.env_utils import env_float, env_int
 
 
 MEMORY_CONTEXT_OPEN_TAG = "<memory-context>"
@@ -136,28 +137,19 @@ class MemoryStore:
         self.sessions_dir = self.workspace_dir / "sessions"
         self.index_path = self.workspace_dir / "index.sqlite"
         self.embedding_provider = embedding_provider or create_embedding_provider()
-        self.max_chunk_chars = int(
-            os.getenv("MEMORY_MAX_CHUNK_CHARS", str(MAX_CHUNK_CHARS))
+        self.max_chunk_chars = env_int("MEMORY_MAX_CHUNK_CHARS", MAX_CHUNK_CHARS)
+        self.chunk_overlap_chars = env_int(
+            "MEMORY_CHUNK_OVERLAP_CHARS", CHUNK_OVERLAP_CHARS
         )
-        self.chunk_overlap_chars = int(
-            os.getenv("MEMORY_CHUNK_OVERLAP_CHARS", str(CHUNK_OVERLAP_CHARS))
-        )
-        self.vector_weight = float(
-            os.getenv("MEMORY_VECTOR_WEIGHT", str(DEFAULT_VECTOR_WEIGHT))
-        )
-        self.text_weight = float(
-            os.getenv("MEMORY_TEXT_WEIGHT", str(DEFAULT_TEXT_WEIGHT))
-        )
-        self.min_score = float(os.getenv("MEMORY_MIN_SCORE", str(DEFAULT_MIN_SCORE)))
-        self.half_life_days = float(
-            os.getenv("MEMORY_HALF_LIFE_DAYS", str(DEFAULT_HALF_LIFE_DAYS))
-        )
+        self.vector_weight = env_float("MEMORY_VECTOR_WEIGHT", DEFAULT_VECTOR_WEIGHT)
+        self.text_weight = env_float("MEMORY_TEXT_WEIGHT", DEFAULT_TEXT_WEIGHT)
+        self.min_score = env_float("MEMORY_MIN_SCORE", DEFAULT_MIN_SCORE)
+        self.half_life_days = env_float("MEMORY_HALF_LIFE_DAYS", DEFAULT_HALF_LIFE_DAYS)
         self.mmr_enabled = os.getenv("MEMORY_MMR_ENABLED", "false").lower() in {
             "1", "true", "yes", "on"
         }
         self.mmr_lambda = min(
-            1.0,
-            max(0.0, float(os.getenv("MEMORY_MMR_LAMBDA", str(DEFAULT_MMR_LAMBDA)))),
+            1.0, max(0.0, env_float("MEMORY_MMR_LAMBDA", DEFAULT_MMR_LAMBDA))
         )
         self.source_weights = {"global": 1.0, "workspace": 1.0, "session": 1.0}
         self._lock = threading.RLock()
@@ -904,7 +896,7 @@ class MemoryStore:
             )
             connection.execute(
                 "INSERT OR REPLACE INTO index_metadata(key,value) VALUES(?,?)",
-                ("embedding_signature", signature),
+                ("embedding_signature", self._embedding_signature()),
             )
             connection.commit()
         finally:

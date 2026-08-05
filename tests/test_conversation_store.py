@@ -398,3 +398,60 @@ def test_agent_team_snapshot_replaces_only_its_own_newer_version(tmp_path) -> No
     team_a = next(event for event in persisted if event["team_id"] == "team-a")
     assert team_a["version"] == 3
     assert team_a["agents"][0]["status"] == "running"
+
+
+def test_list_order_follows_last_user_message_not_background_activity(
+    tmp_path, monkeypatch
+) -> None:
+    clock = {"value": "2026-08-03T00:00:00+00:00"}
+    monkeypatch.setattr(
+        ConversationStore, "_now", staticmethod(lambda: clock["value"])
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    first = store.create("first")
+    second = store.create("second")
+
+    def order() -> tuple[int, int]:
+        ids = [item["id"] for item in store.list()["conversations"]]
+        return ids.index(first["id"]), ids.index(second["id"])
+
+    first_before_second = lambda: order()[0] < order()[1]  # noqa: E731
+    assert first_before_second()
+
+    clock["value"] = "2026-08-03T00:01:00+00:00"
+    store.append_message(first["id"], {"type": "user", "content": "hi"})
+    assert first_before_second()
+
+    # Background assistant activity must not bump the task to the top.
+    clock["value"] = "2026-08-03T00:02:00+00:00"
+    store.append_message(second["id"], {"type": "assistant", "content": "done"})
+    assert first_before_second()
+
+    # A new user message still reorders the list.
+    clock["value"] = "2026-08-03T00:03:00+00:00"
+    store.append_message(second["id"], {"type": "user", "content": "again"})
+    assert not first_before_second()
+
+
+def test_recency_key_persists_in_index_metadata(tmp_path, monkeypatch) -> None:
+    clock = {"value": "2026-08-03T00:00:00+00:00"}
+    monkeypatch.setattr(
+        ConversationStore, "_now", staticmethod(lambda: clock["value"])
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    conversation = store.create("persisted")
+    assert _listed(store, conversation["id"])["last_user_message_at"] == ""
+
+    clock["value"] = "2026-08-03T00:05:00+00:00"
+    store.append_message(
+        conversation["id"], {"type": "user", "content": "hi"}
+    )
+    assert _listed(store, conversation["id"])["last_user_message_at"] == clock["value"]
+
+    store.append_message(
+        conversation["id"], {"type": "assistant", "content": "done"}
+    )
+    assert _listed(store, conversation["id"])["last_user_message_at"] == clock["value"]
+
+    reloaded = ConversationStore(tmp_path / "conversations")
+    assert _listed(reloaded, conversation["id"])["last_user_message_at"] == clock["value"]
