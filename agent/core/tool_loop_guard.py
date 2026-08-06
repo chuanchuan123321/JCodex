@@ -23,7 +23,6 @@ class ToolLoopGuard:
     }
     MUTATION_TOOLS = {
         "write",
-        "file_write",
         "edit",
         "generate_pdf",
         "generate_docx",

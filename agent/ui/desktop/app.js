@@ -4312,6 +4312,7 @@ function resetConversationView(conversation = getActiveConversation()) {
     closeChangeReview({restoreFocus: false});
     closeBrowserPreview(false);
     previewSessions.clear();
+    renderPreviewDock(false);
     previewSyncGeneration += 1;
     isAwaitingQuestion = false;
     pendingKnowledgeByMessageId.clear();
@@ -5391,6 +5392,7 @@ function renderConversation(conversation) {
         // indicator in a running state after a task switch or reload.
         syncActiveConversationProcessingUI();
         if (!isProcessing && isInitialized) setAppStatus('ready', '就绪');
+        refreshTaskRollbackButtons(activeConversationId);
     }
 }
 
@@ -6262,6 +6264,71 @@ async function approveTool(action) {
             conversationId, messageId, 'error', `确认失败：${error.message}`
         );
     }
+}
+
+async function rollbackTaskCard(summary) {
+    const button = summary?.querySelector?.('.modified-files-rollback');
+    if (!button || button.disabled) return;
+    const result = summary._modifiedFilesResult || {};
+    const conversationId = String(
+        result.conversation_id || activeConversationId || ''
+    );
+    const messageId = Number(
+        result.message_id || summary.dataset.messageId || 0
+    );
+    if (!conversationId || !messageId) {
+        showToast('缺少任务信息，无法回退', 'error');
+        return;
+    }
+    button.disabled = true;
+    button.textContent = '回退中…';
+    try {
+        const response = typeof eel.rollback_task === 'function'
+            ? await eel.rollback_task(conversationId, messageId)()
+            : null;
+        if (response && response.success) {
+            showToast(response.message || '回退成功', 'success');
+            button.textContent = '已回退';
+            button.classList.add('is-rolled-back');
+            refreshTaskRollbackButtons(conversationId);
+        } else {
+            showToast(response?.error || '回退失败', 'error', 4000);
+            button.disabled = false;
+            button.textContent = '回退 ⏎';
+        }
+    } catch (error) {
+        showToast('回退失败：' + String(error?.message || error), 'error', 4000);
+        button.disabled = false;
+        button.textContent = '回退 ⏎';
+    }
+}
+
+let taskRollbackRefreshSeq = 0;
+async function refreshTaskRollbackButtons(conversationId) {
+    const convId = String(conversationId || activeConversationId || '');
+    if (!convId || typeof eel.get_task_rollback_status !== 'function') return;
+    const seq = ++taskRollbackRefreshSeq;
+    let available = {};
+    try {
+        const response = await eel.get_task_rollback_status(convId)();
+        if (seq !== taskRollbackRefreshSeq) return;
+        if (!response?.success) return;
+        available = response.available || {};
+    } catch (_error) {
+        return;
+    }
+    document.querySelectorAll('.modified-files-summary').forEach(summary => {
+        const button = summary.querySelector('.modified-files-rollback');
+        if (!button || button.classList.contains('is-rolled-back')) return;
+        const messageId = Number(summary.dataset.messageId || 0);
+        const canRollback = Boolean(
+            messageId && available[String(messageId)]
+        );
+        if (!canRollback) {
+            button.disabled = true;
+            button.classList.add('is-rolled-back');
+        }
+    });
 }
 
 function showQuestionPrompt(questions, msgId, active = true, questionId = '') {
@@ -7370,7 +7437,7 @@ function getToolProgressCopy(toolName, params = {}) {
     const name = String(toolName || '').toLowerCase();
     const path = params.filePath || params.file_path || params.path || params.filename || '';
     const fileName = path ? String(path).split(/[\\/]/).pop() : '';
-    if (/write|create_file|file_write|edit/.test(name)) {
+    if (/write|edit/.test(name)) {
         return fileName ? `正在写入 ${fileName}` : '正在写入文件';
     }
     if (/bash|shell/.test(name)) return '正在运行命令';
@@ -7382,7 +7449,7 @@ function getToolProgressCopy(toolName, params = {}) {
 
 function getToolPreparingCopy(toolName) {
     const name = String(toolName || '').toLowerCase();
-    if (/write|create_file|file_write|edit/.test(name)) return '正在生成写入内容';
+    if (/write|edit/.test(name)) return '正在生成写入内容';
     if (/bash|shell/.test(name)) return '正在生成命令参数';
     if (/read/.test(name)) return '正在准备读取参数';
     if (/search|glob|grep/.test(name)) return '正在准备搜索参数';
@@ -8030,6 +8097,7 @@ function addModifiedFilesSummary(result, animate = true) {
                 <span class="modified-files-total" aria-label="新增 ${additions} 行，删除 ${deletions} 行" title="新增 ${additions} 行，删除 ${deletions} 行"><b class="modified-files-added">+${additions}</b> <b class="modified-files-deleted">-${deletions}</b></span>
             </div>
             ${reviewAvailable ? '<button class="modified-files-review" type="button">审核</button>' : ''}
+            ${result.rollback_available ? '<button class="modified-files-rollback" type="button" title="撤销这个任务对文件的全部修改，恢复到任务开始前的状态">回退 ⏎</button>' : ''}
         </div>
         <div class="modified-files-list">
             ${files.map((file, index) => `
@@ -8041,6 +8109,9 @@ function addModifiedFilesSummary(result, animate = true) {
     summary.querySelector('.modified-files-review')?.addEventListener('click', () => {
         openChangeReview(reviewResult);
     });
+    summary.querySelector('.modified-files-rollback')?.addEventListener('click', () => {
+        rollbackTaskCard(summary);
+    });
     summary.querySelectorAll('.modified-files-row').forEach(row => {
         row.addEventListener('click', () => {
             const index = Number(row.dataset.reviewFileIndex || 0);
@@ -8050,7 +8121,12 @@ function addModifiedFilesSummary(result, animate = true) {
     chatMessages.appendChild(summary);
     if (animate) requestAnimationFrame(() => summary.classList.add('is-visible'));
     else summary.classList.add('is-visible');
-    if (!isRestoringConversation) pinChatToBottom(chatMessages);
+    if (!isRestoringConversation) {
+        pinChatToBottom(chatMessages);
+        refreshTaskRollbackButtons(
+            result.conversation_id || activeConversationId
+        );
+    }
     return summary;
 }
 
@@ -8146,38 +8222,6 @@ function getPreviewStatusCopy(session) {
     };
 }
 
-function renderProjectPreviewCard(card, session) {
-    const copy = getPreviewStatusCopy(session);
-    const isReady = session.status === 'ready' && Boolean(session.url);
-    const location = session.host || (session.port ? `localhost:${session.port}` : '本地端口');
-    card.className = `project-preview-card is-${session.status}`;
-    card.dataset.previewId = session.previewId;
-    card.dataset.conversationId = session.conversationId;
-    card.innerHTML = `
-        <div class="project-preview-icon" aria-hidden="true">
-            <img class="theme-asset-mark" src="${THEME_ASSETS[getCurrentTheme()].mark}" alt="">
-            <span class="project-preview-status-dot"></span>
-        </div>
-        <div class="project-preview-copy">
-            <div class="project-preview-title-row">
-                <strong>${escapeHtml(session.name)}</strong>
-                <span class="project-preview-status-label">${escapeHtml(copy.label)}</span>
-            </div>
-            <span class="project-preview-meta">网站 · ${escapeHtml(location)}</span>
-            <span class="project-preview-detail">${escapeHtml(copy.detail)}</span>
-        </div>
-        <button class="project-preview-open" type="button"${isReady ? '' : ' disabled'}>
-            <span>${escapeHtml(copy.action)}</span>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M9 18l6-6-6-6"/>
-            </svg>
-        </button>
-        <span class="project-preview-progress" aria-hidden="true"><span></span></span>`;
-    card.querySelector('.project-preview-open')?.addEventListener('click', () => {
-        openBrowserPreview(session.previewId);
-    });
-}
-
 function upsertProjectPreview(raw, animate = true) {
     const session = normalizePreviewSession(raw);
     if (!session) return null;
@@ -8188,27 +8232,74 @@ function upsertProjectPreview(raw, animate = true) {
     }
 
     previewSessions.set(session.previewId, session);
-    const chatMessages = document.getElementById('chatMessages');
-    if (!chatMessages) return null;
-    let card = chatMessages.querySelector(
-        `.project-preview-card[data-preview-id="${cssEscape(session.previewId)}"]`
-    );
-    const isNew = !card;
-    if (isNew) {
-        chatMessages.classList.remove('is-welcome');
-        chatMessages.querySelector('.welcome-message')?.remove();
-        card = document.createElement('article');
-        chatMessages.appendChild(card);
-    }
-    renderProjectPreviewCard(card, session);
-    if (isNew && animate) requestAnimationFrame(() => card.classList.add('is-visible'));
-    else card.classList.add('is-visible');
-
     if (activePreviewId === session.previewId) updateOpenPreviewSession(session);
-    if (isNew && animate && !isRestoringConversation) {
-        followChatOutput(chatMessages);
+    renderPreviewDock(animate);
+    return null;
+}
+
+function renderPreviewDock(animate = true) {
+    const dock = document.getElementById('previewDock');
+    if (!dock) return;
+    const activeSessions = [...previewSessions.values()].filter(session =>
+        session.status === 'starting' || session.status === 'ready'
+    );
+    if (!activeSessions.length) {
+        dock.classList.remove('is-visible');
+        dock.setAttribute('aria-hidden', 'true');
+        return;
     }
-    return card;
+    dock.classList.add('is-visible');
+    dock.setAttribute('aria-hidden', 'false');
+    const existing = new Map(
+        [...dock.querySelectorAll('.preview-dock-pill')].map(pill => [
+            String(pill.dataset.previewId || ''), pill
+        ])
+    );
+    const fragment = document.createDocumentFragment();
+    activeSessions.forEach(session => {
+        let pill = existing.get(session.previewId);
+        if (!pill) {
+            pill = document.createElement('div');
+            pill.className = 'preview-dock-pill';
+            pill.dataset.previewId = session.previewId;
+            pill.setAttribute('role', 'button');
+            pill.setAttribute('tabindex', '0');
+            pill.innerHTML = `
+                <span class="preview-dock-dot" aria-hidden="true"></span>
+                <span class="preview-dock-name"></span>
+                <span class="preview-dock-status"></span>
+                <button class="preview-dock-stop" type="button" title="停止预览" aria-label="停止预览">
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>
+                </button>`;
+            pill.addEventListener('click', () => {
+                openBrowserPreview(String(pill.dataset.previewId || ''));
+            });
+            pill.addEventListener('keydown', event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    openBrowserPreview(String(pill.dataset.previewId || ''));
+                }
+            });
+            pill.querySelector('.preview-dock-stop')?.addEventListener('click', event => {
+                event.stopPropagation();
+                event.preventDefault();
+                stopPreviewSession(String(pill.dataset.previewId || ''));
+            });
+        }
+        const copy = getPreviewStatusCopy(session);
+        const isReady = session.status === 'ready';
+        pill.classList.toggle('is-ready', isReady);
+        pill.classList.toggle('is-starting', session.status === 'starting');
+        pill.querySelector('.preview-dock-name').textContent = session.name;
+        pill.querySelector('.preview-dock-status').textContent = isReady
+            ? (session.port ? `:${session.port}` : '运行中')
+            : copy.label;
+        pill.title = `${session.name} · ${copy.detail}`;
+        fragment.appendChild(pill);
+        existing.delete(session.previewId);
+    });
+    existing.forEach(pill => pill.remove());
+    dock.replaceChildren(fragment);
 }
 
 async function syncPreviewSessions(conversationId) {
@@ -8230,6 +8321,27 @@ async function syncPreviewSessions(conversationId) {
             ...session,
             conversation_id: session.conversation_id || conversationId,
         }, false));
+        // Reconcile with the backend: a preview that stopped on its own, or
+        // whose owning manager was recreated without a delivered event, is
+        // absent from the snapshot and must leave the floating dock.
+        const reported = new Set(
+            sessions
+                .map(session => String(session.preview_id || session.id || '').trim())
+                .filter(Boolean)
+        );
+        let changed = false;
+        for (const [previewId, session] of previewSessions) {
+            if (String(session.conversationId || '') !== String(conversationId)) continue;
+            if (reported.has(previewId)) continue;
+            previewSessions.delete(previewId);
+            changed = true;
+        }
+        if (changed) {
+            if (activePreviewId && !previewSessions.has(activePreviewId)) {
+                closeBrowserPreview(false);
+            }
+            renderPreviewDock(false);
+        }
     } catch (error) {
         if (handleEelConnectionError(error)) return;
         console.error('Failed to sync preview sessions:', error);
@@ -8390,14 +8502,11 @@ async function openBrowserPreviewExternal() {
     }
 }
 
-async function stopBrowserPreview() {
-    const previewId = String(activePreviewId || '');
-    const session = previewSessions.get(previewId);
+async function stopPreviewSession(previewId) {
+    const session = previewSessions.get(String(previewId || ''));
     if (!session || ['stopped', 'error'].includes(session.status)
         || typeof eel === 'undefined'
         || typeof eel.stop_project_preview !== 'function') return;
-    const button = document.getElementById('browserPreviewStop');
-    if (button) button.disabled = true;
     try {
         const result = await eel.stop_project_preview(
             previewId, activeConversationId || ''
@@ -8411,9 +8520,17 @@ async function stopBrowserPreview() {
         });
         showToast('本地预览服务已停止', 'success');
     } catch (error) {
-        if (button) button.disabled = false;
         showToast(`停止预览失败：${error.message}`, 'error');
     }
+}
+
+async function stopBrowserPreview() {
+    const previewId = String(activePreviewId || '');
+    const session = previewSessions.get(previewId);
+    if (!session || ['stopped', 'error'].includes(session.status)) return;
+    const button = document.getElementById('browserPreviewStop');
+    if (button) button.disabled = true;
+    await stopPreviewSession(previewId);
 }
 
 function handlePreviewLinkClick(event) {

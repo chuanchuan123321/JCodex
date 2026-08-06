@@ -2407,7 +2407,6 @@ AI 想要执行以下操作：
         dangerous_tools = {
             "bash",
             "shell",
-            "file_write",  # 写入文件
             "write",  # 写入文件（OpenCode风格）
             "edit",  # 编辑文件
             "send_file",
@@ -2420,9 +2419,7 @@ AI 想要执行以下操作：
         """Get natural description of the action"""
         descriptions = {
             "file_read": f"读取文件 {params.get('path')}",
-            "file_write": f"写入文件 {params.get('path')}",
             "shell": f"执行命令: {params.get('command', '')[:50]}",
-            "read_pdf": f"读取PDF文件 {params.get('path')}",
             "send_file": f"发送文件到飞书 {params.get('path')}",
             "load_skill": f"加载 skill: {params.get('skill_name')}",
         }

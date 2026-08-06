@@ -80,3 +80,5 @@ workspace/projects/*
 !workspace/temp/.gitkeep
 !workspace/cache/.gitkeep
 !workspace/conversations/.gitkeep
+workspace/rollback/*
+desktop_port.txt

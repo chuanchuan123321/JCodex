@@ -191,15 +191,28 @@ _PROJECT_FOLDER_PICKER_TIMEOUT_SECONDS = 10 * 60
 _SKILL_IMPORT_IGNORED_PARTS = {".git", "__pycache__", "node_modules"}
 _MODIFIED_FILE_TOOL_PATHS = {
     "write": ("path",),
-    "file_write": ("path",),
-    "create_file": ("path",),
     "edit": ("filePath",),
-    # Legacy file tools remain executable for resumable historical tasks.
-    "file_delete": ("path",),
-    "copy_file": ("source", "destination"),
-    "move_file": ("source", "destination"),
     "generate_pdf": ("output_path",),
 }
+# Rollback only tracks file tools the model can actually call today.
+_ROLLBACK_FILE_TOOL_PATHS = {
+    "write": ("path",),
+    "edit": ("filePath",),
+    "generate_pdf": ("output_path",),
+}
+# Claude Code-style rollback: approved file mutations keep a before-state on
+# disk under workspace/rollback so the user can undo a completed task.
+ROLLBACK_ROOT = DATA_ROOT / "workspace" / "rollback"
+# Migrate snapshots stored under the old temp location.
+_LEGACY_ROLLBACK_ROOT = DATA_ROOT / "workspace" / "temp" / "rollback"
+if _LEGACY_ROLLBACK_ROOT.exists() and not ROLLBACK_ROOT.exists():
+    try:
+        ROLLBACK_ROOT.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(_LEGACY_ROLLBACK_ROOT), str(ROLLBACK_ROOT))
+        print(f"[rollback] migrated snapshots to {ROLLBACK_ROOT}")
+    except Exception as exc:
+        print(f"[rollback] migrate legacy snapshots failed: {exc}")
+MAX_ROLLBACK_FILE_BYTES = 256 * 1024 * 1024
 IMAGE_SUFFIX_MIME_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -1739,7 +1752,6 @@ class DesktopTaskExecutor:
         dangerous_tools = {
             "bash",
             "shell",
-            "file_write",  # 写入文件
             "write",  # 写入文件（OpenCode风格）
             "edit",  # 编辑文件
             "send_file",
@@ -2293,6 +2305,9 @@ class DesktopRunContext:
     modified_file_changes: dict[str, _ModifiedFileChange] = field(
         default_factory=dict
     )
+    # Paths already backed up this task. Each file is snapshotted only on its
+    # first modification because rollback is task-level, not per-tool.
+    rollback_snapshot_paths: set[str] = field(default_factory=set)
     modified_files_emitted: bool = False
     modified_files_summary: Optional[dict] = None
     agent_team: Optional[object] = None
@@ -2574,6 +2589,9 @@ def _persist_step(step: dict, message_id: int, conversation_id: str) -> None:
                     "files": files,
                     "additions": sum(item["additions"] for item in files),
                     "deletions": sum(item["deletions"] for item in files),
+                    "rollback_available": bool(
+                        step.get("rollback_available", False)
+                    ),
                 }
             )
     elif step_type == "plan_update":
@@ -2871,6 +2889,10 @@ def _finish_execution(run: DesktopRunContext, outcome: str = "") -> None:
         )
     if terminal_status in {"complete", "cancelled"}:
         _publish_modified_files_summary(run)
+    elif terminal_status == "error":
+        # No review card exists on error, so drop the orphaned tool snapshots.
+        with state_lock:
+            _discard_tool_rollback_snapshots(run)
     with state_lock:
         if conversation_runs.get(run.conversation_id) is not run:
             return
@@ -4114,6 +4136,12 @@ def _graph_thread_id(conversation_id: str, message_id: int) -> str:
     return f"{conversation_id}:{int(message_id)}"
 
 
+def _purge_conversation_rollback_snapshots(conversation_id: str) -> None:
+    """Remove stored rollback snapshots for a deleted or cleared conversation."""
+    target = ROLLBACK_ROOT / str(conversation_id or "")
+    shutil.rmtree(target, ignore_errors=True)
+
+
 def _purge_conversation_checkpoints(conversation_id: str) -> dict:
     """Delete all durable graph state belonging to one desktop task.
 
@@ -4341,11 +4369,14 @@ def _tool_target(tool_name: object, params: object) -> str:
 
 
 def _modified_file_paths(
-    tool_name: object, params: object, project_root: Path = PROJECT_ROOT
+    tool_name: object,
+    params: object,
+    project_root: Path = PROJECT_ROOT,
+    tool_paths: dict = _MODIFIED_FILE_TOOL_PATHS,
 ) -> list[tuple[str, Path]]:
     """Resolve only explicit structured-file targets; never guess shell effects."""
     name = str(tool_name or "").strip().lower()
-    keys = _MODIFIED_FILE_TOOL_PATHS.get(name, ())
+    keys = tool_paths.get(name, ())
     if not keys or not isinstance(params, dict):
         return []
 
@@ -4451,6 +4482,9 @@ def _capture_modified_file_snapshots(run: DesktopRunContext, event: dict) -> Non
             run.pending_modified_file_snapshots[
                 _modified_file_event_key(event, run.executor.project_root)
             ] = snapshots
+    if snapshots:
+        # Keep a full before-state on disk so approved mutations can be undone.
+        _persist_rollback_snapshot(run, event)
 
 
 def _record_modified_file_changes(run: DesktopRunContext, event: dict) -> None:
@@ -4481,6 +4515,249 @@ def _record_modified_file_changes(run: DesktopRunContext, event: dict) -> None:
                 )
             else:
                 existing.after = after
+
+
+def _rollback_safe_key(value: str) -> str:
+    """Make a tool call id safe to use as a snapshot directory name."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value or "")).strip("._-")
+    return cleaned or "unknown"
+
+
+def _rollback_snapshot_base(
+    run: DesktopRunContext, tool_key: str
+) -> Path:
+    """Directory that stores one tool call's before-state files."""
+    return (
+        ROLLBACK_ROOT
+        / str(run.conversation_id)
+        / str(run.message_id)
+        / _rollback_safe_key(tool_key)
+    )
+
+
+def _persist_rollback_snapshot(run: DesktopRunContext, event: dict) -> None:
+    """Keep the before-task state for files this tool is about to mutate.
+
+    Only explicit structured-file targets are backed up (same set as the
+    change summary), so shell commands never pollute the rollback store.
+    Each file is backed up only on its first modification within the task;
+    rollback is task-level, so later edits of the same file add nothing.
+    """
+    paths = _modified_file_paths(
+        event.get("tool"),
+        event.get("params", {}),
+        run.executor.project_root,
+        _ROLLBACK_FILE_TOOL_PATHS,
+    )
+    if not paths:
+        return
+    call_ids = {
+        str(event.get("prepared_tool_call_id") or "").strip(),
+        str(event.get("tool_call_id") or "").strip(),
+    }
+    call_ids.discard("")
+    if not call_ids:
+        return
+    paths = [
+        (raw_path, path)
+        for raw_path, path in paths
+        if str(path) not in run.rollback_snapshot_paths
+    ]
+    if not paths:
+        return
+    tool_key = _modified_file_event_key(event, run.executor.project_root)
+    snapshot_dir = _rollback_snapshot_base(run, tool_key)
+    try:
+        files_dir = snapshot_dir / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for index, (_raw_path, path) in enumerate(paths):
+            try:
+                if path.is_file() and path.exists():
+                    size = path.stat().st_size
+                    if size <= MAX_ROLLBACK_FILE_BYTES:
+                        backup_name = f"{index}_{path.name[:64]}"
+                        shutil.copyfile(path, files_dir / backup_name)
+                        entries.append(
+                            {
+                                "path": str(path),
+                                "exists": True,
+                                "is_file": True,
+                                "backup": f"files/{backup_name}",
+                            }
+                        )
+                    else:
+                        entries.append(
+                            {
+                                "path": str(path),
+                                "exists": True,
+                                "is_file": True,
+                                "backup": "",
+                                "too_large": True,
+                            }
+                        )
+                elif not path.exists():
+                    entries.append(
+                        {
+                            "path": str(path),
+                            "exists": False,
+                            "is_file": True,
+                            "backup": "",
+                        }
+                    )
+            except OSError:
+                continue
+        if not entries:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+            return
+        manifest = {
+            "version": 1,
+            "tool": str(event.get("tool", "") or ""),
+            "call_ids": sorted(call_ids),
+            "files": entries,
+        }
+        with open(snapshot_dir / "manifest.json", "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        with state_lock:
+            run.rollback_snapshot_paths.update(
+                str(path) for _, path in paths
+            )
+    except OSError:
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+
+def _discard_rollback_snapshot(
+    run: DesktopRunContext, event: dict, tool_key: str
+) -> None:
+    """Drop the before-state for a failed tool; nothing succeeded to undo.
+
+    The failed tool may have left partial state, so its paths become eligible
+    for a fresh backup the next time a tool touches them.
+    """
+    snapshot_dir = _rollback_snapshot_base(run, tool_key)
+    with state_lock:
+        try:
+            manifest = json.loads(
+                (snapshot_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            for entry in manifest.get("files", []):
+                run.rollback_snapshot_paths.discard(
+                    str(entry.get("path", "") or "")
+                )
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+
+def _persist_task_rollback_snapshot(
+    run: DesktopRunContext,
+) -> Optional[Path]:
+    """Build one before-task snapshot from the run's net file changes.
+
+    The task-end review card restores every changed file to its pre-task state
+    from this snapshot. Per-tool snapshots feed it; callers must hold the
+    state lock while this runs.
+    """
+    if not run.modified_file_changes:
+        return None
+    base = ROLLBACK_ROOT / str(run.conversation_id) / str(run.message_id)
+    task_dir = base / "task"
+    try:
+        # Earliest full-byte backup per path, taken from per-tool snapshots.
+        earliest_backups: dict[str, Path] = {}
+        if base.is_dir():
+            for snapshot_dir in sorted(base.iterdir()):
+                manifest_path = snapshot_dir / "manifest.json"
+                if not manifest_path.is_file():
+                    continue
+                try:
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                for entry in manifest.get("files", []):
+                    path = str(entry.get("path", "") or "")
+                    if not path or path in earliest_backups:
+                        continue
+                    backup = entry.get("backup")
+                    if backup and (snapshot_dir / backup).is_file():
+                        earliest_backups[path] = snapshot_dir / backup
+        files_dir = task_dir / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for change in run.modified_file_changes.values():
+            before = change.before
+            path = str(before.path)
+            if not before.exists:
+                entries.append(
+                    {"path": path, "exists": False, "is_file": True, "backup": ""}
+                )
+                continue
+            if not before.is_file:
+                continue
+            backup = earliest_backups.get(path)
+            if backup is not None:
+                backup_name = f"{len(entries)}_{Path(path).name[:64]}"
+                shutil.copyfile(backup, files_dir / backup_name)
+                entries.append(
+                    {
+                        "path": path,
+                        "exists": True,
+                        "is_file": True,
+                        "backup": f"files/{backup_name}",
+                    }
+                )
+            elif before.text is not None:
+                backup_name = f"{len(entries)}_{Path(path).name[:64]}"
+                (files_dir / backup_name).write_bytes(
+                    before.text.encode("utf-8")
+                )
+                entries.append(
+                    {
+                        "path": path,
+                        "exists": True,
+                        "is_file": True,
+                        "backup": f"files/{backup_name}",
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "path": path,
+                        "exists": True,
+                        "is_file": True,
+                        "backup": "",
+                        "too_large": True,
+                    }
+                )
+        if not entries:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            return None
+        manifest = {
+            "version": 1,
+            "kind": "task",
+            "conversation_id": run.conversation_id,
+            "message_id": run.message_id,
+            "files": entries,
+        }
+        with open(task_dir / "manifest.json", "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        return task_dir
+    except OSError:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        return None
+
+
+def _discard_tool_rollback_snapshots(run: DesktopRunContext) -> None:
+    """Remove per-tool snapshots once folded into the task-level snapshot."""
+    base = ROLLBACK_ROOT / str(run.conversation_id) / str(run.message_id)
+    if base.is_dir():
+        for snapshot_dir in base.iterdir():
+            if snapshot_dir.name == "task":
+                continue
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+    run.rollback_snapshot_paths.clear()
 
 
 def _modified_file_line_totals(
@@ -4723,6 +5000,10 @@ def _publish_modified_files_summary(run: DesktopRunContext) -> Optional[dict]:
         if not payload:
             return None
 
+        rollback_dir = _persist_task_rollback_snapshot(run)
+        payload["rollback_available"] = rollback_dir is not None
+        if rollback_dir is not None:
+            _discard_tool_rollback_snapshots(run)
         payload["message_id"] = run.message_id
         payload["conversation_id"] = run.conversation_id
         run.modified_files_summary = payload
@@ -4979,6 +5260,8 @@ def _graph_event_publisher(
                 or event.get("tool_call_id")
                 or ""
             )
+            if event.get("failed"):
+                _discard_rollback_snapshot(run, event, tool_key)
             preparation_started = tool_started_at.pop(tool_key, None)
             backend_duration = int(event.get("duration_ms", 0) or 0)
             total_duration = (
@@ -5785,6 +6068,132 @@ def answer_question(
     return {"success": True}
 
 
+def _notify_ai_of_rollback(
+    run: DesktopRunContext, message_id: int, restored: list, skipped: list
+) -> None:
+    """Record the rollback in execution history so future tasks see it."""
+    memory_manager = getattr(run.executor, "memory_manager", None)
+    if memory_manager is None or not hasattr(
+        memory_manager, "append_execution_step"
+    ):
+        return
+    file_names = [Path(path).name for path in restored]
+    display = "、".join(file_names[:20])
+    if len(file_names) > 20:
+        display += f" 等 {len(file_names)} 个文件"
+    elif not display:
+        display = "无"
+    note = (
+        f"【系统提示】用户回退了第 {message_id} 轮任务的文件修改"
+        f"（{len(restored)} 个文件：{display}）。"
+        "这些文件已恢复到该任务开始前的状态，可能与之前轮次的修改不一致，"
+        "请以磁盘上的实际内容为准，必要时先读取文件再继续。"
+    )
+    try:
+        memory_manager.append_execution_step(note)
+    except Exception:
+        pass
+
+
+@eel.expose
+def rollback_task(conversation_id: str = "", message_id: int = 0):
+    """Undo every file change of one finished task back to its pre-task state.
+
+    The task-end review card offers this: it restores all files touched by the
+    task from the before-task snapshot and consumes the snapshot so the same
+    rollback cannot be applied twice. Shell commands are never rewound.
+    """
+    conversation_id = str(conversation_id or "")
+    message_id = int(message_id or 0)
+    run = _run_for(conversation_id, message_id)
+    if run and run.status in {"running", "waiting"}:
+        return {"success": False, "error": "任务仍在运行，请先停止任务再回退"}
+
+    task_dir = ROLLBACK_ROOT / str(conversation_id) / str(message_id) / "task"
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return {
+            "success": False,
+            "error": "没有找到可回退的任务快照（可能已回退过，或本任务没有文件修改）",
+        }
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"success": False, "error": "回退快照已损坏或不存在"}
+
+    restored = []
+    skipped = []
+    for entry in manifest.get("files", []):
+        path = Path(str(entry.get("path", "")))
+        try:
+            if not entry.get("exists"):
+                if path.exists():
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink(missing_ok=True)
+                restored.append(str(path))
+            elif entry.get("backup"):
+                backup = task_dir / str(entry["backup"])
+                if not backup.is_file():
+                    skipped.append(str(path))
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(backup, path)
+                restored.append(str(path))
+            elif entry.get("too_large"):
+                skipped.append(str(path))
+        except OSError as exc:
+            return {
+                "success": False,
+                "error": f"回退 {path} 失败：{exc}",
+            }
+
+    # Consume the whole message-level snapshot store after a successful rollback.
+    base = ROLLBACK_ROOT / str(conversation_id) / str(message_id)
+    shutil.rmtree(base, ignore_errors=True)
+    if run:
+        with state_lock:
+            run.rollback_snapshot_paths.clear()
+        message = f"已回退 {len(restored)} 个文件" if restored else "没有可恢复的文件"
+        if skipped:
+            message += f"（跳过 {len(skipped)} 个无法恢复的文件）"
+        # 让后续任务的 AI 感知回退，避免它基于已回退的文件状态继续发挥。
+        _notify_ai_of_rollback(run, message_id, restored, skipped)
+        try:
+            push_step(
+                {
+                    "type": "commentary",
+                    "content": f"已回退整个任务的文件修改：{message}",
+                },
+                run.message_id,
+                run.conversation_id,
+                run.generation,
+            )
+        except Exception:
+            pass
+    else:
+        message = f"已回退 {len(restored)} 个文件" if restored else "没有可恢复的文件"
+        if skipped:
+            message += f"（跳过 {len(skipped)} 个无法恢复的文件）"
+    return {"success": True, "restored_files": restored, "message": message}
+
+
+@eel.expose
+def get_task_rollback_status(conversation_id: str = ""):
+    """Return which finished messages still have a usable before-task snapshot."""
+    conversation_id = str(conversation_id or "")
+    base = ROLLBACK_ROOT / conversation_id
+    available: dict[str, bool] = {}
+    if base.is_dir():
+        for message_dir in base.iterdir():
+            if not message_dir.is_dir():
+                continue
+            if (message_dir / "task" / "manifest.json").is_file():
+                available[message_dir.name] = True
+    return {"success": True, "available": available}
+
+
 @eel.expose
 def get_next_result(conversation_id: str = "", message_id: int = 0):
     try:
@@ -6076,6 +6485,7 @@ def delete_conversation(conversation_id: str):
             checkpoint_cleanup[target_id] = _purge_conversation_checkpoints(
                 target_id
             )
+            _purge_conversation_rollback_snapshots(target_id)
         result = conversation_store.delete(conversation_id)
         with state_lock:
             for target_id in delete_ids:
@@ -6113,6 +6523,7 @@ def clear_conversation(conversation_id: str = ""):
             manager.clear_conversation(target_id)
         conversation_store.clear(target_id)
         checkpoint_cleanup = _purge_conversation_checkpoints(target_id)
+        _purge_conversation_rollback_snapshots(target_id)
         _executor_for_conversation(target_id).activate_conversation(target_id)
         return {
             "success": True,
@@ -6459,6 +6870,7 @@ def delete_project(project_id: str):
                 if manager:
                     manager.clear_conversation(target_id)
                 _purge_conversation_checkpoints(target_id)
+                _purge_conversation_rollback_snapshots(target_id)
             result = conversation_store.delete(conversation_id)
             deleted_conversation_ids.extend(
                 result.get("deleted_conversation_ids", related_ids)
@@ -7719,6 +8131,7 @@ def clear_all_data():
         workspace_path = project_root / "workspace"
         integrator = DataIntegrator(data_dir=workspace_path / "data")
         success = integrator.clear_all()
+        shutil.rmtree(ROLLBACK_ROOT, ignore_errors=True)
         os_agent.reload_data_integrator()
         return {"success": success}
     except Exception as e:

@@ -63,14 +63,8 @@ def strip_disabled_vision_prompt(prompt: str) -> str:
 # alternative parameter spellings for one required target.
 _SCOPED_MUTATION_TARGETS = {
     "write": (("path",),),
-    "file_write": (("path",),),
-    "create_file": (("path",),),
     "edit": (("filePath", "file_path", "path"),),
     "search_replace": (("filePath", "file_path", "path"),),
-    "file_delete": (("path",),),
-    "dir_create": (("path",),),
-    "copy_file": (("destination",),),
-    "move_file": (("source",), ("destination",)),
     "generate_pdf": (("output_path",),),
 }
 
@@ -136,6 +130,14 @@ class ExtendedToolExecutor:
         self.workspace_temp_root = (
             self.workspace_root / "temp"
         ).resolve()
+        # Group background-command output logs under temp/tasks.
+        self.task_log_root = self.workspace_temp_root / "tasks"
+        try:
+            self.task_log_root.mkdir(parents=True, exist_ok=True)
+            for old_log in self.workspace_temp_root.glob("task-*.log"):
+                old_log.rename(self.task_log_root / old_log.name)
+        except OSError:
+            pass
         self.workspace_output_root = (
             self.workspace_root / "output"
         ).resolve()
@@ -229,21 +231,10 @@ class ExtendedToolExecutor:
             "scheduler_delete": self.execute_scheduler_delete,
             "scheduler_list": self.execute_scheduler_list,
             "update_goal": self.execute_update_goal,
-            # Hidden legacy names keep resumable pre-cleanup runs executable.
-            "file_list": self.execute_file_list,
-            "file_delete": self.execute_file_delete,
-            "dir_create": self.execute_dir_create,
-            "copy_file": self.execute_copy_file,
-            "move_file": self.execute_move_file,
-            "read_pdf": self.execute_read_pdf,
-            "dir_change": self.execute_dir_change,
-            "read_markdown": self.execute_read_markdown,
-            "read_json": self.execute_read_json,
-            "get_file_info": self.execute_get_file_info,
-            "create_file": self.execute_create_file,
+            # Defensive aliases kept out of the model tool list: shell/file_read
+            # guard legacy approvals and web_search is a Grok-compatible name.
             "shell": self.execute_shell,
             "file_read": self.execute_file_read,
-            "file_write": self.execute_file_write,
             "web_search": execute_websearch,
         }
 
@@ -2115,9 +2106,9 @@ class ExtendedToolExecutor:
         if not command:
             return "Error: command parameter required"
         workdir = self._resolve_project_path(params.get("workdir"), ".")
-        self.workspace_temp_root.mkdir(parents=True, exist_ok=True)
+        self.task_log_root.mkdir(parents=True, exist_ok=True)
         task_id = uuid.uuid4().hex[:12]
-        output_path = self.workspace_temp_root / f"task-{task_id}.log"
+        output_path = self.task_log_root / f"task-{task_id}.log"
         output_handle = output_path.open("w", encoding="utf-8")
         options: Dict[str, Any] = {}
         if os.name == "posix":
@@ -2373,52 +2364,6 @@ class ExtendedToolExecutor:
         }
         return json.dumps({"success": True, **self._goal_state}, ensure_ascii=False)
 
-    def execute_file_delete(self, params: Dict[str, Any]) -> str:
-        """Delete file or directory"""
-        path = params.get("path", "")
-        if not path:
-            return "Error: path parameter required"
-        protection_error = self._mutation_path_error(path)
-        if protection_error:
-            return protection_error
-        path = self._resolve_project_path(path)
-
-        # 先检查是文件还是目录
-        from pathlib import Path
-
-        file_path = Path(path).resolve()
-
-        if file_path.is_dir():
-            success, message = self.file_tool.delete_directory(path)
-        else:
-            success, message = self.file_tool.delete_file(path)
-        return message if success else f"Error: {message}"
-
-    def execute_dir_create(self, params: Dict[str, Any]) -> str:
-        """Create directory"""
-        path = params.get("path", "")
-        if not path:
-            return "Error: path parameter required"
-
-        protection_error = self._mutation_path_error(path)
-        if protection_error:
-            return protection_error
-        success, message = self.file_tool.create_directory(
-            self._resolve_project_path(path)
-        )
-        return message if success else f"Error: {message}"
-
-    def execute_dir_change(self, params: Dict[str, Any]) -> str:
-        """Change directory"""
-        path = params.get("path", "")
-        if not path:
-            return "Error: path parameter required"
-
-        resolved = self._resolve_project_path(path)
-        if not Path(resolved).is_dir():
-            return f"Error: Directory not found: {path}"
-        return f"Changed task directory to {resolved}"
-
     def execute_read_pdf(self, params: Dict[str, Any]) -> str:
         """Read PDF or document file"""
         path = params.get("path", "")
@@ -2471,160 +2416,6 @@ class ExtendedToolExecutor:
 
         except Exception as e:
             return f"Error reading document: {str(e)}"
-
-    def execute_read_markdown(self, params: Dict[str, Any]) -> str:
-        """Read markdown file"""
-        path = params.get("path", "")
-        if not path:
-            return "Error: path parameter required"
-
-        success, content = self.file_tool.read_file(
-            self._resolve_project_path(path)
-        )
-        if success:
-            return f"Markdown contents:\n{content}"
-        return f"Error: {content}"
-
-    def execute_read_json(self, params: Dict[str, Any]) -> str:
-        """Read and parse JSON file"""
-        path = params.get("path", "")
-        if not path:
-            return "Error: path parameter required"
-
-        try:
-            success, content = self.file_tool.read_file(
-                self._resolve_project_path(path)
-            )
-            if success:
-                data = json.loads(content)
-                return (
-                    f"JSON contents:\n{json.dumps(data, indent=2, ensure_ascii=False)}"
-                )
-            return f"Error: {content}"
-        except json.JSONDecodeError as e:
-            return f"Error: Invalid JSON format - {str(e)}"
-
-    def execute_get_file_info(self, params: Dict[str, Any]) -> str:
-        """Get file information"""
-        path = params.get("path", "")
-        if not path:
-            return "Error: path parameter required"
-
-        success, info = self.file_tool.get_file_info(
-            self._resolve_project_path(path)
-        )
-        if success:
-            return f"File info:\n{json.dumps(info, indent=2, ensure_ascii=False)}"
-        return f"Error: {info.get('error', 'Unknown error')}"
-
-    def execute_copy_file(self, params: Dict[str, Any]) -> str:
-        """Copy file"""
-        source = params.get("source", "")
-        destination = params.get("destination", "")
-        if not source or not destination:
-            return "Error: source and destination parameters required"
-        protection_error = self._mutation_path_error(destination)
-        if protection_error:
-            return protection_error
-
-        try:
-            import shutil
-
-            source_path = self._resolve_project_path(source)
-            dest_path = self._resolve_project_path(destination)
-            shutil.copy2(source_path, dest_path)
-            return f"File copied: {source} -> {destination}"
-        except Exception as e:
-            return f"Error copying file: {str(e)}"
-
-    def execute_move_file(self, params: Dict[str, Any]) -> str:
-        """Move or rename file"""
-        source = params.get("source", "")
-        destination = params.get("destination", "")
-        if not source or not destination:
-            return "Error: source and destination parameters required"
-        protection_error = self._mutation_path_error(source, destination)
-        if protection_error:
-            return protection_error
-
-        try:
-            import shutil
-
-            source_path = self._resolve_project_path(source)
-            dest_path = self._resolve_project_path(destination)
-            shutil.move(source_path, dest_path)
-            return f"File moved: {source} -> {destination}"
-        except Exception as e:
-            return f"Error moving file: {str(e)}"
-
-    def execute_create_file(self, params: Dict[str, Any]) -> str:
-        """Create file with content"""
-        path = params.get("path", "")
-        content = params.get("content", "")
-        if not path:
-            return "Error: path parameter required"
-
-        protection_error = self._mutation_path_error(path)
-        if protection_error:
-            return protection_error
-        success, message = self.file_tool.write_file(
-            self._resolve_project_path(path), content
-        )
-        return message if success else f"Error: {message}"
-
-    def execute_web_search(self, params: Dict[str, Any]) -> str:
-        """Search the web using Tavily API"""
-        query = params.get("query", "")
-        if not query:
-            return "Error: query parameter required"
-
-        try:
-            tavily_api_key = os.getenv("TAVILY_API_KEY")
-            if not tavily_api_key:
-                return "Error: TAVILY_API_KEY not found in environment variables"
-
-            search_url = "https://api.tavily.com/search"
-            payload = {
-                "api_key": tavily_api_key,
-                "query": query,
-                "include_answer": True,
-                "max_results": 5,
-            }
-
-            response = requests.post(search_url, json=payload, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-
-            # Add answer if available
-            if data.get("answer"):
-                results.append(f"答案: {data['answer']}")
-                results.append("")
-
-            # Add search results
-            if data.get("results"):
-                results.append("搜索结果:")
-                for result in data.get("results", []):
-                    if result.get("title"):
-                        results.append(f"- {result['title']}")
-                    if result.get("content"):
-                        results.append(f"  {result['content']}")
-                    if result.get("url"):
-                        results.append(f"  链接: {result['url']}")
-                    results.append("")
-
-            if results:
-                return "搜索结果:\n" + "\n".join(results)
-            else:
-                return f"未找到关于 '{query}' 的搜索结果"
-
-        except requests.exceptions.Timeout:
-            return "Error: 搜索请求超时"
-        except requests.exceptions.RequestException as e:
-            return f"Error: 网络请求失败 - {str(e)}"
-        except Exception as e:
-            return f"Error: 搜索失败 - {str(e)}"
 
     def execute_read_url(self, params: Dict[str, Any]) -> str:
         """Read and extract content from a URL"""

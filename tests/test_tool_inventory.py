@@ -48,6 +48,10 @@ def test_tool_inventory_keeps_unique_local_capabilities() -> None:
         "dir_create",
         "copy_file",
         "move_file",
+        "dir_change",
+        "read_markdown",
+        "read_json",
+        "get_file_info",
     }
     assert not redundant_terminal_tools.intersection(names)
     assert "read_pdf" not in names
@@ -59,8 +63,9 @@ def test_tool_inventory_keeps_unique_local_capabilities() -> None:
         for tool in executor.get_available_tools(include_gateway_tools=True)
     ]
     assert gateway_names.count("send_file") == 1
-    # Keep old checkpointed calls runnable without offering them to new tasks.
-    assert (redundant_terminal_tools | {"read_pdf"}).issubset(executor.tools)
+    # Removed legacy terminal tools must not exist, even as hidden aliases.
+    assert not redundant_terminal_tools.intersection(executor.tools)
+    assert "read_pdf" not in executor.tools
 
 
 def test_tool_inventory_exposes_bounded_multi_agent_control_surface() -> None:

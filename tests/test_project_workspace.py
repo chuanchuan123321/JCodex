@@ -164,31 +164,14 @@ def test_file_tools_protect_os_agent_source_except_output_and_temp(
             "newString": "changed",
         }
     )
-    blocked_delete = executor.execute_file_delete({"path": str(protected_file)})
-    blocked_move = executor.execute_move_file(
-        {
-            "source": str(protected_file),
-            "destination": str(external_root / "moved.py"),
-        }
-    )
-    blocked_copy = executor.execute_copy_file(
-        {
-            "source": str(external_file),
-            "destination": str(protected_root / "copied.txt"),
-        }
-    )
 
     for result in (
         blocked_write,
         blocked_edit,
-        blocked_delete,
-        blocked_move,
-        blocked_copy,
     ):
         assert "JCodex source is protected" in result
     assert protected_file.read_text(encoding="utf-8") == "original\n"
     assert not (protected_root / "new.py").exists()
-    assert not (protected_root / "copied.txt").exists()
 
     output_result = executor.execute_file_write(
         {
