@@ -105,6 +105,10 @@ const CHANGE_REVIEW_WIDTH_STORAGE_KEY = 'minibot-change-review-width';
 const CHANGE_REVIEW_MIN_WIDTH = 440;
 const CHANGE_REVIEW_MAX_WIDTH = 900;
 const CHANGE_REVIEW_WIDTH_STEP = 24;
+const CHANGE_REVIEW_FILES_WIDTH_STORAGE_KEY = 'minibot-change-review-files-width';
+const CHANGE_REVIEW_FILES_DEFAULT_WIDTH = 190;
+const CHANGE_REVIEW_FILES_MIN_WIDTH = 160;
+const CHANGE_REVIEW_FILES_MAX_WIDTH = 460;
 const DOCKED_MAIN_MIN_WIDTH = 380;
 const AGENT_DETAIL_WIDTH_STORAGE_KEY = 'minibot-agent-detail-width';
 const AGENT_DETAIL_DEFAULT_WIDTH = 420;
@@ -323,6 +327,72 @@ function eelBridgeReady() {
     return Boolean(ws) && ws.readyState === WebSocket.OPEN;
 }
 
+function eelBridgeDead() {
+    // True once the socket has dropped or the backend restarted. During the
+    // initial page load the socket is still CONNECTING and eel queues mock
+    // calls, so that must not be treated as a dead bridge.
+    if (typeof eel === 'undefined') return true;
+    if (eelConnectionLost) return true;
+    const ws = eel._websocket;
+    return Boolean(ws) && ws.readyState === WebSocket.CLOSED;
+}
+
+function recoverEelBridge() {
+    const lastReload = Number(sessionStorage.getItem(LAST_AUTO_RELOAD_KEY) || 0);
+    if (Date.now() - lastReload < 8000) {
+        showToast('桌面服务尚未恢复，请稍后重试', 'error', 3000);
+        return;
+    }
+    sessionStorage.setItem(LAST_AUTO_RELOAD_KEY, String(Date.now()));
+    setAppStatus('info', '桌面服务连接断开，正在自动重新连接…');
+    location.reload();
+}
+
+function installEelGuard() {
+    // Route every eel call through a connection guard so that non-message
+    // actions (switching tasks, creating tasks, settings, ...) auto-reload
+    // and reconnect exactly like sending a message does, instead of failing
+    // with "eel.xxx(...) is not a function".
+    if (!eel || eel.__jcodexGuarded) return;
+    const handler = {
+        get(target, prop, receiver) {
+            if (typeof prop === 'symbol' || (typeof prop === 'string' && prop.startsWith('_'))) {
+                return Reflect.get(target, prop, receiver);
+            }
+            const value = Reflect.get(target, prop, receiver);
+            if (typeof value === 'function') {
+                return function (...args) {
+                    if (eelBridgeDead()) {
+                        recoverEelBridge();
+                        return () => Promise.reject(
+                            new Error('桌面服务连接已断开，正在自动重新连接…')
+                        );
+                    }
+                    return value.apply(target, args);
+                };
+            }
+            // The function is genuinely absent. Only treat it as a dead
+            // bridge when the connection is gone; otherwise keep the original
+            // "not a function" semantics so typeof guards still degrade.
+            if (value === undefined && eelBridgeDead()) {
+                return function () {
+                    recoverEelBridge();
+                    return () => Promise.reject(
+                        new Error('桌面服务连接已断开，正在自动重新连接…')
+                    );
+                };
+            }
+            return value;
+        },
+    };
+    window.eel = new Proxy(eel, handler);
+    try {
+        eel.__jcodexGuarded = true;
+    } catch (_ignore) {
+        /* read-only in exotic environments */
+    }
+}
+
 function stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll) {
     const base = {
         v: 1,
@@ -353,15 +423,8 @@ function stashPendingSend(message, attachments, conversationId, planMode, voiceM
 }
 
 function autoRecoverEelBridge(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll) {
-    const lastReload = Number(sessionStorage.getItem(LAST_AUTO_RELOAD_KEY) || 0);
-    if (Date.now() - lastReload < 8000) {
-        showToast('桌面服务尚未恢复，请稍后重试', 'error', 3000);
-        return;
-    }
     stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll);
-    sessionStorage.setItem(LAST_AUTO_RELOAD_KEY, String(Date.now()));
-    setAppStatus('info', '桌面服务连接断开，正在自动重新连接…');
-    location.reload();
+    recoverEelBridge();
 }
 
 async function restorePendingSend() {
@@ -3023,6 +3086,7 @@ function init() {
         setTimeout(init, 100);
         return;
     }
+    installEelGuard();
     eel._websocket?.addEventListener('open', () => {
         eelConnectionLost = false;
         eelConnectionNoticeShown = false;
@@ -3422,6 +3486,9 @@ function initializeUI() {
     }
     initializeSidebarResizeHandle(sidebarResizeHandle, mobileSidebarQuery);
     initializeChangeReviewResizeHandle(changeReviewResizeHandle);
+    initializeChangeReviewFilesResizeHandle(
+        document.getElementById('changeReviewFilesResizeHandle')
+    );
     initializeAgentDetailResizeHandle(agentDetailResizeHandle);
     initializeSplitResizeHandle(splitResizeHandle);
     window.addEventListener('resize', syncDockedLayoutWidths);
@@ -3510,6 +3577,11 @@ function initializeUI() {
         closeAgentDetail();
     });
     document.getElementById('changeReviewFileList')?.addEventListener('click', event => {
+        const dir = event.target.closest('[data-review-dir]');
+        if (dir) {
+            toggleChangeReviewDir(dir.dataset.reviewDir);
+            return;
+        }
         const file = event.target.closest('[data-review-file-index]');
         if (file) selectChangeReviewFile(Number(file.dataset.reviewFileIndex));
     });
@@ -3903,6 +3975,45 @@ function setChangeReviewPanelWidth(
     return panelWidth;
 }
 
+function clampChangeReviewFilesWidth(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return CHANGE_REVIEW_FILES_DEFAULT_WIDTH;
+    return Math.round(Math.min(
+        CHANGE_REVIEW_FILES_MAX_WIDTH,
+        Math.max(CHANGE_REVIEW_FILES_MIN_WIDTH, numericValue)
+    ));
+}
+
+function getSavedChangeReviewFilesWidth() {
+    try {
+        return clampChangeReviewFilesWidth(
+            localStorage.getItem(CHANGE_REVIEW_FILES_WIDTH_STORAGE_KEY)
+            || CHANGE_REVIEW_FILES_DEFAULT_WIDTH
+        );
+    } catch (_error) {
+        return CHANGE_REVIEW_FILES_DEFAULT_WIDTH;
+    }
+}
+
+function setChangeReviewFilesWidth(width, {persist = true} = {}) {
+    const filesWidth = clampChangeReviewFilesWidth(width);
+    document.documentElement.style.setProperty(
+        '--change-review-files-width', `${filesWidth}px`
+    );
+    const handle = document.getElementById('changeReviewFilesResizeHandle');
+    handle?.setAttribute('aria-valuenow', String(filesWidth));
+    if (persist) {
+        try {
+            localStorage.setItem(
+                CHANGE_REVIEW_FILES_WIDTH_STORAGE_KEY, String(filesWidth)
+            );
+        } catch (_error) {
+            // Width remains usable if browser storage is unavailable.
+        }
+    }
+    return filesWidth;
+}
+
 function getAgentDetailPanelWidthLimit(sidebarWidth = getCurrentSidebarTotalWidth()) {
     if (!isDockedReviewLayout()) return AGENT_DETAIL_MAX_WIDTH;
     return Math.max(
@@ -4059,6 +4170,7 @@ function syncDockedLayoutWidths() {
 function initializeSidebarWidth() {
     setSidebarPanelWidth(getSavedSidebarPanelWidth(), {persist: false});
     setChangeReviewPanelWidth(getSavedChangeReviewPanelWidth(), {persist: false});
+    setChangeReviewFilesWidth(getSavedChangeReviewFilesWidth(), {persist: false});
     setAgentDetailPanelWidth(getSavedAgentDetailPanelWidth(), {persist: false});
 }
 
@@ -4170,6 +4282,43 @@ function initializeChangeReviewResizeHandle(handle) {
             setChangeReviewPanelWidth(getReviewPanelWidthLimit());
         }
     });
+}
+
+function initializeChangeReviewFilesResizeHandle(handle) {
+    if (!handle) return;
+    let pointerId = null;
+
+    const finishResize = () => {
+        document.body.classList.remove('is-resizing-review-files');
+        if (pointerId === null) return;
+        const capturedPointerId = pointerId;
+        pointerId = null;
+        try {
+            if (handle.hasPointerCapture(capturedPointerId)) {
+                handle.releasePointerCapture(capturedPointerId);
+            }
+        } catch (_error) {
+            // Capture may already be gone after a fast cross-window drag.
+        }
+    };
+    const updateFromPointer = event => {
+        if (pointerId === null) return;
+        const panelRect = document.getElementById('changeReviewPanel')
+            ?.getBoundingClientRect();
+        if (!panelRect) return;
+        setChangeReviewFilesWidth(panelRect.right - event.clientX);
+    };
+
+    handle.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        pointerId = event.pointerId;
+        handle.setPointerCapture(pointerId);
+        document.body.classList.add('is-resizing-review-files');
+        updateFromPointer(event);
+    });
+    handle.addEventListener('pointermove', updateFromPointer);
+    installPointerResizeCleanup(handle, finishResize);
 }
 
 function initializeAgentDetailResizeHandle(handle) {
@@ -6280,6 +6429,12 @@ async function rollbackTaskCard(summary) {
         showToast('缺少任务信息，无法回退', 'error');
         return;
     }
+    const fileCount = summary.querySelectorAll('.modified-files-row').length;
+    const confirmed = await showConfirmDialog(
+        `确定要回退该任务对 ${fileCount} 个文件的修改吗？` +
+        '所有涉及文件将恢复到任务开始前的状态，且同一轮只能回退一次。'
+    );
+    if (!confirmed) return;
     button.disabled = true;
     button.textContent = '回退中…';
     try {
@@ -7925,29 +8080,141 @@ function normalizeModifiedFiles(result) {
     return Array.from(merged.values());
 }
 
-function changeReviewFileName(path) {
-    const parts = String(path || '').replace(/\\/g, '/').split('/');
-    return parts[parts.length - 1] || path || '文件';
+function changeReviewDirKey(parentPath, name) {
+    return parentPath ? `${parentPath}/${name}` : name;
 }
 
-function changeReviewDirectory(path) {
-    const normalized = String(path || '').replace(/\\/g, '/');
-    const index = normalized.lastIndexOf('/');
-    return index > 0 ? normalized.slice(0, index) : '';
+function changeReviewCommonRoot(files) {
+    const paths = files
+        .map(file => String(file.path || '').replace(/\\/g, '/'))
+        .filter(Boolean);
+    if (!paths.length) return '';
+    let common = paths[0].split('/').slice(0, -1);
+    for (const path of paths.slice(1)) {
+        const parts = path.split('/').slice(0, -1);
+        let i = 0;
+        while (i < common.length && i < parts.length && common[i] === parts[i]) {
+            i += 1;
+        }
+        common = common.slice(0, i);
+        if (!common.length) break;
+    }
+    return common.join('/');
+}
+
+function buildChangeReviewTree(files, stripPrefix) {
+    const root = {name: '', children: new Map(), file: null};
+    files.forEach((file, index) => {
+        let path = String(file.path || '').replace(/\\/g, '/');
+        if (stripPrefix && path.startsWith(`${stripPrefix}/`)) {
+            path = path.slice(stripPrefix.length + 1);
+        }
+        const parts = path.split('/').filter(Boolean);
+        if (!parts.length) return;
+        let node = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+            const segment = parts[i];
+            if (!node.children.has(segment)) {
+                node.children.set(segment, {name: segment, children: new Map(), file: null});
+            }
+            node = node.children.get(segment);
+        }
+        const fileName = parts[parts.length - 1];
+        node.children.set(fileName, {name: fileName, children: new Map(), file: {...file, index}});
+    });
+    if (stripPrefix) {
+        return {
+            name: stripPrefix.split('/').pop() || stripPrefix,
+            children: root.children,
+            file: null,
+        };
+    }
+    return root;
+}
+
+function renderChangeReviewTreeNodes(node, depth, parentPath, selectedPath, collapsedDirs) {
+    let html = '';
+    if (node.name) {
+        const dirKey = changeReviewDirKey(parentPath, node.name);
+        const collapsed = collapsedDirs.has(dirKey);
+        html += `
+            <button class="change-review-tree-row" type="button" data-review-dir="${escapeHtml(dirKey)}" aria-expanded="${!collapsed}" style="padding-left:${8 + depth * 14}px" title="${escapeHtml(dirKey)}">
+                <span class="change-review-dir-arrow" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
+                <span class="change-review-dir-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>
+                </span>
+                <span class="change-review-dir-name">${escapeHtml(node.name)}</span>
+            </button>`;
+        if (collapsed) return html;
+        depth += 1;
+        parentPath = dirKey;
+    }
+    const dirs = [];
+    const leaves = [];
+    for (const child of node.children.values()) {
+        (child.file ? leaves : dirs).push(child);
+    }
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+    leaves.sort((a, b) => a.name.localeCompare(b.name));
+    for (const dir of dirs) {
+        html += renderChangeReviewTreeNodes(
+            dir, depth, parentPath, selectedPath, collapsedDirs
+        );
+    }
+    for (const leaf of leaves) {
+        const file = leaf.file;
+        const active = file.path === selectedPath;
+        html += `
+            <button class="change-review-file${active ? ' is-active' : ''}" type="button" data-review-file-index="${file.index}" style="padding-left:${11 + depth * 14}px" title="${escapeHtml(file.path)}">
+                <span class="change-review-file-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h8l4 4v14H6V3Z"/><path d="M14 3v5h5"/></svg>
+                </span>
+                <span class="change-review-file-name">${escapeHtml(leaf.name)}</span>
+                <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>
+            </button>`;
+    }
+    return html;
 }
 
 function renderChangeReviewFiles() {
     const fileList = document.getElementById('changeReviewFileList');
     if (!fileList || !activeChangeReview) return;
-    fileList.innerHTML = activeChangeReview.files.map((file, index) => `
-        <button class="change-review-file${index === activeChangeReview.selectedIndex ? ' is-active' : ''}" type="button" data-review-file-index="${index}" title="${escapeHtml(file.path)}">
-            <span class="change-review-file-icon" aria-hidden="true">${escapeHtml(changeReviewFileName(file.path).split('.').pop()?.slice(0, 2).toUpperCase() || '#')}</span>
-            <span class="change-review-file-copy">
-                <strong>${escapeHtml(changeReviewFileName(file.path))}</strong>
-                <small>${escapeHtml(changeReviewDirectory(file.path))}</small>
-            </span>
-            <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>
-        </button>`).join('');
+    const selectedPath = activeChangeReview.files[activeChangeReview.selectedIndex]?.path;
+    const root = buildChangeReviewTree(
+        activeChangeReview.files, activeChangeReview.treeRoot
+    );
+    fileList.innerHTML = renderChangeReviewTreeNodes(
+        root, 0, '', selectedPath, activeChangeReview.collapsedDirs
+    );
+}
+
+function toggleChangeReviewDir(dirKey) {
+    if (!activeChangeReview) return;
+    if (activeChangeReview.collapsedDirs.has(dirKey)) {
+        activeChangeReview.collapsedDirs.delete(dirKey);
+    } else {
+        activeChangeReview.collapsedDirs.add(dirKey);
+    }
+    renderChangeReviewFiles();
+}
+
+function expandChangeReviewAncestors(path) {
+    if (!activeChangeReview) return;
+    let normalized = String(path || '').replace(/\\/g, '/');
+    const strip = activeChangeReview.treeRoot;
+    if (strip && normalized.startsWith(`${strip}/`)) {
+        normalized = normalized.slice(strip.length + 1);
+    }
+    if (strip) {
+        activeChangeReview.collapsedDirs.delete(strip.split('/').pop());
+    }
+    const parts = normalized.split('/').filter(Boolean);
+    parts.pop();
+    let prefix = '';
+    for (const part of parts) {
+        prefix = prefix ? `${prefix}/${part}` : part;
+        activeChangeReview.collapsedDirs.delete(prefix);
+    }
 }
 
 function renderChangeReviewDiff() {
@@ -7996,6 +8263,7 @@ function selectChangeReviewFile(pathOrIndex) {
         : activeChangeReview.files.findIndex(file => file.path === pathOrIndex);
     if (nextIndex < 0 || nextIndex >= activeChangeReview.files.length) return;
     activeChangeReview.selectedIndex = nextIndex;
+    expandChangeReviewAncestors(activeChangeReview.files[nextIndex].path);
     renderChangeReviewFiles();
     renderChangeReviewDiff();
 }
@@ -8031,8 +8299,11 @@ function openChangeReview(result, initialPath = '') {
         messageId: Number(result?.message_id || 0),
         files,
         selectedIndex,
+        collapsedDirs: new Set(),
+        treeRoot: changeReviewCommonRoot(files),
         lastFocus: document.activeElement,
     };
+    expandChangeReviewAncestors(files[selectedIndex]?.path || '');
     document.getElementById('changeReviewTotals').innerHTML = `
         <b>+${files.reduce((total, file) => total + file.additions, 0)}</b>
         <em>-${files.reduce((total, file) => total + file.deletions, 0)}</em>`;
