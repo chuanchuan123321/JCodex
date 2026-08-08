@@ -80,6 +80,7 @@ let activePreviewUrl = '';
 let previewSyncGeneration = 0;
 let previewLastFocusedElement = null;
 let activeChangeReview = null;
+const WORKSPACE_DRAG_TYPE = 'application/x-jcodex-workspace-file';
 const activePlanProgress = new Map();
 const activeAgentTeams = new Map();
 let activeAgentDetail = null;
@@ -2967,8 +2968,97 @@ async function addDroppedComposerItems(dataTransfer) {
     }
 }
 
-function hasDraggedFiles(dataTransfer) {
-    return Array.from(dataTransfer?.types || []).includes('Files');
+function hasComposerDragItems(dataTransfer) {
+    if (!dataTransfer) return false;
+    const types = Array.from(dataTransfer.types || []);
+    return types.includes('Files') || types.includes(WORKSPACE_DRAG_TYPE);
+}
+
+function getWorkspaceDragPayload(dataTransfer) {
+    try {
+        const raw = dataTransfer?.getData(WORKSPACE_DRAG_TYPE);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.folder === 'string'
+            && typeof parsed.path === 'string' && parsed.path) {
+            return parsed;
+        }
+    } catch (_error) {
+        /* not a workspace file drag */
+    }
+    return null;
+}
+
+async function resolveWorkspacePath(folder, path) {
+    if (typeof eel?.get_workspace_path !== 'function') return null;
+    try {
+        const result = await eel.get_workspace_path(folder, path)();
+        if (result?.success) {
+            return {
+                path: String(result.path || ''),
+                isDir: Boolean(result.is_dir),
+                name: String(result.name || getPathBaseName(path) || ''),
+            };
+        }
+    } catch (error) {
+        if (!handleEelConnectionError(error)) {
+            console.error('Failed to resolve workspace path:', error);
+        }
+    }
+    return null;
+}
+
+async function readWorkspaceFile(folder, path) {
+    if (typeof eel?.read_workspace_file_bytes !== 'function') return null;
+    try {
+        const result = await eel.read_workspace_file_bytes(folder, path)();
+        if (!result?.success || !result.data) return null;
+        return {
+            name: String(result.name || getPathBaseName(path) || '文件'),
+            size: Number(result.size || 0),
+            mimeType: String(result.mime_type || 'application/octet-stream'),
+            data: `data:${result.mime_type || 'application/octet-stream'};base64,${result.data}`,
+        };
+    } catch (error) {
+        if (!handleEelConnectionError(error)) {
+            console.error('Failed to read workspace file:', error);
+        }
+    }
+    return null;
+}
+
+async function addDroppedWorkspaceFile(payload) {
+    const folder = String(payload.folder || '');
+    const path = String(payload.path || '');
+    const fallbackName = String(payload.name || getPathBaseName(path) || '');
+    const resolved = await resolveWorkspacePath(folder, path);
+    if (!resolved) return;
+    if (payload.isFolder || resolved.isDir) {
+        addComposerDirectoryReferences([resolved.path], [resolved.name || fallbackName]);
+        return;
+    }
+    const fileData = await readWorkspaceFile(folder, path);
+    if (!fileData) {
+        showToast(`${fallbackName} 读取失败`, 'error');
+        return;
+    }
+    let bytes = null;
+    try {
+        const binary = atob(fileData.data.split(',')[1] || '');
+        bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    } catch (_error) {
+        /* invalid base64 */
+    }
+    if (!bytes || !bytes.length) {
+        showToast(`${fileData.name} 读取失败`, 'error');
+        return;
+    }
+    const file = new File([bytes], fileData.name, {
+        type: fileData.mimeType,
+        lastModified: Date.now(),
+    });
+    await addComposerAttachments([file]);
 }
 
 // Custom Input Dialog
@@ -3428,28 +3518,33 @@ function initializeUI() {
         renderSkillStore(skillStoreSearch.value);
     });
     inputContainer?.addEventListener('dragenter', (event) => {
-        if (!hasDraggedFiles(event.dataTransfer)) return;
+        if (!hasComposerDragItems(event.dataTransfer)) return;
         event.preventDefault();
         composerDragDepth += 1;
         inputContainer.classList.add('is-dragging-files');
     });
     inputContainer?.addEventListener('dragover', (event) => {
-        if (!hasDraggedFiles(event.dataTransfer)) return;
+        if (!hasComposerDragItems(event.dataTransfer)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
         inputContainer.classList.add('is-dragging-files');
     });
     inputContainer?.addEventListener('dragleave', (event) => {
-        if (!hasDraggedFiles(event.dataTransfer)) return;
+        if (!hasComposerDragItems(event.dataTransfer)) return;
         composerDragDepth = Math.max(0, composerDragDepth - 1);
         if (composerDragDepth === 0) inputContainer.classList.remove('is-dragging-files');
     });
     inputContainer?.addEventListener('drop', async (event) => {
-        if (!hasDraggedFiles(event.dataTransfer)) return;
+        if (!hasComposerDragItems(event.dataTransfer)) return;
         event.preventDefault();
         composerDragDepth = 0;
         inputContainer.classList.remove('is-dragging-files');
-        await addDroppedComposerItems(event.dataTransfer);
+        const workspaceDrag = getWorkspaceDragPayload(event.dataTransfer);
+        if (workspaceDrag) {
+            await addDroppedWorkspaceFile(workspaceDrag);
+        } else {
+            await addDroppedComposerItems(event.dataTransfer);
+        }
         messageInput.focus();
     });
     clearQueueButton?.addEventListener('click', clearMessageQueue);
@@ -9402,7 +9497,7 @@ function renderWorkspaceTree(folder, path = '') {
                         <button class="workspace-tree-toggle" type="button" data-workspace-toggle="${escapeHtml(itemPath)}" aria-label="${isExpanded ? '收起' : '展开'} ${safeName}" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="${childId}">
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
                         </button>
-                        <button class="workspace-tree-item" type="button" data-workspace-folder="${escapeHtml(itemPath)}" title="${safeName}">
+                        <button class="workspace-tree-item" type="button" draggable="true" data-workspace-folder="${escapeHtml(itemPath)}" title="${safeName}">
                             ${workspaceFolderIconMarkup()}
                             <span class="file-name">${safeName}</span>
                         </button>
@@ -9416,7 +9511,7 @@ function renderWorkspaceTree(folder, path = '') {
         }
         return `
             <div class="workspace-tree-row is-file">
-                <button class="workspace-tree-item" type="button" data-workspace-file="${escapeHtml(itemPath)}" title="${safeName}">
+                <button class="workspace-tree-item" type="button" draggable="true" data-workspace-file="${escapeHtml(itemPath)}" title="${safeName}">
                     ${workspaceFileIconMarkup()}
                     <span class="file-name">${safeName}</span>
                     <span class="file-size">${formatFileSize(item.size)}</span>
@@ -9450,6 +9545,26 @@ function bindWorkspaceTreeEvents(folder, rootElement) {
         if (!folderItem) return;
         event.preventDefault();
         openWorkspaceFolder(folder, folderItem.dataset.workspaceFolder);
+    });
+    rootElement.addEventListener('dragstart', event => {
+        const folderItem = event.target.closest('[data-workspace-folder]');
+        const fileItem = event.target.closest('[data-workspace-file]');
+        const sourceItem = folderItem || fileItem;
+        if (!sourceItem) return;
+        const itemPath = String(
+            sourceItem.dataset.workspaceFolder || sourceItem.dataset.workspaceFile || ''
+        );
+        if (!itemPath) return;
+        const name = String(sourceItem.querySelector('.file-name')?.textContent || '')
+            .trim() || getPathBaseName(itemPath);
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('text/plain', `workspace/${folder}/${itemPath}`);
+        event.dataTransfer.setData(WORKSPACE_DRAG_TYPE, JSON.stringify({
+            folder,
+            path: itemPath,
+            name,
+            isFolder: Boolean(folderItem),
+        }));
     });
 }
 

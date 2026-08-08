@@ -601,7 +601,11 @@ def _chat_media_roots(conversation_id: str = "") -> list[Path]:
 def _resolve_chat_media_file(
     raw_path: str, conversation_id: str = ""
 ) -> tuple[Path, str]:
-    """Resolve an allowlisted image or video path without following escapes."""
+    """Resolve a local image or video path without following escapes.
+
+    Absolute paths may point anywhere on disk; relative paths must stay
+    inside the active task roots. Only image/video files are accepted.
+    """
     source = str(raw_path or "").strip()
     if not source or "\x00" in source:
         raise ValueError("Media path is invalid")
@@ -615,8 +619,9 @@ def _resolve_chat_media_file(
 
     roots = _chat_media_roots(conversation_id)
     requested = Path(source).expanduser()
-    candidates = [requested] if requested.is_absolute() else []
-    if not requested.is_absolute():
+    requested_is_absolute = requested.is_absolute()
+    candidates = [requested] if requested_is_absolute else []
+    if not requested_is_absolute:
         candidates.extend(root / requested for root in roots)
         candidates.append(PROJECT_ROOT / requested)
 
@@ -625,7 +630,9 @@ def _resolve_chat_media_file(
             resolved = candidate.resolve(strict=True)
         except OSError:
             continue
-        if not resolved.is_file() or not any(
+        if not resolved.is_file():
+            continue
+        if not requested_is_absolute and not any(
             resolved == root or root in resolved.parents for root in roots
         ):
             continue
@@ -7215,6 +7222,46 @@ def open_workspace_file(folder: str, filename: str):
         return {"success": True}
     except Exception as e:
         return {"error": str(e)}
+
+
+@eel.expose
+def get_workspace_path(folder: str, path: str):
+    """Resolve a workspace tree file or folder to its absolute path."""
+    try:
+        target = _resolve_within(_workspace_folder(folder), path)
+        if not target.exists():
+            return {"success": False, "error": "Path not found"}
+        return {
+            "success": True,
+            "path": str(target.resolve()),
+            "is_dir": target.is_dir(),
+            "name": target.name or str(path).strip(),
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@eel.expose
+def read_workspace_file_bytes(folder: str, path: str):
+    """Read a workspace tree file for attachment upload (base64, <=12 MB)."""
+    try:
+        target = _resolve_within(_workspace_folder(folder), path)
+        if not target.is_file():
+            return {"success": False, "error": "File not found"}
+        size = target.stat().st_size
+        if size > MAX_ATTACHMENT_BYTES:
+            return {"success": False, "error": "超过 12 MB"}
+        guessed_type, _encoding = mimetypes.guess_type(target.name)
+        content = target.read_bytes()
+        return {
+            "success": True,
+            "name": target.name,
+            "size": size,
+            "mime_type": guessed_type or "application/octet-stream",
+            "data": base64.b64encode(content).decode("ascii"),
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @eel.expose

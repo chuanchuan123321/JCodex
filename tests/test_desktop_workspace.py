@@ -78,8 +78,13 @@ def test_chat_media_resolver_allows_output_media_and_rejects_escapes(
         video_path,
         "video/mp4",
     )
+    # 绝对路径允许指向工作区之外，相对路径逃逸仍被拒绝
+    assert desktop._resolve_chat_media_file(str(outside_path)) == (
+        outside_path,
+        "image/png",
+    )
     with pytest.raises(ValueError, match="outside the active task"):
-        desktop._resolve_chat_media_file(str(outside_path))
+        desktop._resolve_chat_media_file("../../private.png")
     with pytest.raises(ValueError, match="Only local media paths"):
         desktop._resolve_chat_media_file("data:image/png;base64,AAAA")
 

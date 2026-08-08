@@ -82,3 +82,6 @@ workspace/projects/*
 !workspace/conversations/.gitkeep
 workspace/rollback/*
 desktop_port.txt
+
+# Local Codex restore backups
+.codex-backup/

@@ -6,6 +6,34 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
 
+def _normalize_image_items(image_items: Any) -> list:
+    """Normalize image entries (URL strings or {url, description} dicts) to (url, description) pairs."""
+    normalized = []
+    seen = set()
+    for item in image_items or []:
+        if isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+            description = str(item.get("description") or "").strip()
+        elif isinstance(item, str):
+            url = item.strip()
+            description = ""
+        else:
+            continue
+        if url and url not in seen:
+            seen.add(url)
+            normalized.append((url, description))
+    return normalized
+
+
+def _format_image_links(images: list, limit: int = 8) -> list:
+    """Render image (url, description) pairs as Markdown image links, capped at limit."""
+    lines = []
+    for index, (url, description) in enumerate(images[:limit], 1):
+        alt = (description or f"image {index}").replace("]", "\\]")
+        lines.append(f"![{alt}]({url})")
+    return lines
+
+
 @dataclass
 class WebSearchResult:
     success: bool
@@ -92,6 +120,9 @@ class WebSearchTool:
 
             results.append(f"{i}. {title}")
             results.append(f"   URL: {url}")
+            image = item.get("image") or ""
+            if image:
+                results.append(f"   图片: ![image]({image})")
             if content:
                 results.append(f"   {content}...")
             results.append("")
@@ -111,6 +142,7 @@ class WebSearchTool:
             "api_key": self.api_key,
             "query": query,
             "include_answer": True,
+            "include_images": True,
             "max_results": num_results,
         }
 
@@ -140,6 +172,17 @@ class WebSearchTool:
                 results.append(f"   {content}...")
             results.append("")
 
+        # Include query-related images (top-level list plus per-result images)
+        image_items = list(data.get("images") or [])
+        for item in data.get("results", []):
+            image_items.extend(item.get("images") or [])
+
+        images = _normalize_image_items(image_items)
+        if images:
+            results.append("相关图片：")
+            results.extend(_format_image_links(images))
+            results.append("")
+
         if len(results) == 1:
             return WebSearchResult(
                 success=True, results=f"No results found for: {query}"
@@ -155,7 +198,7 @@ def get_websearch_tool_definition() -> Dict[str, Any]:
         "type": "function",
         "function": {
             "name": "websearch",
-            "description": "Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs. Provides up-to-date information for current events and recent data. Supports configurable result counts and returns the content from the most relevant websites.",
+            "description": "Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs. Provides up-to-date information for current events and recent data. Supports configurable result counts, returns the content from the most relevant websites, and includes related image links when available.",
             "parameters": {
                 "type": "object",
                 "properties": {
