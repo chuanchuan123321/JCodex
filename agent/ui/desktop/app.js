@@ -7953,14 +7953,27 @@ function formatToolDuration(milliseconds) {
 
 function toolResultFailed(value) {
     const text = String(value || '').trim();
-    if (/^(?:error|failed|failure):/i.test(text)) return true;
-    if (!text.startsWith('{')) return false;
-    try {
-        const parsed = JSON.parse(text);
-        return parsed && typeof parsed === 'object' && parsed.success === false;
-    } catch (error) {
-        return false;
+    const lowered = text.toLowerCase();
+    if (text.startsWith('{')) {
+        try {
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed === 'object' && parsed.success === false) return true;
+        } catch (error) {
+            /* fall through to text heuristics */
+        }
     }
+    if (/^(?:error|failed|failure|fatal):/i.test(text)) return true;
+    if (/^✗/.test(text)) return true;
+    if (/^(?:错误|失败)[：:]|^执行失败|^(?:unable to|error occurred)|^无法/.test(text)) return true;
+    const markers = [
+        'is not recognized as an internal or external command',
+        '不是内部或外部命令',
+        'command not found',
+        'no such file or directory',
+        'permission denied',
+        'traceback (most recent call last)',
+    ];
+    return markers.some(marker => lowered.includes(marker));
 }
 
 function startToolExecution(result, msgId, isPreparing = false) {

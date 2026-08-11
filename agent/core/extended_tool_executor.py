@@ -264,7 +264,7 @@ class ExtendedToolExecutor:
                 "type": "function",
                 "function": {
                     "name": "project_preview",
-                    "description": "Start, inspect, or stop a persistent loopback-only Web project preview. After completing and verifying a website or Web app, proactively call action=start so the user receives the preview component before the task ends. Use this instead of bash for long-running development servers. For Python static sites, `python3 -m http.server` is enough: the preview manager injects the managed port and 127.0.0.1 binding automatically.",
+                    "description": "Start, inspect, or stop a persistent loopback-only Web project preview. After completing and verifying a website or Web app, proactively call action=start so the user receives the preview component before the task ends. Use this instead of bash for long-running development servers. For Python static sites, `python3 -m http.server` is enough: the preview manager injects the managed port and 127.0.0.1 binding automatically, and on Windows packaged builds the bundled runtime serves static sites the same way, so no python3 is required.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -318,7 +318,17 @@ class ExtendedToolExecutor:
                 "type": "function",
                 "function": {
                     "name": "bash",
-                    "description": "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures. AVOID using cd - use the workdir parameter instead.",
+                    "description": (
+                        "Executes a given shell command with optional timeout, ensuring proper handling "
+                        "and security measures. AVOID using cd - use the workdir parameter instead."
+                        + (
+                            " On Windows commands run in cmd.exe: use Windows-compatible commands "
+                            "(dir, type, copy, move, del, findstr, where, mkdir, rmdir) instead of "
+                            "ls/cat/cp/mv/rm/grep; python3 does not exist in cmd.exe - use python or py if installed; PowerShell is available via powershell -Command \"...\"."
+                            if os.name == "nt"
+                            else ""
+                        )
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {

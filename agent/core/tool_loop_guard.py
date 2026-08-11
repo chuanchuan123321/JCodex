@@ -155,7 +155,34 @@ class ToolLoopGuard:
                     return False
             except (json.JSONDecodeError, TypeError):
                 pass
-        return not lowered.startswith(("error:", "failed:", "failure:"))
+        if lowered.startswith(
+            (
+                "error:",
+                "failed:",
+                "failure:",
+                "fatal:",
+                "✗",
+                "错误：",
+                "错误:",
+                "失败：",
+                "失败:",
+                "执行失败",
+                "error occurred",
+                "unable to",
+                "无法",
+            )
+        ):
+            return False
+        # 内嵌的典型命令失败信息（Windows cmd / Unix shell / 异常堆栈）。
+        failure_markers = (
+            "is not recognized as an internal or external command",
+            "不是内部或外部命令",
+            "command not found",
+            "no such file or directory",
+            "permission denied",
+            "traceback (most recent call last)",
+        )
+        return not any(marker in lowered for marker in failure_markers)
 
     def before_call(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         signature, kind = self._signature(tool_name, params)
