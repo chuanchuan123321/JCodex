@@ -87,31 +87,11 @@ jobs:
           Compress-Archive -Path "electron/dist/JCodex-win32-x64" -DestinationPath $zip -Force
           Get-Item $zip | Select-Object FullName, Length
 
-      - name: Install NSIS
-        shell: pwsh
-        run: choco install nsis -y --no-progress
-
-      - name: Build NSIS installer
-        working-directory: electron
-        shell: pwsh
-        run: |
-          $version = if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}".TrimStart('v')
-          } else {
-            (Get-Content package.json | ConvertFrom-Json).version
-          }
-          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          if (-not (Test-Path $makensis)) { $makensis = "${env:ProgramFiles}\NSIS\makensis.exe" }
-          if (-not (Test-Path $makensis)) { throw "makensis not found" }
-          & $makensis /DVERSION=$version nsis\installer.nsi
-          Get-Item "JCodex-Setup-$version.exe" | Select-Object FullName, Length
-
       - name: Stage release files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "electron/dist/release-files" | Out-Null
           Copy-Item "electron/dist/JCodex-windows-x64.zip" "electron/dist/release-files/"
-          Copy-Item "electron/JCodex-Setup-*.exe" "electron/dist/release-files/"
           Get-ChildItem "electron/dist/release-files" | Select-Object Name, Length
 
       - uses: actions/upload-artifact@v4
