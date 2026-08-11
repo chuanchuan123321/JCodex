@@ -1,7 +1,7 @@
 'use strict';
 
-const { app, BrowserWindow, dialog } = require('electron');
-const { spawn } = require('child_process');
+const { app, BrowserWindow, dialog, Menu } = require('electron');
+const { spawn, execFileSync } = require('child_process');
 const http = require('http');
 const path = require('path');
 
@@ -71,6 +71,7 @@ if (!gotLock) {
       minHeight: 600,
       show: false,
       title: 'JCodex',
+      autoHideMenuBar: true,
       icon: process.platform === 'win32'
         ? path.join(__dirname, 'build', 'icon.ico')
         : path.join(__dirname, 'build', 'icon.icns'),
@@ -103,6 +104,7 @@ if (!gotLock) {
 
   function startBackend() {
     const portFile = path.join(DATA_DIR, 'desktop_port.txt');
+    killStaleBackend();
     try {
       require('fs').unlinkSync(portFile);
     } catch (_e) {
@@ -117,6 +119,11 @@ if (!gotLock) {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    try {
+      require('fs').writeFileSync(backendPidFile(), String(pyProc.pid));
+    } catch (_e) {
+      /* ignore */
+    }
     pyProc.stdout.on('data', (d) => {
       console.log('[py]', String(d).trim());
     });
@@ -131,11 +138,71 @@ if (!gotLock) {
     });
   }
 
+  function backendPidFile() {
+    return path.join(DATA_DIR, 'desktop_backend.pid');
+  }
+
+  function backendPidIsOurs(pid) {
+    try {
+      if (process.platform === 'win32') {
+        const out = execFileSync(
+          'tasklist',
+          ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+        );
+        return /jcodex-server\.exe/i.test(String(out));
+      }
+      const out = execFileSync(
+        'ps',
+        ['-p', String(pid), '-o', 'comm='],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      return /jcodex-server/i.test(String(out));
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function killStaleBackend() {
+    // 上次异常退出（窗口关闭但后端未退出）会留下 jcodex-server 进程；
+    // 两个后端同时写同一数据目录会导致对话/记忆索引竞态损坏，因此
+    // 启动前先清理自己的残留后端（按 PID + 进程名双重校验，避免误杀）。
+    const pidFile = backendPidFile();
+    let oldPid = null;
+    try {
+      oldPid = parseInt(require('fs').readFileSync(pidFile, 'utf8').trim(), 10);
+    } catch (_e) {
+      /* no pid file yet */
+    }
+    if (oldPid && Number.isInteger(oldPid) && oldPid > 0 && backendPidIsOurs(oldPid)) {
+      try {
+        if (process.platform === 'win32') {
+          execFileSync('taskkill', ['/PID', String(oldPid), '/T', '/F'], {
+            stdio: 'ignore',
+          });
+        } else {
+          process.kill(oldPid, 'SIGTERM');
+        }
+      } catch (_e) {
+        /* process already gone */
+      }
+    }
+    try {
+      require('fs').unlinkSync(pidFile);
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
   app.whenReady().then(() => {
     if (!require('fs').existsSync(BACKEND)) {
       dialog.showErrorBox('JCodex 启动失败', '未找到后端组件，应用可能已损坏。');
       app.quit();
       return;
+    }
+    // Windows/Linux 上移除默认的 File/Edit/View 菜单栏；macOS 保留系统菜单。
+    if (process.platform !== 'darwin') {
+      Menu.setApplicationMenu(null);
     }
     startBackend();
     const portFile = path.join(DATA_DIR, 'desktop_port.txt');
@@ -180,6 +247,11 @@ if (!gotLock) {
     if (pyProc) {
       quitting = true;
       pyProc.kill();
+    }
+    try {
+      require('fs').unlinkSync(backendPidFile());
+    } catch (_e) {
+      /* ignore */
     }
   });
 }

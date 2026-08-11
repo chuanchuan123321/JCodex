@@ -18,7 +18,7 @@ SetCompressor lzma
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "dist\JCodex-win32-x64\*.*"
+  File /r "..\dist\JCodex-win32-x64\*.*"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateShortcut "$SMPROGRAMS\JCodex.lnk" "$INSTDIR\JCodex.exe"
   CreateShortcut "$DESKTOP\JCodex.lnk" "$INSTDIR\JCodex.exe"

@@ -75,7 +75,9 @@ class ProjectStore:
 
     def _write_index(self, value: Dict[str, Any]) -> None:
         self.index_file.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.index_file.with_suffix(".json.tmp")
+        temp_path = self.index_file.with_name(
+            f"{self.index_file.name}.{uuid.uuid4().hex}.tmp"
+        )
         temp_path.write_text(
             json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
         )

@@ -100,7 +100,10 @@ jobs:
           } else {
             (Get-Content package.json | ConvertFrom-Json).version
           }
-          makensis /DVERSION=$version nsis\installer.nsi
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) { $makensis = "${env:ProgramFiles}\NSIS\makensis.exe" }
+          if (-not (Test-Path $makensis)) { throw "makensis not found" }
+          & $makensis /DVERSION=$version nsis\installer.nsi
           Get-Item "JCodex-Setup-$version.exe" | Select-Object FullName, Length
 
       - name: Stage release files

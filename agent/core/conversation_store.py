@@ -64,7 +64,13 @@ class ConversationStore:
                 normalized_items.append(metadata)
                 changed = changed or metadata != item
 
-            index["conversations"] = normalized_items
+            merged_items = self._merge_empty_untitled(
+                normalized_items, index.get("active_id")
+            )
+            if len(merged_items) != len(normalized_items):
+                changed = True
+            index["conversations"] = merged_items
+            normalized_items = merged_items
             visible_items = [
                 item for item in normalized_items if not item.get("is_split_task")
             ]
@@ -81,6 +87,49 @@ class ConversationStore:
             if changed:
                 self._write_index(index)
 
+    def _merge_empty_untitled(
+        self, items: List[Dict[str, Any]], active_id: Optional[str]
+    ) -> List[Dict[str, Any]]:
+        """Collapse duplicate auto-created empty ``新任务`` conversations.
+
+        Only conversations that were never used (no messages, no project, not a
+        split task and not archived) are eligible, so user content is never
+        deleted.  The currently active conversation wins, otherwise the newest.
+        """
+        empty = [
+            item
+            for item in items
+            if str(item.get("title", "")) == "新任务"
+            and item.get("message_count", 0) == 0
+            and not item.get("project_id")
+            and not item.get("is_split_task")
+            and not item.get("archived")
+        ]
+        if len(empty) <= 1:
+            return items
+        empty.sort(key=self._index_sort_time, reverse=True)
+        active_id = str(active_id or "")
+        keep_id = (
+            active_id
+            if any(str(item.get("id", "")) == active_id for item in empty)
+            else empty[0]["id"]
+        )
+        removed_ids = {
+            str(item.get("id", ""))
+            for item in empty
+            if str(item.get("id", "")) != keep_id
+        }
+        for conversation_id in removed_ids:
+            try:
+                shutil.rmtree(
+                    self._conversation_dir(conversation_id), ignore_errors=True
+                )
+            except ValueError:
+                pass
+        return [
+            item for item in items if str(item.get("id", "")) not in removed_ids
+        ]
+
     def _read_json(self, path: Path, default: Any) -> Any:
         try:
             if path.exists():
@@ -91,7 +140,9 @@ class ConversationStore:
 
     def _write_json(self, path: Path, value: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(path.suffix + ".tmp")
+        # 使用唯一临时文件名：并发进程同时写入时不会互相覆盖 .tmp，
+        # 避免 os.replace 抛 FileNotFoundError 导致后端崩溃。
+        temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         temp_path.write_text(
             json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
         )

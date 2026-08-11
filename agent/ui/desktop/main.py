@@ -8240,6 +8240,15 @@ def get_token_count(conversation_id: str = ""):
 def get_embedding_status():
     """Return the embedding provider used by Grok-style memory search."""
     try:
+        if os_agent.memory_store is None and os_agent.ai_engine is not None:
+            # 初始化中途失败（例如首次启动被并发/残留后端打断）时懒恢复
+            # 记忆存储，避免界面一直显示「记忆检索异常」。
+            target_id = os_agent.conversation_id or conversation_store.active_id() or ""
+            if target_id:
+                try:
+                    os_agent.activate_conversation(target_id)
+                except (RuntimeError, ValueError, OSError):
+                    pass
         if os_agent.memory_store:
             return os_agent.memory_store.embedding_provider.status()
         return {"provider": "uninitialized", "available": False}
