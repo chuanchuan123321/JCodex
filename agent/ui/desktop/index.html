@@ -13,9 +13,24 @@
     <div class="app-container">
         <aside class="sidebar sidebar-shell" id="sidebarShell">
             <div class="sidebar-header">
-                <div class="logo">
+                <div class="logo app-mode-switcher" id="appModeSwitcher" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" title="切换应用模式">
                     <img class="logo-icon theme-asset-logo" src="assets/kylin-agent-mark-light.svg" alt="">
-                    <span class="logo-text">JCodex</span>
+                    <span class="logo-text" id="appModeLabel">JCodex</span>
+                    <svg class="app-mode-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                    <div class="app-mode-menu" id="appModeMenu" role="menu" hidden>
+                        <button class="app-mode-item" role="menuitem" data-mode="jcodex" type="button">
+                            <span class="app-mode-item-copy">
+                                <span class="app-mode-item-name">JCodex</span>
+                                <span class="app-mode-item-desc">代码调试、项目开发</span>
+                            </span>
+                        </button>
+                        <button class="app-mode-item" role="menuitem" data-mode="jcchat" type="button">
+                            <span class="app-mode-item-copy">
+                                <span class="app-mode-item-name">JC-Chat</span>
+                                <span class="app-mode-item-desc">学习和聊天</span>
+                            </span>
+                        </button>
+                    </div>
                 </div>
                 <button class="sidebar-collapse-button" id="sidebarCollapseButton" type="button" aria-label="收起工作台导航" aria-expanded="true" title="收起工作台导航">
                     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -246,6 +261,10 @@
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
                                 <span>数据</span><span class="sidebar-action-hint">›</span>
                             </button>
+                            <button class="sidebar-action-item" id="archiveBtn" type="button" onclick="openArchiveModal()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>
+                                <span>归档任务</span><span class="sidebar-action-hint">›</span>
+                            </button>
                         </div>
                     </section>
                 </div>
@@ -401,21 +420,21 @@
                                         </svg>
                                         <span>上传附件</span>
                                     </button>
-                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="upload-folder">
+                                    <button class="composer-add-menu-item tool-only-composer-item" type="button" role="menuitem" data-composer-action="upload-folder">
                                         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                                             <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                                             <path d="M12 10v6M9 13h6"/>
                                         </svg>
                                         <span>上传文件夹</span>
                                     </button>
-                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="enable-plan-mode">
+                                    <button class="composer-add-menu-item tool-only-composer-item" type="button" role="menuitem" data-composer-action="enable-plan-mode">
                                         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                                             <path d="M9 6h11M9 12h11M9 18h11"/>
                                             <path d="M4 6h.01M4 12h.01M4 18h.01" stroke-width="3" stroke-linecap="round"/>
                                         </svg>
                                         <span>计划模式</span>
                                     </button>
-                                    <button class="composer-add-menu-item" type="button" role="menuitem" data-composer-action="enable-multi-agent-mode">
+                                    <button class="composer-add-menu-item tool-only-composer-item" type="button" role="menuitem" data-composer-action="enable-multi-agent-mode">
                                         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
                                             <circle cx="7" cy="7" r="2.4"/>
                                             <circle cx="17" cy="7" r="2.4"/>
@@ -440,9 +459,6 @@
                                     <path d="M9 12l2 2 4-5"/>
                                 </svg>
                                 <span id="accessModeLabel">询问模式</span>
-                                <svg class="access-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M6 9l6 6 6-6"/>
-                                </svg>
                             </button>
                             <div class="plan-mode-pill" id="planModePill" aria-label="计划模式已开启" hidden>
                                 <button class="plan-mode-close" id="planModeToggle" type="button" aria-label="关闭计划模式" title="关闭计划模式">
@@ -759,7 +775,11 @@
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingApiModel">模型</label>
-                    <input type="text" class="settings-input" id="settingApiModel" placeholder="deepseek-v4-pro">
+                    <div class="settings-model-row">
+                        <input type="text" class="settings-input" id="settingApiModel" placeholder="deepseek-v4-pro">
+                        <button type="button" class="btn-small" id="localModelButton" onclick="openLocalModelPicker()" title="查询本地运行的模型服务">本地模型</button>
+                    </div>
+                    <div class="local-model-menu" id="localModelMenu" hidden></div>
                 </div>
                 <div class="settings-group">
                     <label class="settings-label" for="settingSupportsVision">多模态视觉（仅支持多模态模型）</label>
@@ -772,45 +792,79 @@
                     <label class="settings-label" for="settingTavilyKey">Tavily API Key <span class="settings-optional">（可选）</span></label>
                     <input type="password" class="settings-input" id="settingTavilyKey" placeholder="tvly-...">
                 </div>
-                <div class="settings-divider"></div>
-                <div class="settings-group">
-                    <label class="settings-label" for="settingMaxSteps">最大步骤 <span class="settings-optional">（默认 100）</span></label>
-                    <input type="number" class="settings-input" id="settingMaxSteps" placeholder="100" min="1" max="200">
+                <div class="settings-group" id="settingCustomPromptGroup">
+                    <label class="settings-label" for="settingCustomSystemPrompt">自定义系统提示词 <span class="settings-optional">（应用于 JC-Chat 对话模式，留空使用默认）</span></label>
+                    <textarea class="settings-input settings-textarea" id="settingCustomSystemPrompt" rows="4" placeholder="例如：你是 JC-Chat，一个简洁、友好的 AI 助手…"></textarea>
                 </div>
-                <div class="settings-group">
-                    <label class="settings-label" for="settingMaxTokens">单次回答最大 Token <span class="settings-optional">（默认 50000）</span></label>
-                    <input type="number" class="settings-input" id="settingMaxTokens" placeholder="50000" min="1000">
-                </div>
-                <div class="settings-group">
-                    <label class="settings-label" for="settingContextWindow">最大上下文长度 <span class="settings-optional">（Token）</span></label>
-                    <div class="settings-slider-row">
-                        <input type="range" id="settingContextWindow" min="0" max="3" step="1" value="1" oninput="updateContextWindowLabel(); previewContextWindow()">
-                        <span class="settings-slider-value" id="settingContextWindowValue">256K</span>
+                <div class="settings-divider" id="settingsToolDivider"></div>
+                <div class="settings-tool-section" id="settingsToolSection">
+                    <div class="settings-group">
+                        <label class="settings-label" for="settingMaxSteps">最大步骤 <span class="settings-optional">（默认 100）</span></label>
+                        <input type="number" class="settings-input" id="settingMaxSteps" placeholder="100" min="1" max="200">
                     </div>
-                    <div class="settings-slider-labels">
-                        <span>128K</span>
-                        <span>256K</span>
-                        <span>512K</span>
-                        <span>1M</span>
+                    <div class="settings-group">
+                        <label class="settings-label" for="settingMaxTokens">单次回答最大 Token <span class="settings-optional">（默认 50000）</span></label>
+                        <input type="number" class="settings-input" id="settingMaxTokens" placeholder="50000" min="1000">
                     </div>
-                </div>
-                <div class="settings-group">
-                    <label class="settings-label" for="settingAutoCompactPercent">自动压缩阈值 <span class="settings-optional">（上下文占用百分比，默认 85%）</span></label>
-                    <input type="number" class="settings-input" id="settingAutoCompactPercent" placeholder="85" min="1" max="100">
-                </div>
-                <div class="settings-group">
-                    <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 8）</span></label>
-                    <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="8" min="0" max="100">
-                </div>
-                <div class="settings-divider"></div>
-                <div class="settings-group">
-                    <label class="settings-label" for="settingVoiceEdgeVoice">语音回复音色 <span class="settings-optional">（edge-tts 在线语音）</span></label>
-                    <select class="settings-input" id="settingVoiceEdgeVoice"></select>
+                    <div class="settings-group">
+                        <label class="settings-label" for="settingContextWindow">最大上下文长度 <span class="settings-optional">（Token）</span></label>
+                        <div class="settings-slider-row">
+                            <input type="range" id="settingContextWindow" min="0" max="3" step="1" value="1" oninput="updateContextWindowLabel(); previewContextWindow()">
+                            <span class="settings-slider-value" id="settingContextWindowValue">256K</span>
+                        </div>
+                        <div class="settings-slider-labels">
+                            <span>128K</span>
+                            <span>256K</span>
+                            <span>512K</span>
+                            <span>1M</span>
+                        </div>
+                    </div>
+                    <div class="settings-group">
+                        <label class="settings-label" for="settingAutoCompactPercent">自动压缩阈值 <span class="settings-optional">（上下文占用百分比，默认 85%）</span></label>
+                        <input type="number" class="settings-input" id="settingAutoCompactPercent" placeholder="85" min="1" max="100">
+                    </div>
+                    <div class="settings-group">
+                        <label class="settings-label" for="settingMaxWebSearches">最大联网搜索次数 <span class="settings-optional">（默认 8）</span></label>
+                        <input type="number" class="settings-input" id="settingMaxWebSearches" placeholder="8" min="0" max="100">
+                    </div>
+                    <div class="settings-divider"></div>
+                    <div class="settings-group">
+                        <label class="settings-label" for="settingVoiceEdgeVoice">语音回复音色 <span class="settings-optional">（edge-tts 在线语音）</span></label>
+                        <select class="settings-input" id="settingVoiceEdgeVoice"></select>
+                    </div>
                 </div>
             </div>
             <div class="settings-modal-footer">
                 <button class="btn-cancel" onclick="closeSettingsModal()">取消</button>
                 <button class="btn-save" id="saveSettingsButton" onclick="saveSettings()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 归档任务弹窗 -->
+    <div class="settings-modal" id="archiveModal">
+        <div class="settings-modal-content" style="max-width: 700px;">
+            <div class="settings-modal-header">
+                <span>归档任务</span>
+                <button class="btn-icon" onclick="closeArchiveModal()" aria-label="关闭归档任务">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="settings-modal-body" style="max-height: 70vh;">
+                <div class="settings-group">
+                    <label class="settings-label">已归档对话</label>
+                    <div class="data-list" id="archivedConversationList">
+                        <div class="data-item">
+                            <span class="data-source">加载中...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-modal-footer">
+                <button class="btn-cancel" onclick="closeArchiveModal()">关闭</button>
+                <button class="btn-save" onclick="refreshArchivedConversations()">刷新</button>
             </div>
         </div>
     </div>

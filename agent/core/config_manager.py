@@ -49,7 +49,8 @@ class ConfigManager:
 
     def add_config(self, name: str, api_base_url: str, api_key: str, api_model: str) -> bool:
         """添加新配置"""
-        if not name or not api_base_url or not api_key or not api_model:
+        # 本地模型服务（如 llama.cpp）可以不填 API Key
+        if not name or not api_base_url or not api_model:
             return False
 
         self.configs[name] = {

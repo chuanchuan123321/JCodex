@@ -121,6 +121,12 @@ const workspaceDirectoryItems = new Map();
 const workspaceDirectoryRequests = new Map();
 const CHAT_BOTTOM_THRESHOLD = 240;
 const CHAT_BOTTOM_VIEWPORT_RATIO = 0.25;
+const CHAT_HISTORY_INITIAL_EVENTS = 120;
+const CHAT_HISTORY_LOAD_MORE_EVENTS = 120;
+const CHAT_HISTORY_LOAD_MORE_THRESHOLD = 100;
+let chatHistoryState = null;
+let chatHistoryLoading = false;
+let chatRenderTarget = null;
 const STREAM_RENDER_INTERVAL_MS = 50;
 const STREAM_RENDER_MAX_INTERVAL_MS = 120;
 const VOICE_RECOGNITION_LANGUAGE = 'zh-CN';
@@ -316,6 +322,90 @@ function canCallEel() {
 
 const PENDING_SEND_KEY = 'jcodex-pending-send';
 const LAST_AUTO_RELOAD_KEY = 'jcodex-last-auto-reload';
+const APP_MODE_KEY = 'jcodex.appMode';
+let appMode = ['jcodex', 'jcchat'].includes(localStorage.getItem(APP_MODE_KEY))
+    ? localStorage.getItem(APP_MODE_KEY)
+    : 'jcodex';
+
+function setAppMode(mode) {
+    if (!['jcodex', 'jcchat'].includes(mode)) return;
+    appMode = mode;
+    try {
+        localStorage.setItem(APP_MODE_KEY, mode);
+    } catch (_error) {
+        /* storage may be unavailable; mode still applies for this session */
+    }
+    const label = document.getElementById('appModeLabel');
+    if (label) label.textContent = mode === 'jcchat' ? 'JC-Chat' : 'JCodex';
+    document.querySelectorAll('.app-mode-item').forEach((item) => {
+        const active = item.dataset.mode === mode;
+        item.classList.toggle('is-active', active);
+        item.setAttribute('aria-checked', active ? 'true' : 'false');
+    });
+    applyAppModeUI();
+    refreshWelcomeCards();
+}
+
+function applyAppModeUI() {
+    const jcchat = appMode === 'jcchat';
+    document.body.classList.toggle('jcchat-mode', jcchat);
+    const customPromptGroup = document.getElementById('settingCustomPromptGroup');
+    if (customPromptGroup) {
+        customPromptGroup.style.display = jcchat ? '' : 'none';
+    }
+    if (!jcchat) return;
+    const activePanel = getSidebarPanelButtons()
+        .find((button) => button.classList.contains('is-active'))
+        ?.dataset.sidebarPanel;
+    if (activePanel === 'files' || activePanel === 'skills') {
+        setSidebarPanel('tasks');
+    }
+}
+
+function toggleAppModeMenu(open) {
+    const switcher = document.getElementById('appModeSwitcher');
+    const menu = document.getElementById('appModeMenu');
+    if (!switcher || !menu) return;
+    const isOpen = open !== undefined ? Boolean(open) : menu.hidden;
+    menu.hidden = !isOpen;
+    switcher.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+}
+
+function bindAppModeSwitcher() {
+    const switcher = document.getElementById('appModeSwitcher');
+    const menu = document.getElementById('appModeMenu');
+    if (!switcher || !menu) return;
+    switcher.addEventListener('click', (event) => {
+        if (event.target.closest('.app-mode-menu')) return;
+        event.stopPropagation();
+        toggleAppModeMenu();
+    });
+    switcher.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            toggleAppModeMenu();
+        } else if (event.key === 'Escape') {
+            toggleAppModeMenu(false);
+        }
+    });
+    menu.addEventListener('click', (event) => {
+        const item = event.target.closest('.app-mode-item');
+        if (!item) return;
+        setAppMode(item.dataset.mode);
+        toggleAppModeMenu(false);
+    });
+    document.addEventListener('click', (event) => {
+        if (!switcher.contains(event.target)) toggleAppModeMenu(false);
+    });
+    document.addEventListener('click', (event) => {
+        const menu = document.getElementById('localModelMenu');
+        if (!menu || menu.hidden) return;
+        if (!menu.contains(event.target) && !event.target.closest('#localModelButton')) {
+            hideLocalModelMenu();
+        }
+    });
+    setAppMode(appMode);
+}
 
 function eelBridgeReady() {
     // The bridge is usable only when the backend function is registered and
@@ -394,7 +484,7 @@ function installEelGuard() {
     }
 }
 
-function stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll) {
+function stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll, mode) {
     const base = {
         v: 1,
         message,
@@ -403,6 +493,7 @@ function stashPendingSend(message, attachments, conversationId, planMode, voiceM
         voiceMode: Boolean(voiceMode),
         multiAgentMode: Boolean(multiAgentMode),
         allowAll: Boolean(allowAll),
+        mode: mode || 'jcodex',
         ts: Date.now(),
     };
     try {
@@ -423,8 +514,8 @@ function stashPendingSend(message, attachments, conversationId, planMode, voiceM
     }
 }
 
-function autoRecoverEelBridge(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll) {
-    stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll);
+function autoRecoverEelBridge(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll, mode) {
+    stashPendingSend(message, attachments, conversationId, planMode, voiceMode, multiAgentMode, allowAll, mode);
     recoverEelBridge();
 }
 
@@ -451,7 +542,8 @@ async function restorePendingSend() {
             payload.planMode,
             payload.voiceMode,
             payload.multiAgentMode,
-            payload.allowAll
+            payload.allowAll,
+            payload.mode || 'jcodex'
         );
         if (payload.droppedAttachments) {
             showToast('附件过大未能保留，已自动重发文字消息', 'info', 4000);
@@ -465,6 +557,64 @@ function getChatDistanceFromBottom(chatMessages = document.getElementById('chatM
         0,
         chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight
     );
+}
+
+function getChatRenderHost() {
+    return chatRenderTarget || document.getElementById('chatMessages');
+}
+
+function renderConversationSliced(chatMessages, messages) {
+    chatHistoryState = null;
+    chatHistoryLoading = false;
+    const total = messages.length;
+    if (total <= CHAT_HISTORY_INITIAL_EVENTS) {
+        renderConversationEvents(messages);
+        return;
+    }
+    const firstIndex = total - CHAT_HISTORY_INITIAL_EVENTS;
+    renderConversationEvents(messages.slice(firstIndex));
+    chatHistoryState = {
+        conversationId: String(activeConversationId || ''),
+        messages,
+        firstIndex,
+    };
+}
+
+function maybeLoadOlderChatHistory(chatMessages) {
+    const state = chatHistoryState;
+    if (!state || chatHistoryLoading) return;
+    if (String(state.conversationId) !== String(activeConversationId || '')) return;
+    if (state.firstIndex <= 0) return;
+    if (chatMessages.scrollTop > CHAT_HISTORY_LOAD_MORE_THRESHOLD) return;
+
+    const messages = state.messages;
+    if (!messages.length) return;
+    const loadStart = Math.max(0, state.firstIndex - CHAT_HISTORY_LOAD_MORE_EVENTS);
+    const batch = messages.slice(loadStart, state.firstIndex);
+    if (!batch.length) return;
+
+    const anchor = chatMessages.firstChild;
+    if (!anchor) return;
+    const anchorTop = anchor.getBoundingClientRect().top;
+    const wasRestoring = isRestoringConversation;
+    chatHistoryLoading = true;
+    isRestoringConversation = true;
+    try {
+        const fragment = document.createElement('div');
+        chatRenderTarget = fragment;
+        renderConversationEvents(batch);
+        chatRenderTarget = null;
+        const nodes = Array.from(fragment.children);
+        if (!nodes.length) return;
+        chatMessages.prepend(...nodes);
+        const delta = anchor.getBoundingClientRect().top - anchorTop;
+        if (delta) chatMessages.scrollTop += delta;
+        state.firstIndex = loadStart;
+    } finally {
+        chatRenderTarget = null;
+        chatHistoryLoading = false;
+        isRestoringConversation = wasRestoring;
+    }
 }
 
 function setChatAutoFollow(enabled) {
@@ -1895,7 +2045,7 @@ function renderAgentTeamCard(snapshot, animate = true) {
     if (!snapshot || snapshot.conversationId !== String(activeConversationId || '')) {
         return null;
     }
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = getChatRenderHost();
     if (!chatMessages) return null;
     let card = snapshot.element?.isConnected ? snapshot.element : null;
     const isNew = !card;
@@ -2651,14 +2801,24 @@ function updateConversationListItemState(conversationId, updates = {}) {
 }
 
 function clearMessageQueue(conversationId = '') {
-    const targetId = String(conversationId || '');
-    messageQueue = targetId
-        ? messageQueue.filter(item => (
-            typeof item !== 'object'
-            || String(item.conversationId || '') !== targetId
-        ))
-        : [];
+    const targetId = String(conversationId || activeConversationId || '');
+    messageQueue = messageQueue.filter(item => {
+        const itemId = typeof item === 'object'
+            ? String(item.conversationId || '')
+            : targetId;
+        return itemId !== targetId;
+    });
     updateQueueDisplay();
+}
+
+function queuedCountForConversation(conversationId) {
+    const targetId = String(conversationId || activeConversationId || '');
+    return messageQueue.filter(item => {
+        const itemId = typeof item === 'object'
+            ? String(item.conversationId || '')
+            : targetId;
+        return itemId === targetId;
+    }).length;
 }
 
 async function addComposerAttachments(files) {
@@ -3141,26 +3301,34 @@ function updateQueueDisplay() {
     const queueEl = document.getElementById('messageQueue');
     const queueList = document.getElementById('queueList');
     const queueCount = document.getElementById('queueCount');
+    const activeId = String(activeConversationId || '');
 
-    if (messageQueue.length === 0) {
+    const visible = [];
+    messageQueue.forEach((item, globalIdx) => {
+        const conversationId = typeof item === 'string'
+            ? activeId
+            : String(item.conversationId || activeId);
+        if (conversationId === activeId) visible.push({ item, globalIdx });
+    });
+
+    if (visible.length === 0) {
         queueEl.style.display = 'none';
+        queueList.innerHTML = '';
         return;
     }
 
     queueEl.style.display = 'block';
-    queueCount.textContent = messageQueue.length;
+    queueCount.textContent = visible.length;
 
-    queueList.innerHTML = messageQueue.map((item, idx) => {
+    queueList.innerHTML = visible.map(({ item, globalIdx }, visibleIdx) => {
         const message = typeof item === 'string' ? item : item.message;
         const attachmentCount = typeof item === 'string' ? 0 : (item.attachments || []).length;
-        const conversationId = typeof item === 'string' ? '' : String(item.conversationId || '');
-        const taskTitle = conversations.find(entry => String(entry.id) === conversationId)?.title;
-        const label = `${taskTitle ? `${taskTitle} · ` : ''}${message || '解析附件'}${attachmentCount ? ` · ${attachmentCount} 个附件` : ''}`;
+        const label = `${message || '解析附件'}${attachmentCount ? ` · ${attachmentCount} 个附件` : ''}`;
         return `
         <div class="queue-item">
-            <span class="queue-item-number">${idx + 1}.</span>
+            <span class="queue-item-number">${visibleIdx + 1}.</span>
             <span class="queue-item-text" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-            <button class="queue-item-remove" onclick="removeFromQueue(${idx})" aria-label="移除第 ${idx + 1} 个等待任务">✕</button>
+            <button class="queue-item-remove" onclick="removeFromQueue(${globalIdx})" aria-label="移除第 ${visibleIdx + 1} 个等待任务">✕</button>
         </div>
     `;
     }).join('');
@@ -3547,7 +3715,7 @@ function initializeUI() {
         }
         messageInput.focus();
     });
-    clearQueueButton?.addEventListener('click', clearMessageQueue);
+    clearQueueButton?.addEventListener('click', () => clearMessageQueue(activeConversationId));
     sidebarToggle?.addEventListener('click', () => {
         document.body.classList.toggle('sidebar-open');
         const isOpen = document.body.classList.contains('sidebar-open');
@@ -3557,6 +3725,7 @@ function initializeUI() {
             document.querySelector('.sidebar-nav-item.is-active')?.focus();
         }
     });
+    bindAppModeSwitcher();
     sidebarCollapseButton?.addEventListener('click', () => {
         setSidebarCollapsed(!isSidebarCollapsed());
     });
@@ -3661,6 +3830,7 @@ function initializeUI() {
     });
     chatMessages?.addEventListener('scroll', () => {
         updateChatAutoFollow(chatMessages);
+        maybeLoadOlderChatHistory(chatMessages);
     }, {passive: true});
     chatMessages?.addEventListener('wheel', event => {
         if (event.deltaY < 0) setChatAutoFollow(false);
@@ -4516,30 +4686,46 @@ function getWelcomeHeading(conversation = getActiveConversation()) {
 
 function updateWelcomeHeading(conversation = getActiveConversation()) {
     const heading = document.getElementById('welcomeTitle');
-    if (heading) heading.textContent = getWelcomeHeading(conversation);
+    if (heading) {
+        heading.textContent = appMode === 'jcchat'
+            ? '今天想聊点什么？'
+            : getWelcomeHeading(conversation);
+    }
 }
 
 function welcomeMarkup(conversation = getActiveConversation()) {
+    const jcchat = appMode === 'jcchat';
+    const actions = jcchat
+        ? `
+            <button class="quick-action" data-prompt="用通俗易懂的方式给我讲解一个概念，并举一个生活中的例子">
+                <span class="quick-action-copy"><strong>学习答疑</strong><small>通俗解释、举例说明</small></span><span class="quick-action-arrow">↗</span>
+            </button>
+            <button class="quick-action" data-prompt="帮我写一篇短文，主题你来建议，语言简洁自然">
+                <span class="quick-action-copy"><strong>写作助手</strong><small>短文、润色、翻译</small></span><span class="quick-action-arrow">↗</span>
+            </button>
+            <button class="quick-action" data-prompt="我们随便聊聊天吧，轻松一点">
+                <span class="quick-action-copy"><strong>轻松聊天</strong><small>闲聊、倾诉、解压</small></span><span class="quick-action-arrow">↗</span>
+            </button>`
+        : `
+            <button class="quick-action" data-prompt="扫描当前项目并给出最值得优先修复的问题">
+                <span class="quick-action-copy"><strong>扫描当前项目</strong><small>发现风险与优化机会</small></span><span class="quick-action-arrow">↗</span>
+            </button>
+            <button class="quick-action" data-prompt="整理工作区文件并生成一份结构说明">
+                <span class="quick-action-copy"><strong>整理工作区</strong><small>归类文件并生成说明</small></span><span class="quick-action-arrow">↗</span>
+            </button>
+            <button class="quick-action" data-prompt="调研当前任务涉及的技术方案，核对可靠来源，并运行必要测试给出结论">
+                <span class="quick-action-copy"><strong>调研与验证</strong><small>检索资料并运行测试</small></span><span class="quick-action-arrow">↗</span>
+            </button>`;
     return `
         <div class="welcome-message">
             <div class="welcome-mark" aria-hidden="true">
                 <img class="theme-asset-mark" src="${THEME_ASSETS[getCurrentTheme()].mark}" alt="">
                 <span class="welcome-mark-glow"></span>
             </div>
-            <div class="welcome-kicker">JCODEX WORKSPACE</div>
-            <h2 id="welcomeTitle">${escapeHtml(getWelcomeHeading(conversation))}</h2>
-            <p>描述目标，JCodex 会规划步骤、调用工具并持续汇报进度。</p>
-            <div class="quick-actions">
-                <button class="quick-action" data-prompt="扫描当前项目并给出最值得优先修复的问题">
-                    <span class="quick-action-copy"><strong>扫描当前项目</strong><small>发现风险与优化机会</small></span><span class="quick-action-arrow">↗</span>
-                </button>
-                <button class="quick-action" data-prompt="整理工作区文件并生成一份结构说明">
-                    <span class="quick-action-copy"><strong>整理工作区</strong><small>归类文件并生成说明</small></span><span class="quick-action-arrow">↗</span>
-                </button>
-                <button class="quick-action" data-prompt="调研当前任务涉及的技术方案，核对可靠来源，并运行必要测试给出结论">
-                    <span class="quick-action-copy"><strong>调研与验证</strong><small>检索资料并运行测试</small></span><span class="quick-action-arrow">↗</span>
-                </button>
-            </div>
+            <div class="welcome-kicker">${jcchat ? 'JC-CHAT' : 'JCODEX WORKSPACE'}</div>
+            <h2 id="welcomeTitle">${jcchat ? '今天想聊点什么？' : escapeHtml(getWelcomeHeading(conversation))}</h2>
+            <p>${jcchat ? '和 JC-Chat 随意聊聊，学习、写作、翻译、答疑都可以。' : '描述目标，JCodex 会规划步骤、调用工具并持续汇报进度。'}</p>
+            <div class="quick-actions">${actions}</div>
         </div>`;
 }
 
@@ -4549,8 +4735,17 @@ function bindQuickActions() {
     });
 }
 
+function refreshWelcomeCards() {
+    const chatMessages = document.getElementById('chatMessages');
+    if (!chatMessages || !chatMessages.querySelector('.welcome-message')) return;
+    chatMessages.innerHTML = welcomeMarkup(getActiveConversation());
+    bindQuickActions();
+}
+
 function resetConversationView(conversation = getActiveConversation()) {
     if (voiceModeActive) cancelVoiceSpeech();
+    chatHistoryState = null;
+    chatHistoryLoading = false;
     closeImageLightbox({restoreFocus: false});
     closeAgentDetail({restoreFocus: false});
     closeChangeReview({restoreFocus: false});
@@ -4858,6 +5053,7 @@ async function createNewConversation(projectId = '') {
         activeConversationId = result.conversation.id;
         markConversationReadLocally(activeConversationId);
         resetConversationView(result.conversation);
+        updateQueueDisplay();
         updateActiveTaskTitle(result.conversation.title);
         await restoreSplitTaskForConversation(activeConversationId);
         if (projectId) expandedProjectIds.add(String(projectId));
@@ -4877,6 +5073,7 @@ async function switchConversation(conversationId) {
         if (conversationId) {
             markConversationReadLocally(conversationId);
             renderConversationList();
+            updateQueueDisplay();
             try {
                 await eel.set_active_conversation(conversationId)();
             } catch (error) {
@@ -4894,6 +5091,7 @@ async function switchConversation(conversationId) {
         if (!result?.success) throw new Error(result?.error || '切换失败');
         activeConversationId = conversationId;
         markConversationReadLocally(conversationId);
+        updateQueueDisplay();
         renderConversation(result.conversation);
         await restoreSplitTaskForConversation(conversationId);
         const execution = getConversationExecutionState(conversationId, false);
@@ -4922,11 +5120,12 @@ function openConversationMenu(event, conversationId) {
     menu.innerHTML = `
         <button type="button" data-action="rename">重命名</button>
         ${item.project_id ? '<button type="button" data-action="move-out">移出项目</button>' : ''}
+        <button type="button" data-action="archive">归档</button>
         <button type="button" data-action="delete" class="is-danger">删除任务</button>`;
     document.body.appendChild(menu);
     const rect = event.currentTarget.getBoundingClientRect();
     menu.style.left = `${Math.min(rect.left, window.innerWidth - 142)}px`;
-    menu.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - 92)}px`;
+    menu.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - 124)}px`;
     menu.querySelector('[data-action="rename"]').onclick = async () => {
         menu.remove();
         const title = await showInputDialog('重命名任务', item.title || '新任务');
@@ -4935,6 +5134,31 @@ function openConversationMenu(event, conversationId) {
         if (!result?.success) return showToast(result?.error || '重命名失败', 'error');
         if (conversationId === activeConversationId) updateActiveTaskTitle(result.conversation.title);
         await refreshConversations(activeConversationId);
+    };
+    menu.querySelector('[data-action="archive"]').onclick = async () => {
+        menu.remove();
+        if (isConversationRunning(conversationId)) {
+            return showToast('正在执行的任务请先停止后再归档', 'info');
+        }
+        const archivedWasActive = String(conversationId) === String(activeConversationId || '');
+        if (archivedWasActive) {
+            splitStateGeneration += 1;
+            hideSplitTaskPane();
+        }
+        const result = await eel.archive_conversation(conversationId)();
+        if (!result?.success) {
+            if (archivedWasActive) await restoreSplitTaskForConversation(conversationId);
+            return showToast(result?.error || '归档失败', 'error');
+        }
+        const nextActiveId = await refreshConversations(activeConversationId);
+        if (archivedWasActive && nextActiveId) {
+            const loaded = await eel.load_conversation(nextActiveId)();
+            if (loaded?.success) renderConversation(loaded.conversation);
+            await restoreSplitTaskForConversation(nextActiveId);
+            pinChatToBottom(document.getElementById('chatMessages'), {force: true});
+        }
+        updateTokenIndicator();
+        showToast('任务已归档', 'success');
     };
     const moveOut = menu.querySelector('[data-action="move-out"]');
     if (moveOut) moveOut.onclick = async () => {
@@ -5538,95 +5762,7 @@ function renderConversation(conversation) {
         const chatMessages = document.getElementById('chatMessages');
         chatMessages.classList.remove('is-welcome');
         chatMessages.innerHTML = '';
-        const finalByMessageId = new Map();
-        const pendingKnowledge = new Map();
-        for (const event of messages) {
-            const messageId = Number(event.message_id || 0);
-            if (event.type === 'user') {
-                addUserMessage(
-                    event.content || '请解析附件',
-                    event.attachments || [],
-                    messageId,
-                    false
-                );
-            } else if (event.type === 'assistant') {
-                const {thoughts, answer} = splitThinkingContent(event.content || '');
-                const thinkingDurationMs = getPersistedThinkingDuration(event);
-                thoughts.forEach(thought => addThinkingCard(
-                    thought, null, false, false, true, thinkingDurationMs
-                ));
-                const element = addMessage(
-                    'ai',
-                    answer.trim() || event.content || '',
-                    Boolean(event.is_error),
-                    false
-                );
-                finalByMessageId.set(messageId, element);
-                if (pendingKnowledge.has(messageId)) {
-                    addKnowledgePanel(pendingKnowledge.get(messageId), element);
-                    pendingKnowledge.delete(messageId);
-                }
-            } else if (event.type === 'thinking') {
-                const parsed = splitThinkingContent(event.content || '');
-                const thoughts = parsed.thoughts.length
-                    ? parsed.thoughts
-                    : [parsed.answer || event.content || ''];
-                thoughts.filter(Boolean).forEach(thought => addThinkingCard(
-                    thought,
-                    null,
-                    false,
-                    false,
-                    true,
-                    getPersistedThinkingDuration(event)
-                ));
-            } else if (event.type === 'commentary') {
-                addCommentaryMessage(event.content || '', false);
-            } else if (event.type === 'agent_team') {
-                updateAgentTeamSnapshot(
-                    event,
-                    conversation?.id || activeConversationId,
-                    messageId,
-                    {animate: false}
-                );
-            } else if (event.type === 'tool') {
-                if (!isQuestionToolName(event.tool)) {
-                    addToolMessage(
-                        event.tool || 'Tool',
-                        event.content || '',
-                        false,
-                        Number(event.duration_ms || 0),
-                        event.target || '',
-                        event.actor || 'primary'
-                    );
-                }
-            } else if (event.type === 'modified_files') {
-                addModifiedFilesSummary(event, false);
-            } else if (event.type === 'compression') {
-                finishCompressionActivity({
-                    ...event,
-                    message: event.content || '记忆压缩已结束',
-                }, messageId);
-            } else if (event.type === 'question') {
-                addAnsweredQuestionCard(
-                    event.questions || [],
-                    event.answers || [],
-                    messageId,
-                    event.question_id || '',
-                    event.supplements || []
-                );
-            } else if (event.type === 'preview') {
-                upsertProjectPreview({
-                    ...event,
-                    conversation_id: event.conversation_id || conversation?.id || '',
-                }, false);
-            } else if (event.type === 'plan_update') {
-                continue;
-            } else if (event.type === 'knowledge' && showKnowledgeAppendix) {
-                const anchor = finalByMessageId.get(messageId);
-                if (anchor) addKnowledgePanel(event.content || '', anchor);
-                else pendingKnowledge.set(messageId, event.content || '');
-            }
-        }
+        renderConversationSliced(chatMessages, messages);
         pinChatToBottom(chatMessages, {force: true});
     } finally {
         isRestoringConversation = false;
@@ -5640,6 +5776,97 @@ function renderConversation(conversation) {
     }
 }
 
+function renderConversationEvents(events) {
+    const finalByMessageId = new Map();
+    const pendingKnowledge = new Map();
+    for (const event of events) {
+        const messageId = Number(event.message_id || 0);
+        if (event.type === 'user') {
+            addUserMessage(
+                event.content || '请解析附件',
+                event.attachments || [],
+                messageId,
+                false
+            );
+        } else if (event.type === 'assistant') {
+            const {thoughts, answer} = splitThinkingContent(event.content || '');
+            const thinkingDurationMs = getPersistedThinkingDuration(event);
+            thoughts.forEach(thought => addThinkingCard(
+                thought, null, false, false, true, thinkingDurationMs
+            ));
+            const element = addMessage(
+                'ai',
+                answer.trim() || event.content || '',
+                Boolean(event.is_error),
+                false
+            );
+            finalByMessageId.set(messageId, element);
+            if (pendingKnowledge.has(messageId)) {
+                addKnowledgePanel(pendingKnowledge.get(messageId), element);
+                pendingKnowledge.delete(messageId);
+            }
+        } else if (event.type === 'thinking') {
+            const parsed = splitThinkingContent(event.content || '');
+            const thoughts = parsed.thoughts.length
+                ? parsed.thoughts
+                : [parsed.answer || event.content || ''];
+            thoughts.filter(Boolean).forEach(thought => addThinkingCard(
+                thought,
+                null,
+                false,
+                false,
+                true,
+                getPersistedThinkingDuration(event)
+            ));
+        } else if (event.type === 'commentary') {
+            addCommentaryMessage(event.content || '', false);
+        } else if (event.type === 'agent_team') {
+            updateAgentTeamSnapshot(
+                event,
+                activeConversationId,
+                messageId,
+                {animate: false}
+            );
+        } else if (event.type === 'tool') {
+            if (!isQuestionToolName(event.tool)) {
+                addToolMessage(
+                    event.tool || 'Tool',
+                    event.content || '',
+                    false,
+                    Number(event.duration_ms || 0),
+                    event.target || '',
+                    event.actor || 'primary'
+                );
+            }
+        } else if (event.type === 'modified_files') {
+            addModifiedFilesSummary(event, false);
+        } else if (event.type === 'compression') {
+            finishCompressionActivity({
+                ...event,
+                message: event.content || '记忆压缩已结束',
+            }, messageId);
+        } else if (event.type === 'question') {
+            addAnsweredQuestionCard(
+                event.questions || [],
+                event.answers || [],
+                messageId,
+                event.question_id || '',
+                event.supplements || []
+            );
+        } else if (event.type === 'preview') {
+            upsertProjectPreview({
+                ...event,
+                conversation_id: event.conversation_id || activeConversationId || '',
+            }, false);
+        } else if (event.type === 'plan_update') {
+            continue;
+        } else if (event.type === 'knowledge' && showKnowledgeAppendix) {
+            const anchor = finalByMessageId.get(messageId);
+            if (anchor) addKnowledgePanel(event.content || '', anchor);
+            else pendingKnowledge.set(messageId, event.content || '');
+        }
+    }
+}
 async function sendMessage() {
     if (!isInitialized) return;
 
@@ -5667,7 +5894,8 @@ async function sendMessage() {
             planMode,
             voiceMode,
             multiAgentMode,
-            allowAll
+            allowAll,
+            appMode
         );
         return;
     }
@@ -5692,6 +5920,7 @@ async function sendMessage() {
             voiceMode,
             multiAgentMode,
             allowAll,
+            mode: appMode,
         });
         messageInput.value = '';
         resetComposerInput(messageInput);
@@ -5700,7 +5929,7 @@ async function sendMessage() {
         showToast(
             activeState.outputStopped
                 ? '已停止输出，新消息将在后台释放后立即发送'
-                : `当前任务的新消息已进入等待队列（${messageQueue.length}）`,
+                : `当前任务的新消息已进入等待队列（${queuedCountForConversation(activeConversationId)}）`,
             'info',
             1800
         );
@@ -5748,7 +5977,8 @@ async function sendMessage() {
             planMode,
             voiceMode,
             multiAgentMode,
-            allowAll
+            allowAll,
+            appMode
         )();
         if (result?.status === 'busy') {
             throw new Error(result.error || '已有任务正在执行');
@@ -5774,7 +6004,8 @@ async function sendMessage() {
                 planMode,
                 voiceMode,
                 multiAgentMode,
-                allowAll
+                allowAll,
+                appMode
             );
             return;
         }
@@ -5797,7 +6028,8 @@ async function sendMessageWithText(
     planMode = planModeEnabled,
     voiceMode = voiceModeActive,
     multiAgentMode = multiAgentModeEnabled,
-    allowAll = autoAllowAll
+    allowAll = autoAllowAll,
+    mode = appMode
 ) {
     if (!isInitialized || (!message && !attachments.length)) return;
 
@@ -5812,7 +6044,8 @@ async function sendMessageWithText(
             planMode,
             voiceMode,
             multiAgentMode,
-            allowAll
+            allowAll,
+            mode
         );
         return;
     }
@@ -5851,7 +6084,8 @@ async function sendMessageWithText(
             Boolean(planMode),
             Boolean(voiceMode),
             Boolean(multiAgentMode),
-            Boolean(allowAll)
+            Boolean(allowAll),
+            mode
         )();
         if (result?.status === 'busy' || result?.status === 'error') {
             throw new Error(result.error || '任务提交失败');
@@ -5872,7 +6106,8 @@ async function sendMessageWithText(
                 planMode,
                 voiceMode,
                 multiAgentMode,
-                allowAll
+                allowAll,
+                mode
             );
             return;
         }
@@ -6287,7 +6522,8 @@ async function dispatchNextQueuedMessage() {
                 typeof queued.multiAgentMode === 'boolean'
                     ? queued.multiAgentMode
                     : multiAgentModeEnabled,
-                typeof queued.allowAll === 'boolean' ? queued.allowAll : autoAllowAll
+                typeof queued.allowAll === 'boolean' ? queued.allowAll : autoAllowAll,
+                queued.mode || appMode
             );
         }
     } catch (error) {
@@ -6849,7 +7085,7 @@ function renderQuestionResult(
         result = document.createElement('div');
         result.className = 'question-result';
         result.dataset.questionId = resultId;
-        const chatMessages = document.getElementById('chatMessages');
+        const chatMessages = getChatRenderHost();
         if (prompt?.parentNode === chatMessages) {
             chatMessages.insertBefore(result, prompt);
         } else {
@@ -6914,7 +7150,7 @@ async function clearConversation() {
 }
 
 function addMessage(role, content, isError = false, animate = true) {
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = getChatRenderHost();
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}${isError ? ' error' : ''}`;
 
@@ -7506,7 +7742,7 @@ function addThinkingCard(
     durationMs = null,
     host = null
 ) {
-    const chatMessages = host || document.getElementById('chatMessages');
+    const chatMessages = host || getChatRenderHost();
     const card = document.createElement('div');
     card.className = 'thinking-card';
     const completedLabel = Number.isFinite(durationMs)
@@ -7915,7 +8151,7 @@ function getCompressionModeLabel(mode) {
 function startCompressionActivity(
     result, msgId, animate = true, announceStatus = true
 ) {
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = getChatRenderHost();
     const key = getCompressionKey(result, msgId);
     const existing = activeCompressionActivities.get(key);
     if (existing) return existing.element;
@@ -8114,7 +8350,7 @@ function addToolMessage(
     actor = 'primary'
 ) {
     if (isQuestionToolName(toolName) || !isPrimaryToolEvent({actor})) return null;
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = getChatRenderHost();
     const toolDiv = document.createElement('div');
     const failed = toolResultFailed(result);
     toolDiv.className = `tool-execution ${failed ? 'tool-execution-error' : ''}`;
@@ -8429,7 +8665,7 @@ function closeChangeReview({restoreFocus = true} = {}) {
 }
 
 function addModifiedFilesSummary(result, animate = true) {
-    const chatMessages = document.getElementById('chatMessages');
+    const chatMessages = getChatRenderHost();
     if (!chatMessages) return null;
     const files = normalizeModifiedFiles(result);
     if (!files.length) return null;
@@ -9715,6 +9951,7 @@ function closeActiveModal() {
 async function openSettings() {
     try {
         lastFocusedElement = document.activeElement;
+        applyAppModeUI();
         const settings = await eel.load_settings()();
         currentSettingsSnapshot = settings;
 
@@ -9723,6 +9960,8 @@ async function openSettings() {
         document.getElementById('settingApiModel').value = settings.api_model || '';
         document.getElementById('settingSupportsVision').checked = settings.supports_vision !== 'false';
         document.getElementById('settingTavilyKey').value = settings.tavily_api_key || '';
+        document.getElementById('settingCustomSystemPrompt').value = settings.custom_system_prompt || '';
+        hideLocalModelMenu();
         document.getElementById('settingMaxSteps').value = settings.max_steps || '';
         document.getElementById('settingMaxTokens').value = settings.max_tokens || '';
         document.getElementById('settingContextWindow').value = contextWindowIndexFor(
@@ -9958,6 +10197,89 @@ async function loadConfig(configName, showNotification = true) {
     }
 }
 
+function hideLocalModelMenu() {
+    const menu = document.getElementById('localModelMenu');
+    if (menu) {
+        menu.hidden = true;
+        menu.innerHTML = '';
+    }
+}
+
+async function openLocalModelPicker() {
+    const baseInput = document.getElementById('settingApiBaseUrl');
+    const defaultValue = (baseInput?.value || '').trim() || 'http://127.0.0.1:8080';
+    const baseUrl = await showInputDialog('输入本地模型服务地址', defaultValue);
+    if (!baseUrl) return;
+    const address = baseUrl.trim();
+    if (!/^https?:\/\//i.test(address)) {
+        showToast('地址必须以 http:// 或 https:// 开头', 'error');
+        return;
+    }
+    const menu = document.getElementById('localModelMenu');
+    if (!menu) return;
+    hideLocalModelMenu();
+    menu.hidden = false;
+    menu.innerHTML = '<div class="local-model-status">正在查询本地模型…</div>';
+    try {
+        const result = await eel.list_local_models(address)();
+        if (!result || !result.success) {
+            const message = result?.error || '未查询到模型';
+            menu.innerHTML = `<div class="local-model-status">${escapeHtml(message)}</div>`;
+            showToast(message, 'error');
+            return;
+        }
+        const models = Array.isArray(result.models) ? result.models : [];
+        if (models.length === 0) {
+            menu.innerHTML = '<div class="local-model-status">该地址没有返回可用模型</div>';
+            showToast('该地址没有返回可用模型', 'error');
+            return;
+        }
+        const applyLocalModel = async (entry) => {
+            const rawId = String(entry.id || '');
+            const displayName = String(entry.name || rawId || '');
+            document.getElementById('settingApiModel').value = displayName || rawId;
+            if (baseInput) {
+                baseInput.value = result.base_url || address;
+            }
+            document.getElementById('settingApiKey').value = '';
+            clearApiConfigSelection();
+            hideLocalModelMenu();
+            await saveSettings(false);
+        };
+        if (models.length === 1) {
+            await applyLocalModel(models[0]);
+            return;
+        }
+        menu.innerHTML = '';
+        const serverLabel = String(result.server || '').trim();
+        const header = document.createElement('div');
+        header.className = 'local-model-status';
+        header.textContent = serverLabel
+            ? `${serverLabel} · 共 ${models.length} 个模型`
+            : `共 ${models.length} 个模型`;
+        menu.appendChild(header);
+        models.forEach(model => {
+            const entry = (model && typeof model === 'object') ? model : {id: String(model)};
+            const rawId = String(entry.id || '');
+            const displayName = String(entry.name || rawId || model);
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'local-model-item';
+            item.textContent = displayName;
+            item.title = rawId && rawId !== displayName
+                ? `${rawId} · 点击选择 ${displayName}`
+                : `点击选择 ${displayName}`;
+            item.addEventListener('click', () => applyLocalModel(entry));
+            menu.appendChild(item);
+        });
+    } catch (e) {
+        if (handleEelConnectionError(e)) return;
+        const message = e.message || '查询失败';
+        menu.innerHTML = `<div class="local-model-status">${escapeHtml(message)}</div>`;
+        showToast(message, 'error');
+    }
+}
+
 async function saveCurrentConfig() {
     const configName = await showInputDialog('请输入配置名称:');
     if (!configName) return;
@@ -10020,6 +10342,7 @@ function collectSettingsFromForm(fallback = {}) {
         api_model: document.getElementById('settingApiModel').value.trim(),
         supports_vision: document.getElementById('settingSupportsVision').checked ? 'true' : 'false',
         tavily_api_key: document.getElementById('settingTavilyKey').value.trim(),
+        custom_system_prompt: document.getElementById('settingCustomSystemPrompt').value,
         max_steps: document.getElementById('settingMaxSteps').value.trim() || fallback.max_steps || '100',
         max_tokens: document.getElementById('settingMaxTokens').value.trim() || fallback.max_tokens || '50000',
         context_window: String(
@@ -10033,7 +10356,7 @@ function collectSettingsFromForm(fallback = {}) {
     };
 }
 
-async function saveSettings() {
+async function saveSettings(closeModal = true) {
     const settings = collectSettingsFromForm(currentSettingsSnapshot || {});
     const saveButton = document.getElementById('saveSettingsButton');
 
@@ -10058,7 +10381,7 @@ async function saveSettings() {
             document.querySelectorAll('.knowledge-panel').forEach(panel => panel.remove());
             await updateModelBadge();
 
-            closeSettingsModal();
+            if (closeModal) closeSettingsModal();
             await updateTokenIndicator();
             showToast('设置已保存并立即生效', 'success');
         } else {
@@ -10516,6 +10839,83 @@ function closeDataModal() {
     document.getElementById('dataModal').classList.remove('active');
     selectedTaskIds.clear();
     updateTaskSelectAllCheckbox();
+}
+
+function openArchiveModal() {
+    document.getElementById('archiveModal').classList.add('active');
+    refreshArchivedConversations();
+}
+
+function closeArchiveModal() {
+    document.getElementById('archiveModal').classList.remove('active');
+}
+
+async function refreshArchivedConversations() {
+    const list = document.getElementById('archivedConversationList');
+    if (!list) return;
+    try {
+        const result = await eel.list_archived_conversations()();
+        if (!result?.success) throw new Error(result?.error || '加载归档任务失败');
+        const items = result.conversations || [];
+        if (!items.length) {
+            list.innerHTML = '<div class="data-item"><span class="data-source">暂无归档任务</span></div>';
+            return;
+        }
+        list.innerHTML = items.map(item => {
+            const safeId = encodeURIComponent(String(item.id || ''));
+            const safeTitle = escapeHtml(item.title || '新任务');
+            const safeTitleEncoded = encodeURIComponent(item.title || '新任务');
+            const time = formatCompactDateTime(
+                item.last_user_message_at || item.updated_at || item.created_at || ''
+            );
+            const count = Number(item.message_count || 0);
+            return `
+                <div class="data-item archive-item">
+                    <div class="task-main">
+                        <div class="task-header">
+                            <span class="task-request" title="${safeTitle}">${safeTitle}</span>
+                        </div>
+                        <div class="task-details">
+                            <span class="task-info">${escapeHtml(time)}</span>
+                            <span class="task-info">${count} 条消息</span>
+                        </div>
+                    </div>
+                    <div class="task-actions">
+                        <button class="btn-small" onclick="restoreArchivedConversation(decodeURIComponent('${safeId}'))">恢复</button>
+                        <button class="btn-delete-task" onclick="deleteArchivedConversation(decodeURIComponent('${safeId}'), decodeURIComponent('${safeTitleEncoded}'))">删除</button>
+                    </div>
+                </div>`;
+        }).join('');
+    } catch (error) {
+        list.innerHTML = `<div class="data-item"><span class="data-source">加载失败：${escapeHtml(error.message)}</span></div>`;
+    }
+}
+
+async function restoreArchivedConversation(conversationId) {
+    try {
+        const result = await eel.restore_conversation(conversationId)();
+        if (!result?.success) return showToast(result?.error || '恢复失败', 'error');
+        await refreshArchivedConversations();
+        await refreshConversations(activeConversationId);
+        showToast('任务已恢复到对话栏', 'success');
+    } catch (error) {
+        showToast(`恢复失败：${error.message}`, 'error');
+    }
+}
+
+async function deleteArchivedConversation(conversationId, title) {
+    try {
+        const confirmed = await showConfirmDialog(
+            `删除归档任务“${title || '该任务'}”？此操作不可撤销，将删除其全部对话和记忆。`
+        );
+        if (!confirmed) return;
+        const result = await eel.delete_conversation(conversationId)();
+        if (!result?.success) return showToast(result?.error || '删除失败', 'error');
+        await refreshArchivedConversations();
+        showToast('归档任务已删除', 'success');
+    } catch (error) {
+        showToast(`删除失败：${error.message}`, 'error');
+    }
 }
 
 async function refreshDataStats() {

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Union
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 from agent.core.env_utils import env_float, env_int
 
@@ -43,6 +44,12 @@ class AssistantMessage:
 
 class AIEngine:
     """Core AI Engine for handling API calls with native function calling"""
+
+    @staticmethod
+    def is_local_base_url(api_base_url: str) -> bool:
+        """Whether the base URL points to a loopback model server."""
+        host = (urlparse(api_base_url or "").hostname or "").lower()
+        return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
     @staticmethod
     def normalize_api_base_url(api_base_url: str) -> str:
@@ -91,7 +98,7 @@ class AIEngine:
         self.api_base_url = self.normalize_api_base_url(self.api_base_url)
         self.api_path = self.get_api_path_for_base_url(self.api_base_url)
 
-        if not self.api_key:
+        if not self.api_key and not self.is_local_base_url(self.api_base_url):
             raise ValueError("API_KEY not found in environment variables")
 
         self.conversation_history: List[Dict[str, Any]] = []
@@ -106,10 +113,9 @@ class AIEngine:
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send a chat-completions request using the current model settings."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -198,10 +204,11 @@ class AIEngine:
     ) -> Dict[str, Any]:
         """Send a streaming chat request and assemble the final message."""
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,

@@ -1,6 +1,7 @@
 """Grok Build-compatible limits for model-facing file reads."""
 
 from agent.tools.file import FileTool
+from agent.core.extended_tool_executor import ExtendedToolExecutor
 
 
 def test_read_file_caps_each_window_at_one_thousand_lines(tmp_path) -> None:
@@ -60,3 +61,36 @@ def test_read_file_rejects_non_numeric_offset_and_limit(tmp_path) -> None:
     success, content = FileTool.read_file(str(path), limit="abc")
     assert success is False
     assert "positive integers" in content
+
+
+def test_read_file_rejects_image_files(tmp_path) -> None:
+    for name in ("photo.png", "photo.JPG", "anim.gif", "pic.webp", "img.bmp", "scan.tiff"):
+        path = tmp_path / name
+        path.write_bytes(b"\x89PNG\r\n\x1a\nnot a real image")
+
+        success, content = FileTool.read_file(str(path))
+
+        assert success is False
+        assert "Cannot read image file" in content
+        assert "can only read document files" in content
+
+
+def test_read_file_still_reads_text_based_svg(tmp_path) -> None:
+    path = tmp_path / "logo.svg"
+    path.write_text("<svg><rect /></svg>", encoding="utf-8")
+
+    success, content = FileTool.read_file(str(path))
+
+    assert success is True
+    assert "<svg><rect /></svg>" in content
+
+
+def test_execute_file_read_rejects_image_files(tmp_path) -> None:
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nnot a real image")
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+
+    result = executor.execute_file_read({"filePath": str(image)})
+
+    assert result.startswith("Error: Cannot read image file")
+    assert "can only read document files" in result

@@ -351,7 +351,7 @@ class ExtendedToolExecutor:
                 "type": "function",
                 "function": {
                     "name": "read",
-                    "description": "Read a file or directory from the local filesystem. PDF, Word, and Excel files are parsed automatically. Reads at most 1000 lines per call. For large files, use grep first, then read a focused range with offset and limit.",
+                    "description": "Read a file or directory from the local filesystem. PDF, Word, and Excel files are parsed automatically. Image files cannot be read; the read tool only supports document files. Reads at most 1000 lines per call. For large files, use grep first, then read a focused range with offset and limit.",
                     "parameters": {
                         "type": "object",
                         "properties": {

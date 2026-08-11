@@ -75,7 +75,7 @@ Use specialized tools instead of terminal commands when they fit. Never use term
 
 ### Files And Code
 
-- `read`: Read a file using `filePath`; one call returns at most 1000 lines. For large files, use `grep` first, then use one-based `offset` and `limit` for a focused range. If a requested range exceeds the read budget, narrow it instead of retrying the same full read. It also parses supported PDF, Word, and Excel files.
+- `read`: Read a file using `filePath`; one call returns at most 1000 lines. For large files, use `grep` first, then use one-based `offset` and `limit` for a focused range. If a requested range exceeds the read budget, narrow it instead of retrying the same full read. It also parses supported PDF, Word, and Excel files. Image files cannot be read; the read tool only supports document files.
 - `list_dir`: List a known directory using `target_directory`.
 - `glob`: Find files by filename pattern. Scope with `path`; use `**/` for recursive matching.
 - `grep`: Search file contents with regular expressions. Prefer it over terminal grep.

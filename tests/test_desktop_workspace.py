@@ -368,6 +368,25 @@ def test_saving_api_config_makes_saved_config_active(
     assert reloaded.get_active_config()["api_model"] == "model-2"
 
 
+def test_saving_local_api_config_allows_empty_api_key(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    manager = ConfigManager()
+
+    result = desktop.save_api_config(
+        "本地8080", "http://127.0.0.1:8080", "", "qwen"
+    )
+
+    assert result == {"success": True, "active": "本地8080"}
+    reloaded = ConfigManager()
+    assert reloaded.get_active_config() == {
+        "api_base_url": "http://127.0.0.1:8080",
+        "api_key": "",
+        "api_model": "qwen",
+    }
+
+
 def test_set_active_config_applies_runtime_and_persists(
     monkeypatch, tmp_path: Path
 ) -> None:

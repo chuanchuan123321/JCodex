@@ -13,6 +13,12 @@ class FileTool:
     DEFAULT_READ_LIMIT = 1000
     MAX_READ_TOKENS = 25_000
 
+    IMAGE_EXTENSIONS = {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+        ".heic", ".heif", ".avif", ".ico", ".jfif", ".apng", ".psd",
+        ".dng", ".cr2", ".nef", ".arw", ".raw", ".exr",
+    }
+
     @staticmethod
     def expand_path(path: str) -> str:
         """Expand path with support for ~, Desktop, Documents, etc."""
@@ -53,6 +59,12 @@ class FileTool:
 
             if file_path.is_dir():
                 return FileTool.list_directory(path)
+
+            if file_path.suffix.lower() in FileTool.IMAGE_EXTENSIONS:
+                return False, (
+                    f"Cannot read image file with the read tool: {file_path.name}. "
+                    "The read tool can only read document files."
+                )
 
             # Defaults
             offset = offset if offset is not None else 1

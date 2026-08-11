@@ -461,6 +461,7 @@ class ConversationStore:
             "split_pane_width": ConversationStore._clean_split_pane_width(
                 conversation.get("split_pane_width", 0)
             ),
+            "archived": bool(conversation.get("archived", False)),
             "created_at": conversation.get("created_at", ""),
             "updated_at": conversation.get("updated_at", ""),
             "last_user_message_at": conversation.get("last_user_message_at", ""),
@@ -714,6 +715,26 @@ class ConversationStore:
         with self._lock:
             conversation = self._load_required(conversation_id)
             conversation["title"] = self._clean_title(title)
+            conversation["updated_at"] = self._now()
+            self._write_json(self._conversation_file(conversation_id), conversation)
+            self._update_index_metadata(conversation)
+            return conversation
+
+    def archive(self, conversation_id: str) -> Dict[str, Any]:
+        """Mark a conversation as archived so it leaves the ordinary sidebar."""
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            conversation["archived"] = True
+            conversation["updated_at"] = self._now()
+            self._write_json(self._conversation_file(conversation_id), conversation)
+            self._update_index_metadata(conversation)
+            return conversation
+
+    def restore(self, conversation_id: str) -> Dict[str, Any]:
+        """Clear the archived flag and bring a conversation back to the sidebar."""
+        with self._lock:
+            conversation = self._load_required(conversation_id)
+            conversation["archived"] = False
             conversation["updated_at"] = self._now()
             self._write_json(self._conversation_file(conversation_id), conversation)
             self._update_index_metadata(conversation)
