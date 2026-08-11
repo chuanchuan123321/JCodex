@@ -24,7 +24,13 @@ if (!gotLock) {
     }
   });
 
-  const BACKEND = path.resolve(app.getAppPath(), '..', 'backend', 'jcodex-server', 'jcodex-server');
+  const BACKEND = path.resolve(
+    app.getAppPath(),
+    '..',
+    'backend',
+    'jcodex-server',
+    process.platform === 'win32' ? 'jcodex-server.exe' : 'jcodex-server'
+  );
   const DATA_DIR = app.getPath('userData');
 
   function sleep(ms) {
@@ -65,7 +71,9 @@ if (!gotLock) {
       minHeight: 600,
       show: false,
       title: 'JCodex',
-      icon: path.join(__dirname, 'build', 'icon.icns'),
+      icon: process.platform === 'win32'
+        ? path.join(__dirname, 'build', 'icon.ico')
+        : path.join(__dirname, 'build', 'icon.icns'),
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,

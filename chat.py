@@ -15,7 +15,11 @@ import os
 import locale
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
-locale.setlocale(locale.LC_ALL, "")
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except (locale.Error, OSError):
+    # Some Windows locales are not installed; fall back to the default.
+    pass
 
 DATA_ROOT = Path(os.getenv("JCODEX_DATA_DIR", "") or PROJECT_ROOT).expanduser().resolve()
 DATA_ROOT.mkdir(parents=True, exist_ok=True)

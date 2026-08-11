@@ -25,6 +25,10 @@ wheels/
 .installed.cfg
 *.egg
 
+# Windows 打包需要提交的图标资源
+!electron/build/
+!electron/build/icon.ico
+
 # Virtual environments
 venv/
 ENV/

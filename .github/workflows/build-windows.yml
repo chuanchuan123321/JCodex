@@ -1,0 +1,90 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Restore bundled .env (vector retrieval config)
+        shell: bash
+        env:
+          BUNDLED_ENV: ${{ secrets.JCX_ENV }}
+        run: |
+          if [ -n "$BUNDLED_ENV" ]; then
+            printf '%s' "$BUNDLED_ENV" > .env
+            echo "bundled .env restored ($(wc -c < .env) bytes)"
+          else
+            touch .env
+            echo "JCX_ENV secret not set; bundling empty .env"
+          fi
+
+      - name: Build backend with PyInstaller
+        working-directory: electron
+        env:
+          JCODEX_WINDOWED: "true"
+        run: python -m PyInstaller --noconfirm --clean --workpath build-server --distpath dist-server jcodex-server.spec
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Electron tooling
+        working-directory: electron
+        run: npm ci
+
+      - name: Package Electron app
+        working-directory: electron
+        run: npx electron-packager . JCodex --platform=win32 --arch=x64 --icon=build/icon.ico --out=dist --overwrite --no-asar --prune=true
+
+      - name: Embed backend into app resources
+        shell: pwsh
+        run: |
+          $appDir = "electron/dist/JCodex-win32-x64"
+          New-Item -ItemType Directory -Force -Path "$appDir/resources/backend" | Out-Null
+          Copy-Item -Recurse -Force "electron/dist-server/jcodex-server" "$appDir/resources/backend/jcodex-server"
+          if (-not (Test-Path "$appDir/resources/backend/jcodex-server/jcodex-server.exe")) {
+            Write-Error "backend executable is missing"
+            exit 1
+          }
+          if (-not (Test-Path "$appDir/resources/app/build/icon.ico")) {
+            New-Item -ItemType Directory -Force -Path "$appDir/resources/app/build" | Out-Null
+            Copy-Item -Force "electron/build/icon.ico" "$appDir/resources/app/build/icon.ico"
+          }
+          Get-ChildItem "$appDir/resources/backend/jcodex-server" | Select-Object Name
+
+      - name: Zip portable build
+        shell: pwsh
+        run: |
+          $zip = "electron/dist/JCodex-windows-x64.zip"
+          Compress-Archive -Path "electron/dist/JCodex-win32-x64" -DestinationPath $zip -Force
+          Get-Item $zip | Select-Object FullName, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JCodex-windows-x64
+          path: electron/dist/JCodex-windows-x64.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: electron/dist/JCodex-windows-x64.zip

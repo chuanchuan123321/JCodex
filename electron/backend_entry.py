@@ -7,6 +7,30 @@ import os
 import sys
 from pathlib import Path
 
+
+class _NullWriter:
+    """Sink for windowed (--noconsole) builds where stdout/stderr are None."""
+
+    def write(self, *args):
+        return 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+
+if sys.stdout is None:
+    sys.stdout = _NullWriter()
+if sys.stderr is None:
+    sys.stderr = _NullWriter()
+
+
 # 将打包时内置的 .env 作为默认配置注入环境。只在变量缺失时写入
 # （override=False），因此真实环境变量和用户数据目录下的
 # ~/Library/Application Support/JCodex/.env 仍然优先。

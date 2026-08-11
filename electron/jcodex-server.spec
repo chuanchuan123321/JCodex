@@ -1,5 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
+import os
+
+# 无窗口模式：Windows 打包时通过 JCODEX_WINDOWED=true 关闭控制台窗口；
+# macOS 模板打包保持 console=True 不变。
+console = os.environ.get("JCODEX_WINDOWED", "") != "true"
 
 hiddenimports = []
 hiddenimports += collect_submodules('agent')
@@ -33,7 +38,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=console,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
