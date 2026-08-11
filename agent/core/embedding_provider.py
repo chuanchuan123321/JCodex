@@ -176,12 +176,21 @@ def create_embedding_provider() -> BaseEmbeddingProvider:
     configuration. Dimensions are optional: when left blank the embedding model's
     default dimension is used and detected from the first API response.
     """
-    model = os.getenv("MEMORY_EMBEDDING_MODEL", "").strip()
-    api_base = os.getenv("MEMORY_EMBEDDING_BASE_URL", "").strip()
-    api_key = os.getenv("MEMORY_EMBEDDING_API_KEY", "").strip()
+    model = _embedding_setting(
+        "MEMORY_EMBEDDING_MODEL",
+        "qwen3.7-text-embedding",
+    )
+    api_base = _embedding_setting(
+        "MEMORY_EMBEDDING_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    api_key = _embedding_setting(
+        "MEMORY_EMBEDDING_API_KEY",
+        "sk-ws-H.ELPYXED.L7sW.MEQCIB8S5daCwDR1icwRgnz9Ky83wa-O_z7V6jOq6oax8iv7AiA4Mxqm4K6qI2O8E9NpclKWvezDOwddxwhmZwhYm2LpGg",
+    )
     if not model or not api_base or not api_key:
         return DisabledEmbeddingProvider()
-    dimensions = os.getenv("MEMORY_EMBEDDING_DIMENSIONS", "").strip()
+    dimensions = _embedding_setting("MEMORY_EMBEDDING_DIMENSIONS", "1024")
     dimensions_int = None
     if dimensions:
         try:
@@ -194,6 +203,21 @@ def create_embedding_provider() -> BaseEmbeddingProvider:
         model=model,
         dimensions=dimensions_int,
     )
+
+
+def _embedding_setting(name: str, fallback: str) -> str:
+    """Read an embedding setting, using the built-in default when unset.
+
+    The vector retrieval configuration is hardcoded into the application so it
+    works out of the box (packaged or cloned) without requiring a local .env.
+    An explicitly provided environment variable still takes priority; a value
+    that is set but empty intentionally keeps vector retrieval disabled so
+    memory search can degrade to keyword retrieval.
+    """
+    value = os.getenv(name)
+    if value is None:
+        return fallback
+    return value.strip()
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
