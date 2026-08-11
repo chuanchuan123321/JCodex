@@ -386,6 +386,27 @@ def _resolve_plan_mode(plan_mode: object, message: str) -> tuple[bool, str]:
     return False, "off"
 
 
+def _platform_instruction() -> str:
+    """Return the one-line OS note injected into ``Agent.md``.
+
+    The model reads this before its first command, so Windows runs stop
+    guessing Unix commands in cmd.exe. macOS stays empty to keep its
+    existing behavior unchanged.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return (
+            "当前运行在 Windows 上。shell 工具在 cmd.exe 中执行："
+            "请使用 dir、type、copy、move、del、findstr、where、mkdir、rmdir "
+            "等 Windows 命令，不要使用 ls、cat、cp、mv、rm、grep、sleep 等 "
+            "Unix 命令；cmd.exe 里没有 python3，若已安装 Python 用 python "
+            "或 py；路径使用反斜杠（如 C:\\Users\\...）。"
+        )
+    if system == "Darwin":
+        return ""
+    return ""
+
+
 def _plan_mode_instruction(plan_enabled: bool, plan_policy: str) -> str:
     """Build the task-specific planning rule injected into ``Agent.md``."""
     normalized_policy = (
@@ -1572,6 +1593,9 @@ class DesktopTaskExecutor:
             "This task is running locally in the desktop app, not through a "
             "gateway or Feishu channel. Do not claim to send messages or files "
             "to a gateway; provide local file paths in your response instead.",
+        )
+        system_prompt = system_prompt.replace(
+            "{platform_instruction}", _platform_instruction()
         )
         system_prompt = system_prompt.replace(
             "{project_context}", _read_project_context(self.project)

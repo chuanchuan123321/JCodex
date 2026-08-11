@@ -1529,6 +1529,25 @@ def test_plan_mode_prompt_requires_a_plan_only_when_enabled(
     assert "running locally in the desktop app" in enabled_prompt
 
 
+def test_platform_instruction_is_injected_per_os(monkeypatch, tmp_path) -> None:
+    executor = _prepare_desktop(
+        monkeypatch,
+        tmp_path,
+        LangGraphRunner(_FinalModel(), [], lambda *args: ""),
+    )
+
+    monkeypatch.setattr(desktop.platform, "system", lambda: "Windows")
+    windows_prompt, _ = executor.build_system_prompt("检查项目")
+    assert "{platform_instruction}" not in windows_prompt
+    assert "当前运行在 Windows 上" in windows_prompt
+    assert "cmd.exe 里没有 python3" in windows_prompt
+
+    monkeypatch.setattr(desktop.platform, "system", lambda: "Darwin")
+    mac_prompt, _ = executor.build_system_prompt("检查项目")
+    assert "{platform_instruction}" not in mac_prompt
+    assert "当前运行在 Windows 上" not in mac_prompt
+
+
 def test_multi_agent_prompt_and_runtime_tools_are_task_scoped(
     monkeypatch, tmp_path
 ) -> None:

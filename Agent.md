@@ -69,6 +69,10 @@ Persistent memory, the compacted continuation summary, and recent execution hist
 
 {runtime_mode_instruction}
 
+## Platform
+
+{platform_instruction}
+
 ## Tool Calling
 
 Use specialized tools instead of terminal commands when they fit. Never use terminal commands to narrate work. Call independent tools in parallel; keep dependent operations sequential. Never guess required parameters.

@@ -1504,6 +1504,7 @@ function getConversationExecutionState(conversationId, create = true) {
             awaitingApproval: false,
             unreadCompletion: false,
             streamContents: new Map(),
+            thinkingStartByStream: new Map(),
             activeToolEvent: null,
             activeCompressionEvent: null,
         };
@@ -2638,7 +2639,17 @@ function restoreTrackedExecutionActivity(state) {
     let restored = false;
     state.streamContents.forEach((content, streamId) => {
         if (!content) return;
-        appendStreamingResponse(streamId, content);
+        const existing = streamingResponses.get(String(streamId));
+        if (existing) {
+            cancelStreamingRender(existing);
+            stopStreamingThinkingTimer(existing);
+            existing.element?.remove();
+            existing.thinkingCard?.remove();
+            streamingResponses.delete(String(streamId));
+        }
+        appendStreamingResponse(
+            streamId, content, state.thinkingStartByStream?.get(streamId) || 0
+        );
         restored = true;
     });
     if (state.activeToolEvent) {
@@ -2659,6 +2670,7 @@ function restoreTrackedExecutionActivity(state) {
 function resetTrackedExecutionActivity(state) {
     if (!state) return;
     state.streamContents.clear();
+    state.thinkingStartByStream?.clear();
     state.activeToolEvent = null;
     state.activeCompressionEvent = null;
 }
@@ -2673,6 +2685,7 @@ function trackExecutionResult(state, result) {
         );
     } else if (result.type === 'stream_end' && streamId) {
         state.streamContents.delete(streamId);
+        state.thinkingStartByStream?.delete(streamId);
     } else if (result.type === 'tool_preparing' || result.type === 'tool_start') {
         state.activeToolEvent = {...result};
     } else if (result.type === 'tool') {
@@ -7333,7 +7346,7 @@ function markStreamingCommentary(streamId) {
 }
 
 function createStreamingThinking(state) {
-    state.thinkingStartedAt = Date.now();
+    if (!state.thinkingStartedAt) state.thinkingStartedAt = Date.now();
     state.thinkingCard = addThinkingCard(
         '', state.element, false, true, false, null, state.host || null
     );
@@ -7428,11 +7441,12 @@ function flushVoiceStreamingResponse(state, {final = false} = {}) {
     );
 }
 
-function appendStreamingResponse(streamId, chunk) {
+function appendStreamingResponse(streamId, chunk, startedAt = 0) {
     const id = String(streamId || currentMessageId);
     let state = streamingResponses.get(id);
     if (!state) {
         state = {
+            conversationId: activeConversationId,
             element: null,
             bubble: null,
             thinkingCard: null,
@@ -7443,7 +7457,7 @@ function appendStreamingResponse(streamId, chunk) {
             lastRenderedAt: 0,
             streamId: id,
             thinkingCondensed: false,
-            thinkingStartedAt: 0,
+            thinkingStartedAt: Number(startedAt) || 0,
             thinkingDurationMs: null,
             thinkingTimer: null,
             thinkingClosed: false,
@@ -7664,6 +7678,13 @@ function removeStreamingResponses() {
         stopStreamingThinkingTimer(state);
         state.element?.remove();
         state.thinkingCard?.remove();
+        const execState = getConversationExecutionState(
+            state.conversationId || activeConversationId, false
+        );
+        const saved = execState?.thinkingStartByStream;
+        if (saved && !saved.has(String(state.streamId))) {
+            saved.set(String(state.streamId), Number(state.thinkingStartedAt) || 0);
+        }
     });
     streamingResponses.clear();
 }
