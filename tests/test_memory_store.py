@@ -343,19 +343,13 @@ def test_injected_context_is_persisted_verbatim_until_session_clear(tmp_path):
     assert resumed.load_memory_context() == ""
 
 
-def test_embedding_defaults_to_builtin_provider_when_env_unset(monkeypatch):
+def test_embedding_defaults_to_grok_fts_only_mode(monkeypatch):
     monkeypatch.delenv("MEMORY_EMBEDDING_MODEL", raising=False)
-    monkeypatch.delenv("MEMORY_EMBEDDING_BASE_URL", raising=False)
-    monkeypatch.delenv("MEMORY_EMBEDDING_API_KEY", raising=False)
-    monkeypatch.delenv("MEMORY_EMBEDDING_DIMENSIONS", raising=False)
 
     provider = create_embedding_provider()
 
-    assert provider.status()["provider"] == "api"
-    assert provider.status()["available"] is True
-    assert provider.model == "qwen3.7-text-embedding"
-    assert provider.api_base == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    assert provider.dimensions == 1024
+    assert provider.status()["provider"] == "disabled"
+    assert provider.status()["available"] is False
 
 
 def test_embedding_requires_every_parameter_or_fts_fallback(monkeypatch):
@@ -371,25 +365,22 @@ def test_embedding_requires_every_parameter_or_fts_fallback(monkeypatch):
     assert provider.status()["available"] is True
     assert provider.dimensions == 1024
 
-    # 显式留空某个参数时回退到关键词检索
-    for var in [
-        "MEMORY_EMBEDDING_MODEL",
-        "MEMORY_EMBEDDING_BASE_URL",
-        "MEMORY_EMBEDDING_API_KEY",
+    for var, value in [
+        ("MEMORY_EMBEDDING_MODEL", "qwen3.7-text-embedding"),
+        ("MEMORY_EMBEDDING_BASE_URL", "https://dashscope.example/v1"),
+        ("MEMORY_EMBEDDING_API_KEY", "sk-embed"),
     ]:
-        monkeypatch.setenv(var, "")
+        monkeypatch.delenv(var, raising=False)
         fallback = create_embedding_provider()
         assert fallback.status()["provider"] == "disabled", var
         assert fallback.status()["available"] is False, var
-        monkeypatch.delenv(var, raising=False)
-        restored = create_embedding_provider()
-        assert restored.status()["provider"] == "api", var
+        monkeypatch.setenv(var, value)
 
-    # 维度未设置时使用内置默认维度（与 .env 保持一致）
+    # 维度留空时使用向量模型的默认维度（0 表示未指定）
     monkeypatch.delenv("MEMORY_EMBEDDING_DIMENSIONS", raising=False)
     default_provider = create_embedding_provider()
     assert default_provider.status()["provider"] == "api"
-    assert default_provider.dimensions == 1024
+    assert default_provider.dimensions == 0
 
     # 维度填了非法值同样回退到关键词检索
     monkeypatch.setenv("MEMORY_EMBEDDING_DIMENSIONS", "not-a-number")
