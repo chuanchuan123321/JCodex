@@ -155,6 +155,11 @@ class ToolLoopGuard:
                     return False
             except (json.JSONDecodeError, TypeError):
                 pass
+        # ShellTool 的状态行是权威结果：以 ✓ Success 开头时，即使正文里出现
+        # "No such file or directory" 等文本（例如删除后的验证输出），也不应
+        # 被误判为失败；命令真正失败时状态行一定是 ✗ Failed。
+        if lowered.startswith("✓ success"):
+            return True
         if lowered.startswith(
             (
                 "error:",
@@ -173,16 +178,10 @@ class ToolLoopGuard:
             )
         ):
             return False
-        # 内嵌的典型命令失败信息（Windows cmd / Unix shell / 异常堆栈）。
-        failure_markers = (
-            "is not recognized as an internal or external command",
-            "不是内部或外部命令",
-            "command not found",
-            "no such file or directory",
-            "permission denied",
-            "traceback (most recent call last)",
-        )
-        return not any(marker in lowered for marker in failure_markers)
+        # 只依据状态行/前缀判定：ShellTool 失败一定以 ✗ Failed 开头，
+        # 工具错误以 Error: 等前缀开头；正文里的内嵌文本不再参与判定，
+        # 避免“删除后验证”这类输出被误判为失败。
+        return True
 
     def before_call(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         signature, kind = self._signature(tool_name, params)

@@ -7962,18 +7962,15 @@ function toolResultFailed(value) {
             /* fall through to text heuristics */
         }
     }
+    // ShellTool 的 ✓ Success 状态行是权威成功结果：正文里的
+    // "No such file or directory" 等文本（删除后验证输出）不构成失败。
+    if (/^✓\s*success/i.test(text)) return false;
     if (/^(?:error|failed|failure|fatal):/i.test(text)) return true;
     if (/^✗/.test(text)) return true;
     if (/^(?:错误|失败)[：:]|^执行失败|^(?:unable to|error occurred)|^无法/.test(text)) return true;
-    const markers = [
-        'is not recognized as an internal or external command',
-        '不是内部或外部命令',
-        'command not found',
-        'no such file or directory',
-        'permission denied',
-        'traceback (most recent call last)',
-    ];
-    return markers.some(marker => lowered.includes(marker));
+    // 只依据状态行/前缀判定：ShellTool 失败一定以 ✗ Failed 开头，
+    // 工具错误以 Error: 等前缀开头；正文里的内嵌文本不再参与判定。
+    return false;
 }
 
 function startToolExecution(result, msgId, isPreparing = false) {
