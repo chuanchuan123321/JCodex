@@ -10149,20 +10149,21 @@ async function renderModelQuickSwitch(openConfigName) {
             row.className = 'model-quick-switch-row';
             row.dataset.config = configName;
 
+            const isActive = configName === result.active;
             const item = document.createElement('button');
             item.type = 'button';
             item.className = 'model-quick-switch-item';
-            if (configName === result.active) item.classList.add('is-active');
+            if (isActive) item.classList.add('is-active');
             item.title = `${configName} · ${model || '未知模型'}`;
             item.innerHTML =
                 `<span class="model-quick-switch-name">${escapeHtml(model || '未知模型')}</span>`
-                + (isDeepSeek
+                + (isDeepSeek && isActive
                     ? `<span class="model-quick-switch-effort" title="推理强度: ${escapeHtml(effort)}">${escapeHtml(effort)}</span>`
                     : '')
-                + (isDeepSeek
+                + (isDeepSeek && isActive
                     ? '<svg class="model-quick-switch-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>'
                     : '')
-                + (configName === result.active
+                + (isActive
                     ? '<svg class="model-quick-switch-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
                     : '');
             item.addEventListener('click', async () => {
@@ -10182,7 +10183,7 @@ async function renderModelQuickSwitch(openConfigName) {
             });
             row.appendChild(item);
 
-            if (isDeepSeek) {
+            if (isDeepSeek && isActive) {
                 const submenu = document.createElement('div');
                 submenu.className = 'model-reasoning-submenu';
                 const title = document.createElement('div');
@@ -10234,14 +10235,19 @@ async function renderModelQuickSwitch(openConfigName) {
                     submenu.appendChild(opt);
                 });
                 row.appendChild(submenu);
-
-                row.addEventListener('mouseenter', () => {
-                    menu.querySelectorAll('.model-reasoning-submenu')
-                        .forEach(s => s.classList.remove('is-open'));
-                    submenu.classList.add('is-open');
-                    positionReasoningSubmenu(submenu, row);
-                });
             }
+
+            row.addEventListener('mouseenter', () => {
+                menu.querySelectorAll('.model-reasoning-submenu')
+                    .forEach(s => s.classList.remove('is-open'));
+                if (isActive) {
+                    const sub = row.querySelector('.model-reasoning-submenu');
+                    if (sub) {
+                        sub.classList.add('is-open');
+                        positionReasoningSubmenu(sub, row);
+                    }
+                }
+            });
             menu.appendChild(row);
         });
     }
