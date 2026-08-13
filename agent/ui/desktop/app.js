@@ -10127,6 +10127,154 @@ function positionModelQuickSwitch() {
     menu.style.top = Math.max(8, badgeRect.top - height - 8) + 'px';
 }
 
+async function renderModelQuickSwitch(openConfigName) {
+    const menu = document.getElementById('modelQuickSwitch');
+    if (!menu) return;
+    const result = await eel.list_api_configs()();
+    const available = Array.isArray(result.available) ? result.available : [];
+    menu.innerHTML = '';
+
+    if (available.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'model-quick-switch-empty';
+        empty.textContent = '暂无已保存的模型配置';
+        menu.appendChild(empty);
+    } else {
+        available.forEach(configName => {
+            const config = (result.configs && result.configs[configName]) || {};
+            const model = String(config.api_model || '');
+            const isDeepSeek = model.toLowerCase().includes('deepseek');
+            const effort = isDeepSeek ? normalizeEffort(config.reasoning_effort) : '';
+            const row = document.createElement('div');
+            row.className = 'model-quick-switch-row';
+            row.dataset.config = configName;
+
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'model-quick-switch-item';
+            if (configName === result.active) item.classList.add('is-active');
+            item.title = `${configName} · ${model || '未知模型'}`;
+            item.innerHTML =
+                `<span class="model-quick-switch-name">${escapeHtml(model || '未知模型')}</span>`
+                + (isDeepSeek
+                    ? `<span class="model-quick-switch-effort" title="推理强度: ${escapeHtml(effort)}">${escapeHtml(effort)}</span>`
+                    : '')
+                + (isDeepSeek
+                    ? '<svg class="model-quick-switch-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>'
+                    : '')
+                + (configName === result.active
+                    ? '<svg class="model-quick-switch-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
+                    : '');
+            item.addEventListener('click', async () => {
+                closeModelQuickSwitch();
+                try {
+                    const switchResult = await eel.set_active_config(configName)();
+                    if (switchResult && switchResult.success) {
+                        showToast(`已切换到 ${configName}`, 'success');
+                        await updateModelBadge();
+                    } else {
+                        showToast(`切换失败: ${switchResult?.error || '未知错误'}`, 'error');
+                    }
+                } catch (e) {
+                    console.error('Failed to switch model:', e);
+                    showToast('切换模型失败', 'error');
+                }
+            });
+            row.appendChild(item);
+
+            if (isDeepSeek) {
+                const submenu = document.createElement('div');
+                submenu.className = 'model-reasoning-submenu';
+                const title = document.createElement('div');
+                title.className = 'model-reasoning-submenu-title';
+                title.textContent = '推理强度';
+                submenu.appendChild(title);
+                ['low', 'high'].forEach(value => {
+                    const opt = document.createElement('button');
+                    opt.type = 'button';
+                    opt.className = 'model-reasoning-submenu-item'
+                        + (value === effort ? ' is-active' : '');
+                    opt.dataset.value = value;
+                    opt.title = `发送 reasoning_effort=${value}`;
+                    opt.innerHTML =
+                        `<span>${escapeHtml(value)}</span>`
+                        + (value === effort
+                            ? '<svg class="model-reasoning-submenu-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
+                            : '');
+                    opt.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        try {
+                            const res = await eel.update_config_reasoning_effort(configName, value)();
+                            if (res && res.success) {
+                                showToast(`已设置 ${model} 推理强度: ${value}`, 'success');
+                                const effortEl = row.querySelector('.model-quick-switch-effort');
+                                if (effortEl) {
+                                    effortEl.textContent = value;
+                                    effortEl.title = `推理强度: ${value}`;
+                                }
+                                // 原地移动勾选标记，不重绘菜单，避免模型栏闪没
+                                const check = submenu.querySelector('.model-reasoning-submenu-check');
+                                submenu.querySelectorAll('.model-reasoning-submenu-item')
+                                    .forEach(i => {
+                                        const isSelected = i.dataset.value === value;
+                                        i.classList.toggle('is-active', isSelected);
+                                        if (isSelected && check && !i.contains(check)) {
+                                            i.appendChild(check);
+                                        }
+                                    });
+                                if (configName === result.active) await updateModelBadge();
+                            } else {
+                                showToast(`设置失败: ${res?.error || '未知错误'}`, 'error');
+                            }
+                        } catch (err) {
+                            console.error('Failed to update reasoning effort:', err);
+                            showToast('设置推理强度失败', 'error');
+                        }
+                    });
+                    submenu.appendChild(opt);
+                });
+                row.appendChild(submenu);
+
+                row.addEventListener('mouseenter', () => {
+                    menu.querySelectorAll('.model-reasoning-submenu')
+                        .forEach(s => s.classList.remove('is-open'));
+                    submenu.classList.add('is-open');
+                    positionReasoningSubmenu(submenu, row);
+                });
+            }
+            menu.appendChild(row);
+        });
+    }
+
+    const footer = document.createElement('button');
+    footer.type = 'button';
+    footer.className = 'model-quick-switch-footer';
+    footer.textContent = '打开运行设置…';
+    footer.addEventListener('click', () => {
+        closeModelQuickSwitch();
+        openSettings();
+    });
+    menu.appendChild(footer);
+
+    document.body.appendChild(menu);
+    menu.hidden = false;
+    const badge = document.getElementById('modelBadge');
+    if (badge) badge.setAttribute('aria-expanded', 'true');
+    positionModelQuickSwitch();
+
+    if (openConfigName) {
+        const targetRow = [...menu.querySelectorAll('.model-quick-switch-row')]
+            .find(r => r.dataset.config === openConfigName);
+        const targetSubmenu = targetRow && targetRow.querySelector('.model-reasoning-submenu');
+        if (targetRow && targetSubmenu) {
+            menu.querySelectorAll('.model-reasoning-submenu')
+                .forEach(s => s.classList.remove('is-open'));
+            targetSubmenu.classList.add('is-open');
+            positionReasoningSubmenu(targetSubmenu, targetRow);
+        }
+    }
+}
+
 async function toggleModelQuickSwitch() {
     const menu = document.getElementById('modelQuickSwitch');
     if (!menu) return;
@@ -10135,128 +10283,7 @@ async function toggleModelQuickSwitch() {
         return;
     }
     try {
-        const result = await eel.list_api_configs()();
-        const available = Array.isArray(result.available) ? result.available : [];
-        menu.innerHTML = '';
-
-        if (available.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'model-quick-switch-empty';
-            empty.textContent = '暂无已保存的模型配置';
-            menu.appendChild(empty);
-        } else {
-            available.forEach(configName => {
-                const config = (result.configs && result.configs[configName]) || {};
-                const model = String(config.api_model || '');
-                const isDeepSeek = model.toLowerCase().includes('deepseek');
-                const effort = isDeepSeek ? normalizeEffort(config.reasoning_effort) : '';
-                const row = document.createElement('div');
-                row.className = 'model-quick-switch-row';
-
-                const item = document.createElement('button');
-                item.type = 'button';
-                item.className = 'model-quick-switch-item';
-                if (configName === result.active) item.classList.add('is-active');
-                item.title = `${configName} · ${model || '未知模型'}`;
-                item.innerHTML =
-                    `<span class="model-quick-switch-name">${escapeHtml(model || '未知模型')}</span>`
-                    + (isDeepSeek
-                        ? `<span class="model-quick-switch-effort" title="推理强度: ${escapeHtml(effort)}">${escapeHtml(effort)}</span>`
-                        : '')
-                    + (isDeepSeek
-                        ? '<svg class="model-quick-switch-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>'
-                        : '')
-                    + (configName === result.active
-                        ? '<svg class="model-quick-switch-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
-                        : '');
-                item.addEventListener('click', async () => {
-                    closeModelQuickSwitch();
-                    try {
-                        const switchResult = await eel.set_active_config(configName)();
-                        if (switchResult && switchResult.success) {
-                            showToast(`已切换到 ${configName}`, 'success');
-                            await updateModelBadge();
-                        } else {
-                            showToast(`切换失败: ${switchResult?.error || '未知错误'}`, 'error');
-                        }
-                    } catch (e) {
-                        console.error('Failed to switch model:', e);
-                        showToast('切换模型失败', 'error');
-                    }
-                });
-                row.appendChild(item);
-
-                if (isDeepSeek) {
-                    const submenu = document.createElement('div');
-                    submenu.className = 'model-reasoning-submenu';
-                    const title = document.createElement('div');
-                    title.className = 'model-reasoning-submenu-title';
-                    title.textContent = '推理强度';
-                    submenu.appendChild(title);
-                    ['low', 'high'].forEach(value => {
-                        const opt = document.createElement('button');
-                        opt.type = 'button';
-                        opt.className = 'model-reasoning-submenu-item'
-                            + (value === effort ? ' is-active' : '');
-                        opt.dataset.value = value;
-                        opt.title = `发送 reasoning_effort=${value}`;
-                        opt.innerHTML =
-                            `<span>${escapeHtml(value)}</span>`
-                            + (value === effort
-                                ? '<svg class="model-reasoning-submenu-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
-                                : '');
-                        opt.addEventListener('click', async (e) => {
-                            e.stopPropagation();
-                            try {
-                                const res = await eel.update_config_reasoning_effort(configName, value)();
-                                if (res && res.success) {
-                                    showToast(`已设置 ${model} 推理强度: ${value}`, 'success');
-                                    const effortEl = row.querySelector('.model-quick-switch-effort');
-                                    if (effortEl) {
-                                        effortEl.textContent = value;
-                                        effortEl.title = `推理强度: ${value}`;
-                                    }
-                                    submenu.querySelectorAll('.model-reasoning-submenu-item')
-                                        .forEach(i => i.classList.toggle('is-active', i.dataset.value === value));
-                                    if (configName === result.active) await updateModelBadge();
-                                } else {
-                                    showToast(`设置失败: ${res?.error || '未知错误'}`, 'error');
-                                }
-                            } catch (err) {
-                                console.error('Failed to update reasoning effort:', err);
-                                showToast('设置推理强度失败', 'error');
-                            }
-                        });
-                        submenu.appendChild(opt);
-                    });
-                    row.appendChild(submenu);
-
-                    row.addEventListener('mouseenter', () => {
-                        menu.querySelectorAll('.model-reasoning-submenu')
-                            .forEach(s => s.classList.remove('is-open'));
-                        submenu.classList.add('is-open');
-                        positionReasoningSubmenu(submenu, row);
-                    });
-                }
-                menu.appendChild(row);
-            });
-        }
-
-        const footer = document.createElement('button');
-        footer.type = 'button';
-        footer.className = 'model-quick-switch-footer';
-        footer.textContent = '打开运行设置…';
-        footer.addEventListener('click', () => {
-            closeModelQuickSwitch();
-            openSettings();
-        });
-        menu.appendChild(footer);
-
-        document.body.appendChild(menu);
-        menu.hidden = false;
-        const badge = document.getElementById('modelBadge');
-        if (badge) badge.setAttribute('aria-expanded', 'true');
-        positionModelQuickSwitch();
+        await renderModelQuickSwitch();
     } catch (e) {
         console.error('Failed to load model list:', e);
     }
