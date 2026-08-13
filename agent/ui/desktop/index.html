@@ -6,7 +6,7 @@
     <title>JCodex</title>
     <link rel="icon" type="image/svg+xml" href="assets/kylin-agent-mark-light.svg" id="appFavicon">
     <link rel="stylesheet" href="vendor/katex/katex.min.css">
-    <link rel="stylesheet" href="styles.css?v=20260813-75">
+    <link rel="stylesheet" href="styles.css?v=20260813-77">
 </head>
 <body class="theme-light">
     <a class="skip-link" href="#messageInput">跳转到输入框</a>
@@ -264,6 +264,10 @@
                             <button class="sidebar-action-item" id="archiveBtn" type="button" onclick="openArchiveModal()">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>
                                 <span>归档任务</span><span class="sidebar-action-hint">›</span>
+                            </button>
+                            <button class="sidebar-action-item" id="scheduledBtn" type="button" onclick="openScheduledTasksModal()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                                <span>定时任务</span><span class="sidebar-action-hint">›</span>
                             </button>
                         </div>
                     </section>
@@ -869,6 +873,34 @@
         </div>
     </div>
 
+    <!-- 定时任务弹窗 -->
+    <div class="settings-modal" id="scheduledTasksModal">
+        <div class="settings-modal-content" style="max-width: 700px;">
+            <div class="settings-modal-header">
+                <span>定时任务</span>
+                <button class="btn-icon" onclick="closeScheduledTasksModal()" aria-label="关闭定时任务">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="settings-modal-body" style="max-height: 70vh;">
+                <div class="settings-group">
+                    <label class="settings-label">已创建定时任务（到点后自动在对应对话中运行）</label>
+                    <div class="data-list" id="scheduledTasksModalList">
+                        <div class="data-item">
+                            <span class="data-source">加载中...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-modal-footer">
+                <button class="btn-cancel" onclick="closeScheduledTasksModal()">关闭</button>
+                <button class="btn-save" id="scheduledTasksRefresh" onclick="loadScheduledTasks()">刷新</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Custom Input Dialog -->
     <div class="custom-dialog" id="inputDialog">
         <div class="custom-dialog-content input-dialog-content">
@@ -1171,6 +1203,6 @@
 
     <script src="/eel.js"></script>
     <script src="vendor/katex/katex.min.js"></script>
-    <script src="app.js?v=20260813-75"></script>
+    <script src="app.js?v=20260813-77"></script>
 </body>
 </html>

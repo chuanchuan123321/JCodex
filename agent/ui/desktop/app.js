@@ -10289,6 +10289,80 @@ async function toggleModelQuickSwitch() {
     }
 }
 
+function formatNextFire(value) {
+    if (!value) return '';
+    const ts = Number(value);
+    if (!Number.isFinite(ts) || ts <= 0) return '';
+    try {
+        const now = Date.now();
+        const diff = ts * 1000 - now;
+        if (diff > 0 && diff < 60 * 60 * 1000) {
+            const mins = Math.max(1, Math.round(diff / 60000));
+            return `${mins} 分钟后`;
+        }
+        const d = new Date(ts * 1000);
+        return d.toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+    } catch (e) {
+        return '';
+    }
+}
+
+async function loadScheduledTasks() {
+    const list = document.getElementById('scheduledTasksModalList');
+    if (!list || !canCallEel()) return;
+    try {
+        const result = await eel.list_scheduled_tasks()();
+        if (!result || !result.success) throw new Error(result?.error || '加载失败');
+        const tasks = Array.isArray(result.tasks) ? result.tasks : [];
+        if (!tasks.length) {
+            list.innerHTML = '<div class="data-item"><span class="data-source">暂无定时任务</span></div>';
+            return;
+        }
+        list.innerHTML = '';
+        tasks.forEach(task => {
+            const id = String(task.id || '');
+            const interval = String(task.interval || '');
+            const prompt = String(task.prompt || '');
+            const convTitle = String(task.conversation_title || '');
+            const nextFire = formatNextFire(task.next_fire);
+            const recurring = task.recurring !== false;
+            const item = document.createElement('div');
+            item.className = 'scheduled-task-item';
+            item.innerHTML =
+                `<div class="scheduled-task-top">`
+                + `<span class="scheduled-task-interval" title="${escapeHtml(interval)}">${escapeHtml(interval)}</span>`
+                + (recurring ? '<span class="scheduled-task-badge">循环</span>' : '')
+                + `<button class="scheduled-task-delete" type="button" title="删除定时任务" aria-label="删除定时任务">✕</button>`
+                + `</div>`
+                + `<div class="scheduled-task-prompt" title="${escapeHtml(prompt)}">${escapeHtml(prompt)}</div>`
+                + `<div class="scheduled-task-meta">`
+                + (convTitle ? `<span title="${escapeHtml(convTitle)}">${escapeHtml(convTitle)}</span>` : '')
+                + (nextFire ? `<span>${escapeHtml(nextFire)}</span>` : '')
+                + `</div>`;
+            item.querySelector('.scheduled-task-delete').addEventListener('click', async () => {
+                const confirmed = await showConfirmDialog('确定删除这个定时任务吗？');
+                if (!confirmed) return;
+                try {
+                    const res = await eel.delete_scheduled_task(id)();
+                    if (res && res.success) {
+                        showToast('定时任务已删除', 'success');
+                        loadScheduledTasks();
+                    } else {
+                        showToast(`删除失败: ${res?.error || '未知错误'}`, 'error');
+                    }
+                } catch (err) {
+                    console.error('Failed to delete scheduled task:', err);
+                    showToast('删除定时任务失败', 'error');
+                }
+            });
+            list.appendChild(item);
+        });
+    } catch (e) {
+        console.error('Failed to load scheduled tasks:', e);
+        list.innerHTML = '<div class="data-item"><span class="data-source">定时任务加载失败</span></div>';
+    }
+}
+
 async function loadConfigList() {
     try {
         const result = await eel.list_api_configs()();
@@ -11013,6 +11087,15 @@ function openArchiveModal() {
 
 function closeArchiveModal() {
     document.getElementById('archiveModal').classList.remove('active');
+}
+
+function openScheduledTasksModal() {
+    document.getElementById('scheduledTasksModal').classList.add('active');
+    loadScheduledTasks();
+}
+
+function closeScheduledTasksModal() {
+    document.getElementById('scheduledTasksModal').classList.remove('active');
 }
 
 async function refreshArchivedConversations() {

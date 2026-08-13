@@ -327,7 +327,7 @@ The model sees JSON-schema function tools. The exact inventory is filtered by ru
 | Media and documents | `view_image`, `generate_pdf` | Images are restricted to task attachments or allowed workspace output/temp paths |
 | Planning and interaction | `todo_write`, `update_plan`, `question` | Visibility depends on plan/voice mode; questions create resumable interrupts |
 | Memory and discovery | `memory_search`, `memory_get`, `search_tool`, `use_tool`, `load_skill` | Supports progressive tool and skill discovery instead of a permanently huge prompt |
-| Time and automation | `set_timer`, `scheduler_create`, `scheduler_list`, `scheduler_delete`, `update_goal` | In-process schedules trigger configured prompt callbacks while the runtime remains active |
+| Time and automation | `scheduler_create`, `scheduler_list`, `scheduler_delete`, `update_goal` | In-process schedules trigger configured prompt callbacks while the runtime remains active |
 | Preview | `project_preview` | Starts only loopback-bound Web previews and waits for HTTP readiness |
 | Collaboration | `spawn_agent`, `list_agents`, `wait_agents`, `send_agent_message`, `publish_agent_artifact`, `get_agent_collaboration`, `cancel_agent` | Desktop multi-agent mode only |
 | Gateway | `send_file` | Exposed only when an active gateway channel can route the file |

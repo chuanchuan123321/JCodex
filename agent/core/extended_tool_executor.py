@@ -200,7 +200,6 @@ class ExtendedToolExecutor:
             "websearch": execute_websearch,
             "codesearch": execute_codesearch,
             "read_url": self.execute_read_url,
-            "set_timer": self.execute_set_timer,
             "send_file": self.execute_send_file,
             "generate_pdf": self.execute_generate_pdf,
             "load_skill": self.execute_load_skill,
@@ -426,27 +425,6 @@ class ExtendedToolExecutor:
                             },
                         },
                         "required": ["url"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "set_timer",
-                    "description": "Set a timer that will trigger after specified minutes",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "minutes": {
-                                "type": "number",
-                                "description": "Minutes to wait",
-                            },
-                            "message": {
-                                "type": "string",
-                                "description": "Message to display when timer ends",
-                            },
-                        },
-                        "required": ["minutes"],
                     },
                 },
             },
@@ -892,7 +870,7 @@ class ExtendedToolExecutor:
             "type": "function",
             "function": {
                 "name": "scheduler_create",
-                "description": "Create or update a recurring scheduled prompt. Intervals use 60s, 5m, 2h, or 1d syntax.",
+                "description": "Create or update a recurring scheduled prompt. Intervals use 60s, 5m, 2h, or 1d syntax. When it fires, the prompt is run as a new task inside the current conversation (the AI continues working there); the user can view and delete it from the settings sidebar.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2286,7 +2264,7 @@ class ExtendedToolExecutor:
         callback = self.scheduled_prompt_callback
         if callback is not None:
             try:
-                callback(prompt)
+                callback(task_id, prompt)
             except Exception as exc:
                 with self._scheduled_tasks_lock:
                     if task_id in self._scheduled_tasks:
@@ -2520,40 +2498,6 @@ class ExtendedToolExecutor:
             return f"Error: 网络请求失败 - {str(e)}"
         except Exception as e:
             return f"Error: 读取 URL 失败 - {str(e)}"
-
-    def execute_set_timer(self, params: Dict[str, Any]) -> str:
-        """Set a timer that will trigger after specified minutes"""
-        import time
-        import threading
-
-        minutes = params.get("minutes", 0)
-        message = params.get("message", "时间到了！")
-        executor = params.get("executor", None)  # 获取执行器引用
-
-        if not isinstance(minutes, (int, float)) or minutes <= 0:
-            return "Error: minutes 必须是正数"
-
-        try:
-            seconds = minutes * 60
-
-            def timer_callback():
-                """Timer callback function"""
-                time.sleep(seconds)
-                print(f"\n⏰ 【定时器触发】{message}\n")
-
-                # 如果有执行器引用，设置标志
-                if executor:
-                    executor.timer_triggered = True
-                    executor.waiting_for_timer = False
-
-            # 在后台线程中运行定时器
-            timer_thread = threading.Thread(target=timer_callback, daemon=True)
-            timer_thread.start()
-
-            return f"✅ 定时器已设置：{minutes}分钟后将显示 '{message}'"
-
-        except Exception as e:
-            return f"Error: 设置定时器失败 - {str(e)}"
 
     def execute_send_file(self, params: Dict[str, Any]) -> str:
         """Send a file to the user via Feishu"""

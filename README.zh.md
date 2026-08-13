@@ -327,7 +327,7 @@ FEISHU_VERIFICATION_TOKEN=
 | 媒体与文档 | `view_image`、`generate_pdf` | 图片限制为当前任务附件或 workspace/output、workspace/temp 中的允许文件 |
 | 计划与交互 | `todo_write`、`update_plan`、`question` | 是否可见取决于计划/语音模式；提问会创建可恢复中断 |
 | 记忆与发现 | `memory_search`、`memory_get`、`search_tool`、`use_tool`、`load_skill` | 支持渐进式发现，避免把所有工具和 Skill 细节永久塞进 Prompt |
-| 时间与自动化 | `set_timer`、`scheduler_create`、`scheduler_list`、`scheduler_delete`、`update_goal` | 计划任务依赖当前进程存活，并通过已配置回调触发 Prompt |
+| 时间与自动化 | `scheduler_create`、`scheduler_list`、`scheduler_delete`、`update_goal` | 计划任务依赖当前进程存活，并通过已配置回调触发 Prompt |
 | 项目预览 | `project_preview` | 只启动本机回环地址服务，并等待 HTTP 就绪 |
 | 多智能体 | `spawn_agent`、`list_agents`、`wait_agents`、`send_agent_message`、`publish_agent_artifact`、`get_agent_collaboration`、`cancel_agent` | 仅桌面多智能体模式可见 |
 | 网关 | `send_file` | 仅在存在有效网关路由时暴露 |

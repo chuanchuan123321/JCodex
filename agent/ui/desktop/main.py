@@ -1938,6 +1938,11 @@ class DesktopTaskExecutor:
             cancelled = runtime.get("cancelled")
             if callable(cancelled) and cancelled():
                 return "Error: task cancelled"
+            if tool_name == "scheduler_create":
+                if not self.tool_executor.scheduled_prompt_callback:
+                    self.tool_executor.scheduled_prompt_callback = (
+                        _on_scheduled_task_fired
+                    )
             raw_result = self.tool_executor.execute(
                 {"tool": tool_name, "params": params},
                 conversation_id=str(
@@ -1948,6 +1953,10 @@ class DesktopTaskExecutor:
             )
             if callable(cancelled) and cancelled():
                 return "Error: task cancelled"
+            if tool_name == "scheduler_create":
+                _register_scheduled_task(raw_result, runtime, self.tool_executor)
+            elif tool_name == "scheduler_delete":
+                _unregister_scheduled_task(raw_result)
             self.data_integrator.ingest_tool_result(
                 tool_name=tool_name,
                 params=params,
@@ -2506,6 +2515,8 @@ def _dynamic_compaction_reminder(run: DesktopRunContext) -> str:
 conversation_executors: dict[str, DesktopTaskExecutor] = {}
 conversation_runs: dict[str, DesktopRunContext] = {}
 conversation_generations: dict[str, int] = {}
+_scheduled_task_conversations: dict[str, str] = {}
+_scheduled_task_owners: dict[str, object] = {}
 
 
 def _executor_for_conversation(conversation_id: str) -> DesktopTaskExecutor:
@@ -6943,6 +6954,27 @@ def move_conversation_to_project(conversation_id: str, project_id: str = ""):
         return {"success": False, "error": str(exc)}
 
 
+def _cleanup_scheduled_tasks_for_conversations(conversation_ids: set) -> None:
+    """删除对话时同步清理其定时任务：取消计时器并移除注册。"""
+    with state_lock:
+        task_ids = [
+            task_id
+            for task_id, conversation_id in _scheduled_task_conversations.items()
+            if conversation_id in conversation_ids
+        ]
+    for task_id in task_ids:
+        with state_lock:
+            owner = _scheduled_task_owners.get(task_id)
+        if owner is not None:
+            try:
+                owner.execute_scheduler_delete({"task_id": task_id})
+            except Exception:
+                pass
+        with state_lock:
+            _scheduled_task_conversations.pop(task_id, None)
+            _scheduled_task_owners.pop(task_id, None)
+
+
 @eel.expose
 def delete_conversation(conversation_id: str):
     try:
@@ -6984,6 +7016,7 @@ def delete_conversation(conversation_id: str):
                 conversation_runs.pop(target_id, None)
                 conversation_executors.pop(target_id, None)
                 conversation_generations.pop(target_id, None)
+            _cleanup_scheduled_tasks_for_conversations(set(delete_ids))
             if str(os_agent.conversation_id or "") in delete_ids:
                 # The durable task is gone.  Do not let a late iframe
                 # initialize call dereference this cached id again.
@@ -8251,6 +8284,190 @@ def update_config_reasoning_effort(config_name, reasoning_effort):
                 if executor.ai_engine:
                     executor.ai_engine.reasoning_effort = effort or "high"
         return {"success": True, "active": config_name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _register_scheduled_task(result: object, runtime: dict, owner: object) -> None:
+    """记录定时任务所属的对话与执行器。"""
+    text = result if isinstance(result, str) else ""
+    try:
+        data = json.loads(text)
+        task_id = str(data.get("id") or "").strip()
+    except Exception:
+        task_id = ""
+    if not task_id:
+        return
+    conversation_id = str(runtime.get("conversation_id") or "")
+    with state_lock:
+        _scheduled_task_conversations[task_id] = conversation_id
+        _scheduled_task_owners[task_id] = owner
+
+
+def _unregister_scheduled_task(result: object) -> None:
+    """删除定时任务时清理注册信息。"""
+    text = result if isinstance(result, str) else ""
+    try:
+        data = json.loads(text)
+        task_id = str(data.get("task_id") or "").strip()
+    except Exception:
+        task_id = ""
+    if not task_id:
+        return
+    with state_lock:
+        _scheduled_task_conversations.pop(task_id, None)
+        _scheduled_task_owners.pop(task_id, None)
+
+
+def _on_scheduled_task_fired(task_id: str, prompt: str) -> None:
+    """定时任务到点：找到归属对话并触发一轮新任务。"""
+    task_id = str(task_id or "").strip()
+    with state_lock:
+        conversation_id = _scheduled_task_conversations.get(task_id, "")
+    if not conversation_id:
+        print(f"[scheduler] 定时任务 {task_id} 未关联对话，跳过")
+        return
+    try:
+        _run_scheduled_task_in_conversation(str(prompt or ""), conversation_id)
+    except Exception as exc:
+        print(f"[scheduler] 定时任务触发失败: {exc}")
+
+
+def _run_scheduled_task_in_conversation(prompt: str, conversation_id: str) -> None:
+    """把定时任务的 prompt 作为内部请求投入对应对话执行（不显示为用户消息）。"""
+    conversation_id = str(conversation_id or "")
+    prompt = str(prompt or "").strip()
+    if not prompt or not conversation_id:
+        return
+    try:
+        conversation = conversation_store.load(conversation_id)
+    except ValueError:
+        print(f"[scheduler] 对话不存在或已删除: {conversation_id}")
+        return
+    if _project_unavailable_error(conversation):
+        print(f"[scheduler] 对话项目不可用: {conversation_id}")
+        return
+
+    # 若该对话正在执行任务，先暂停当前任务再运行定时任务
+    with state_lock:
+        current = conversation_runs.get(conversation_id)
+    if current and current.status in {"running", "waiting"}:
+        try:
+            stop_execution(conversation_id, 0)
+        except Exception as exc:
+            print(f"[scheduler] 暂停当前任务失败: {exc}")
+        if current.worker and current.worker.is_alive():
+            current.worker.join(timeout=30)
+
+    message_id = int(datetime.now().timestamp() * 1000)
+    run = _begin_execution(message_id, conversation_id)
+    if run is None:
+        print(f"[scheduler] 对话 {conversation_id} 仍在执行，跳过本次定时任务")
+        return
+    executor = run.executor
+    executor.pending_approval = None
+    executor.pending_question = None
+    executor.step_count = 0
+    executor.allow_all_commands = executor.auto_allow_all_commands
+    executor.tool_loop_guard.reset()
+    try:
+        with executor._memory_lock:
+            executor.memory_manager.append_execution_step(
+                f"【定时任务】{prompt}"
+            )
+        executor.current_user_request = prompt
+        push_step(
+            {"type": "commentary", "content": "⏰ 定时任务已触发，开始执行"},
+            message_id,
+            conversation_id,
+            run.generation,
+        )
+        executor.data_integrator.start_task(f"【定时任务】{prompt}")
+        context = executor._build_context()
+        system_prompt, user_msg = executor.build_system_prompt(
+            prompt,
+            context,
+            plan_enabled=False,
+            plan_policy="off",
+            voice_mode=False,
+            multi_agent_enabled=False,
+        )
+        outcome = _run_graph_task(user_msg, system_prompt, run)
+    except Exception as exc:
+        if not _execution_cancelled(run):
+            push_step(
+                {"type": "error", "content": str(exc)},
+                message_id,
+                conversation_id,
+                run.generation,
+            )
+        executor.data_integrator.end_task("已停止")
+        executor.current_user_request = ""
+        outcome = "error"
+    if outcome != "waiting":
+        _finish_execution(run, outcome)
+
+
+@eel.expose
+def list_scheduled_tasks():
+    """列出所有定时任务及其归属对话。"""
+    try:
+        with state_lock:
+            owners = list(_scheduled_task_owners.values())
+            mapping = dict(_scheduled_task_conversations)
+        tasks = []
+        seen = set()
+        for owner in owners:
+            try:
+                raw = owner.execute_scheduler_list({})
+                data = json.loads(raw) if isinstance(raw, str) else {}
+            except Exception:
+                continue
+            for task in data.get("tasks", []):
+                task_id = str(task.get("id") or "")
+                if not task_id or task_id in seen:
+                    continue
+                seen.add(task_id)
+                conversation_id = mapping.get(task_id, "")
+                title = ""
+                if conversation_id:
+                    try:
+                        title = str(
+                            conversation_store.load(conversation_id).get("title", "")
+                            or ""
+                        )
+                    except Exception:
+                        title = ""
+                task["conversation_id"] = conversation_id
+                task["conversation_title"] = title
+                tasks.append(task)
+        tasks.sort(key=lambda t: float(t.get("next_fire") or 0))
+        return {"success": True, "tasks": tasks}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@eel.expose
+def delete_scheduled_task(task_id):
+    """删除一个定时任务。"""
+    task_id = str(task_id or "").strip()
+    try:
+        if not task_id:
+            return {"success": False, "error": "task_id required"}
+        with state_lock:
+            owner = _scheduled_task_owners.get(task_id)
+        removed = False
+        if owner is not None:
+            try:
+                raw = owner.execute_scheduler_delete({"task_id": task_id})
+                data = json.loads(raw) if isinstance(raw, str) else {}
+                removed = bool(data.get("success"))
+            except Exception:
+                removed = False
+        with state_lock:
+            _scheduled_task_conversations.pop(task_id, None)
+            _scheduled_task_owners.pop(task_id, None)
+        return {"success": removed, "task_id": task_id}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

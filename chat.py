@@ -318,8 +318,6 @@ class NaturalTaskExecutor:
         self.step_count = 0
         self.max_steps = 15  # 改为15步
         self.allow_all_commands = False  # 是否允许所有命令
-        self.timer_triggered = False  # 定时器是否被触发
-        self.waiting_for_timer = False  # 是否在等待定时器
         self.bus = bus  # 消息总线（用于网关模式）
         self.current_sender_id = None  # 当前消息发送者
         self.current_chat_id = None  # 当前聊天 ID
@@ -853,18 +851,6 @@ class NaturalTaskExecutor:
                 f"⚠️ 已达到网络搜索限制({self.max_web_searches}次)，"
                 "请基于已有信息给出结论"
             )
-        elif name == "set_timer":
-            timer_params = dict(params)
-            timer_params["executor"] = self
-            self.waiting_for_timer = True
-            self.timer_triggered = False
-            result = self.tool_executor.execute(
-                {"tool": name, "params": timer_params}
-            )
-            while self.waiting_for_timer and not self.timer_triggered:
-                cancel_event = runtime.get("cancel_event")
-                if hasattr(cancel_event, "wait") and cancel_event.wait(0.5):
-                    break
         elif name == "send_file":
             result = self._send_graph_file(params, runtime)
         else:
@@ -2244,12 +2230,6 @@ AI 想要执行以下操作：
                 return
             self.web_search_count += 1
 
-        # 如果是设置定时器，传入执行器引用
-        if tool_name == "set_timer":
-            params["executor"] = self
-            self.waiting_for_timer = True
-            self.timer_triggered = False
-
         # 如果是发送文件，在网关模式下处理
         if tool_name == "send_file":
             file_path = params.get("path", "") or params.get("file_path", "")
@@ -2305,15 +2285,6 @@ AI 想要执行以下操作：
 
         # 同步保存到记忆文件（确保下一步能读到）
         self.memory_manager.append_execution_step(history_entry)
-
-        # 如果设置了定时器，等待其触发
-        if tool_name == "set_timer" and self.waiting_for_timer:
-            print("⏳ 等待定时器触发...\n")
-            import time
-
-            while self.waiting_for_timer and not self.timer_triggered:
-                time.sleep(0.5)
-            Toast.success("定时器已触发，继续执行任务")
 
     def _ask_for_approval(self) -> str:
         """Ask user for approval to execute command with arrow keys"""
