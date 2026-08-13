@@ -37,8 +37,8 @@ echo "==> [5/7] 元数据"
   -c "Set :CFBundleIdentifier com.jcodex.desktop" \
   -c "Set :CFBundleExecutable $APP_NAME" \
   -c "Set :CFBundleIconFile icon.icns" \
-  -c "Set :CFBundleShortVersionString 1.0.0" \
-  -c "Set :CFBundleVersion 1.0.0" \
+  -c "Set :CFBundleShortVersionString 1.2.0" \
+  -c "Set :CFBundleVersion 1.2.0" \
   "$APP/Contents/Info.plist"
 
 echo "==> [6/7] ad-hoc 签名"

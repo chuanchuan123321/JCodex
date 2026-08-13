@@ -510,6 +510,7 @@ def _write_env_file(env_file: Path, settings: dict) -> None:
         "API_BASE_URL": "api_base_url",
         "API_KEY": "api_key",
         "API_MODEL": "api_model",
+        "REASONING_EFFORT": "reasoning_effort",
         "MODEL_SUPPORTS_VISION": "supports_vision",
         "TAVILY_API_KEY": "tavily_api_key",
         "CUSTOM_SYSTEM_PROMPT": "custom_system_prompt",
@@ -8131,14 +8132,14 @@ def load_api_config(config_name):
 
 
 @eel.expose
-def save_api_config(config_name, api_base_url, api_key, api_model):
+def save_api_config(config_name, api_base_url, api_key, api_model, reasoning_effort="high"):
     """Save the current API configuration and make it active."""
     try:
         from agent.core.config_manager import ConfigManager
 
         config_manager = ConfigManager()
         if config_manager.add_config(
-            config_name, api_base_url, api_key, api_model
+            config_name, api_base_url, api_key, api_model, reasoning_effort
         ) and config_manager.set_active_config(config_name):
             return {"success": True, "active": config_name}
         return {"success": False, "error": "Failed to save configuration"}
@@ -8178,6 +8179,7 @@ def set_active_config(config_name):
                 "api_base_url": config.get("api_base_url", ""),
                 "api_key": config.get("api_key", ""),
                 "api_model": config.get("api_model", ""),
+                "reasoning_effort": config.get("reasoning_effort", "high"),
             },
         )
         load_dotenv(env_file, override=True)
@@ -8194,6 +8196,15 @@ def set_active_config(config_name):
                 executor.ai_engine.api_base_url
             )
             executor.ai_engine.model = config.get("api_model", "")
+            configured_effort = str(config.get("reasoning_effort", "") or "").strip()
+            executor.ai_engine.reasoning_effort = (
+                configured_effort
+                or (
+                    "high"
+                    if "deepseek" in str(config.get("api_model", "")).lower()
+                    else ""
+                )
+            )
             if not any(
                 run.executor is executor
                 and run.status in {"running", "waiting"}
@@ -8201,6 +8212,45 @@ def set_active_config(config_name):
             ):
                 executor.rebuild_langgraph_runner()
         return {"success": True, "config": config, "active": config_name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@eel.expose
+def update_config_reasoning_effort(config_name, reasoning_effort):
+    """Update the reasoning effort of a saved config (DeepSeek series only)."""
+    try:
+        from agent.core.config_manager import ConfigManager
+
+        effort = str(reasoning_effort or "").strip()
+        if effort and effort not in ("low", "medium", "high", "max"):
+            return {"success": False, "error": "Invalid reasoning effort"}
+
+        config_manager = ConfigManager()
+        config = config_manager.get_config(config_name)
+        if not config:
+            return {"success": False, "error": "Configuration not found"}
+
+        if not config_manager.update_config(
+            config_name,
+            config.get("api_base_url", ""),
+            config.get("api_key", ""),
+            config.get("api_model", ""),
+            effort or "high",
+        ):
+            return {"success": False, "error": "Failed to update configuration"}
+
+        if config_name == config_manager.active_config:
+            config_manager.export_to_env(config_name)
+            env_file = DATA_ROOT / ".env"
+            _write_env_file(env_file, {"reasoning_effort": effort or "high"})
+            load_dotenv(env_file, override=True)
+            with state_lock:
+                executors = set(conversation_executors.values()) | {os_agent}
+            for executor in executors:
+                if executor.ai_engine:
+                    executor.ai_engine.reasoning_effort = effort or "high"
+        return {"success": True, "active": config_name}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

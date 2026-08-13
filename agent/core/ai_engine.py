@@ -94,6 +94,7 @@ class AIEngine:
         self.model = os.getenv("API_MODEL", "deepseek-v4-pro")
         self.max_tokens = env_int("MAX_TOKENS", 50000)
         self.temperature = env_float("TEMPERATURE", 0.7)
+        self.reasoning_effort = os.getenv("REASONING_EFFORT", "").strip()
 
         self.api_base_url = self.normalize_api_base_url(self.api_base_url)
         self.api_path = self.get_api_path_for_base_url(self.api_base_url)
@@ -102,6 +103,15 @@ class AIEngine:
             raise ValueError("API_KEY not found in environment variables")
 
         self.conversation_history: List[Dict[str, Any]] = []
+
+    def _apply_reasoning_params(self, payload: Dict[str, Any]) -> None:
+        """DeepSeek 系列模型：按配置注入推理强度参数（其余模型不注入）。"""
+        effort = (self.reasoning_effort or "").strip()
+        model = (self.model or "").lower()
+        if not effort or "deepseek" not in model:
+            return
+        payload["reasoning_effort"] = effort
+        payload["thinking"] = {"type": "enabled"}
 
     def _post_chat_completion(
         self,
@@ -127,6 +137,8 @@ class AIEngine:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+
+        self._apply_reasoning_params(payload)
 
         request_timeout = max(1.0, float(timeout if timeout is not None else 120))
         retries = max(1, int(max_retries if max_retries is not None else 3))
@@ -219,6 +231,8 @@ class AIEngine:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+
+        self._apply_reasoning_params(payload)
 
         max_retries = 3
         retry_delay = 5

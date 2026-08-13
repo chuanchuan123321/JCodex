@@ -47,7 +47,7 @@ class ConfigManager:
         with open(self.active_config_file, "w", encoding="utf-8") as f:
             f.write(config_name)
 
-    def add_config(self, name: str, api_base_url: str, api_key: str, api_model: str) -> bool:
+    def add_config(self, name: str, api_base_url: str, api_key: str, api_model: str, reasoning_effort: str = "high") -> bool:
         """添加新配置"""
         # 本地模型服务（如 llama.cpp）可以不填 API Key
         if not name or not api_base_url or not api_model:
@@ -57,6 +57,7 @@ class ConfigManager:
             "api_base_url": api_base_url,
             "api_key": api_key,
             "api_model": api_model,
+            "reasoning_effort": reasoning_effort,
         }
         self._save_configs()
 
@@ -87,7 +88,7 @@ class ConfigManager:
         return True
 
     def update_config(
-        self, name: str, api_base_url: str, api_key: str, api_model: str
+        self, name: str, api_base_url: str, api_key: str, api_model: str, reasoning_effort: str = "high"
     ) -> bool:
         """更新配置"""
         if name not in self.configs:
@@ -97,6 +98,7 @@ class ConfigManager:
             "api_base_url": api_base_url,
             "api_key": api_key,
             "api_model": api_model,
+            "reasoning_effort": reasoning_effort,
         }
         self._save_configs()
         return True

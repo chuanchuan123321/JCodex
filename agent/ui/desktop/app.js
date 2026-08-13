@@ -3559,6 +3559,24 @@ function initializeUI() {
     if (modelBadge) {
         modelBadge.addEventListener('click', toggleModelQuickSwitch);
         window.addEventListener('resize', positionModelQuickSwitch);
+        const modelMenuEl = document.getElementById('modelQuickSwitch');
+        if (modelMenuEl) {
+            modelMenuEl.addEventListener('mouseout', (event) => {
+                const submenus = modelMenuEl.querySelectorAll('.model-reasoning-submenu');
+                if (!submenus.length) return;
+                // 从二级栏走出去不关闭；只有从一级面板主体走出去才关闭
+                const leavingFromSubmenu = !!(event.target
+                    && event.target.closest
+                    && event.target.closest('.model-reasoning-submenu'));
+                const related = event.relatedTarget;
+                const goingOutside = !(related
+                    && related.nodeType === 1
+                    && modelMenuEl.contains(related));
+                if (goingOutside && !leavingFromSubmenu) {
+                    submenus.forEach(sub => sub.classList.remove('is-open'));
+                }
+            });
+        }
     }
 
     // 点击菜单外部时关闭 API 配置下拉框与模型上拉框
@@ -10062,6 +10080,30 @@ function toggleApiConfigMenu() {
     else closeApiConfigMenu();
 }
 
+function normalizeEffort(value) {
+    return String(value || '').toLowerCase() === 'low' ? 'low' : 'high';
+}
+
+function positionReasoningSubmenu(submenu, row) {
+    if (!submenu || !row) return;
+    const rect = row.getBoundingClientRect();
+    submenu.style.position = 'fixed';
+    submenu.style.visibility = 'hidden';
+    const sw = submenu.offsetWidth;
+    const sh = submenu.offsetHeight;
+    let left = rect.right;
+    if (left + sw > window.innerWidth - 8) {
+        left = Math.max(8, rect.left - sw);
+    }
+    let top = rect.top - 4;
+    if (top + sh > window.innerHeight - 8) {
+        top = Math.max(8, window.innerHeight - sh - 8);
+    }
+    submenu.style.left = left + 'px';
+    submenu.style.top = top + 'px';
+    submenu.style.visibility = '';
+}
+
 function closeModelQuickSwitch() {
     const menu = document.getElementById('modelQuickSwitch');
     if (menu) menu.hidden = true;
@@ -10106,6 +10148,11 @@ async function toggleModelQuickSwitch() {
             available.forEach(configName => {
                 const config = (result.configs && result.configs[configName]) || {};
                 const model = String(config.api_model || '');
+                const isDeepSeek = model.toLowerCase().includes('deepseek');
+                const effort = isDeepSeek ? normalizeEffort(config.reasoning_effort) : '';
+                const row = document.createElement('div');
+                row.className = 'model-quick-switch-row';
+
                 const item = document.createElement('button');
                 item.type = 'button';
                 item.className = 'model-quick-switch-item';
@@ -10113,6 +10160,12 @@ async function toggleModelQuickSwitch() {
                 item.title = `${configName} · ${model || '未知模型'}`;
                 item.innerHTML =
                     `<span class="model-quick-switch-name">${escapeHtml(model || '未知模型')}</span>`
+                    + (isDeepSeek
+                        ? `<span class="model-quick-switch-effort" title="推理强度: ${escapeHtml(effort)}">${escapeHtml(effort)}</span>`
+                        : '')
+                    + (isDeepSeek
+                        ? '<svg class="model-quick-switch-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>'
+                        : '')
                     + (configName === result.active
                         ? '<svg class="model-quick-switch-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
                         : '');
@@ -10131,7 +10184,61 @@ async function toggleModelQuickSwitch() {
                         showToast('切换模型失败', 'error');
                     }
                 });
-                menu.appendChild(item);
+                row.appendChild(item);
+
+                if (isDeepSeek) {
+                    const submenu = document.createElement('div');
+                    submenu.className = 'model-reasoning-submenu';
+                    const title = document.createElement('div');
+                    title.className = 'model-reasoning-submenu-title';
+                    title.textContent = '推理强度';
+                    submenu.appendChild(title);
+                    ['low', 'high'].forEach(value => {
+                        const opt = document.createElement('button');
+                        opt.type = 'button';
+                        opt.className = 'model-reasoning-submenu-item'
+                            + (value === effort ? ' is-active' : '');
+                        opt.dataset.value = value;
+                        opt.title = `发送 reasoning_effort=${value}`;
+                        opt.innerHTML =
+                            `<span>${escapeHtml(value)}</span>`
+                            + (value === effort
+                                ? '<svg class="model-reasoning-submenu-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>'
+                                : '');
+                        opt.addEventListener('click', async (e) => {
+                            e.stopPropagation();
+                            try {
+                                const res = await eel.update_config_reasoning_effort(configName, value)();
+                                if (res && res.success) {
+                                    showToast(`已设置 ${model} 推理强度: ${value}`, 'success');
+                                    const effortEl = row.querySelector('.model-quick-switch-effort');
+                                    if (effortEl) {
+                                        effortEl.textContent = value;
+                                        effortEl.title = `推理强度: ${value}`;
+                                    }
+                                    submenu.querySelectorAll('.model-reasoning-submenu-item')
+                                        .forEach(i => i.classList.toggle('is-active', i.dataset.value === value));
+                                    if (configName === result.active) await updateModelBadge();
+                                } else {
+                                    showToast(`设置失败: ${res?.error || '未知错误'}`, 'error');
+                                }
+                            } catch (err) {
+                                console.error('Failed to update reasoning effort:', err);
+                                showToast('设置推理强度失败', 'error');
+                            }
+                        });
+                        submenu.appendChild(opt);
+                    });
+                    row.appendChild(submenu);
+
+                    row.addEventListener('mouseenter', () => {
+                        menu.querySelectorAll('.model-reasoning-submenu')
+                            .forEach(s => s.classList.remove('is-open'));
+                        submenu.classList.add('is-open');
+                        positionReasoningSubmenu(submenu, row);
+                    });
+                }
+                menu.appendChild(row);
             });
         }
 
