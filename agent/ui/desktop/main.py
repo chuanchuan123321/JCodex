@@ -7016,11 +7016,11 @@ def delete_conversation(conversation_id: str):
                 conversation_runs.pop(target_id, None)
                 conversation_executors.pop(target_id, None)
                 conversation_generations.pop(target_id, None)
-            _cleanup_scheduled_tasks_for_conversations(set(delete_ids))
             if str(os_agent.conversation_id or "") in delete_ids:
                 # The durable task is gone.  Do not let a late iframe
                 # initialize call dereference this cached id again.
                 os_agent.conversation_id = None
+        _cleanup_scheduled_tasks_for_conversations(set(delete_ids))
         _executor_for_conversation(result["active_id"])
         return {"success": True, **result, "checkpoint_cleanup": checkpoint_cleanup}
     except ValueError as exc:
