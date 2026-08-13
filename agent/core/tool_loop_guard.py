@@ -3,14 +3,14 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar
 
 
 class ToolLoopGuard:
     """Reuse successful observations and block repeated state changes."""
 
     DEFAULT_MAX_SAME_TOOL_REPEATS = 3
-    OBSERVATION_TOOLS = {
+    OBSERVATION_TOOLS: ClassVar[set[str]] = {
         "read",
         "file_read",
         "glob",
@@ -21,7 +21,7 @@ class ToolLoopGuard:
         "read_url",
         "view_image",
     }
-    MUTATION_TOOLS = {
+    MUTATION_TOOLS: ClassVar[set[str]] = {
         "write",
         "edit",
         "generate_pdf",
@@ -30,8 +30,16 @@ class ToolLoopGuard:
         "generate_xlsx",
         "project_preview",
     }
-    IGNORED_PARAM_KEYS = {"description", "reason", "summary"}
-    ALWAYS_EXECUTE_TOOLS = {"todo_write", "update_plan", "view_image"}
+    IGNORED_PARAM_KEYS: ClassVar[set[str]] = {
+        "description",
+        "reason",
+        "summary",
+    }
+    ALWAYS_EXECUTE_TOOLS: ClassVar[set[str]] = {
+        "todo_write",
+        "update_plan",
+        "view_image",
+    }
 
     @staticmethod
     def _max_same_tool_repeats() -> int:
@@ -46,11 +54,11 @@ class ToolLoopGuard:
         self.reset()
 
     def reset(self) -> None:
-        self._observations: Dict[str, Dict[str, Any]] = {}
-        self._mutations: Dict[str, Dict[str, Any]] = {}
+        self._observations: dict[str, dict[str, Any]] = {}
+        self._mutations: dict[str, dict[str, Any]] = {}
         self._notices = []
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """Return JSON-serializable state for a resumable agent run."""
         return {
             "observations": self._copy_records(self._observations),
@@ -58,7 +66,7 @@ class ToolLoopGuard:
             "notices": [str(item) for item in self._notices[-4:]],
         }
 
-    def restore(self, snapshot: Optional[Dict[str, Any]]) -> None:
+    def restore(self, snapshot: dict[str, Any] | None) -> None:
         """Restore state previously produced by :meth:`snapshot`."""
         state = snapshot if isinstance(snapshot, dict) else {}
         self._observations = self._restore_records(state.get("observations"))
@@ -71,7 +79,7 @@ class ToolLoopGuard:
         )
 
     @staticmethod
-    def _copy_records(records: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _copy_records(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return {
             str(signature): {
                 "result": str(record.get("result", ""))[:12000],
@@ -83,13 +91,13 @@ class ToolLoopGuard:
         }
 
     @classmethod
-    def _restore_records(cls, value: Any) -> Dict[str, Dict[str, Any]]:
+    def _restore_records(cls, value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(value, dict):
             return {}
         return cls._copy_records(value)
 
     @staticmethod
-    def _path(value: Any, workdir: Optional[str] = None) -> str:
+    def _path(value: Any, workdir: str | None = None) -> str:
         raw = str(value or ".").strip()
         path = Path(raw).expanduser()
         if not path.is_absolute() and workdir:
@@ -99,7 +107,7 @@ class ToolLoopGuard:
         except OSError:
             return str(path)
 
-    def _signature(self, tool_name: str, params: Dict[str, Any]) -> tuple:
+    def _signature(self, tool_name: str, params: dict[str, Any]) -> tuple:
         name = str(tool_name or "").strip().lower()
         params = dict(params or {})
         if name in self.ALWAYS_EXECUTE_TOOLS:
@@ -122,7 +130,7 @@ class ToolLoopGuard:
         return f"{name}:{payload}", kind
 
     @staticmethod
-    def _is_read_only_command(params: Dict[str, Any]) -> bool:
+    def _is_read_only_command(params: dict[str, Any]) -> bool:
         command = str(params.get("command", "") or "").strip().lower()
         executable = Path(command.split(maxsplit=1)[0]).name if command else ""
         return executable in {
@@ -160,7 +168,10 @@ class ToolLoopGuard:
         # 被误判为失败；命令真正失败时状态行一定是 ✗ Failed。
         if lowered.startswith("✓ success"):
             return True
-        if lowered.startswith(
+        # 只依据状态行/前缀判定：ShellTool 失败一定以 ✗ Failed 开头，
+        # 工具错误以 Error: 等前缀开头；正文里的内嵌文本不再参与判定，
+        # 避免“删除后验证”这类输出被误判为失败。
+        return not lowered.startswith(
             (
                 "error:",
                 "failed:",
@@ -176,14 +187,9 @@ class ToolLoopGuard:
                 "unable to",
                 "无法",
             )
-        ):
-            return False
-        # 只依据状态行/前缀判定：ShellTool 失败一定以 ✗ Failed 开头，
-        # 工具错误以 Error: 等前缀开头；正文里的内嵌文本不再参与判定，
-        # 避免“删除后验证”这类输出被误判为失败。
-        return True
+        )
 
-    def before_call(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def before_call(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
         signature, kind = self._signature(tool_name, params)
         if str(tool_name or "").strip().lower() in self.ALWAYS_EXECUTE_TOOLS:
             return {"action": "execute", "signature": signature, "kind": kind}
@@ -236,10 +242,10 @@ class ToolLoopGuard:
     def record_result(
         self,
         tool_name: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         result: str,
-        signature: Optional[str] = None,
-        kind: Optional[str] = None,
+        signature: str | None = None,
+        kind: str | None = None,
     ) -> None:
         if not signature or not kind:
             signature, kind = self._signature(tool_name, params)

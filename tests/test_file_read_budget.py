@@ -1,7 +1,7 @@
 """Grok Build-compatible limits for model-facing file reads."""
 
-from agent.tools.file import FileTool
 from agent.core.extended_tool_executor import ExtendedToolExecutor
+from agent.tools.file import FileTool
 
 
 def test_read_file_caps_each_window_at_one_thousand_lines(tmp_path) -> None:

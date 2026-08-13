@@ -16,11 +16,10 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List, Optional, Union
-
+from typing import Any
 
 _DATA_DIR_LOCKS_GUARD = RLock()
-_DATA_DIR_LOCKS: Dict[str, Any] = {}
+_DATA_DIR_LOCKS: dict[str, Any] = {}
 
 
 def _get_data_dir_lock(data_dir: Path):
@@ -58,15 +57,15 @@ class 统一数据条目:
     source: 数据源类型
     timestamp: datetime
     data_type: str
-    content: Dict[str, Any]
+    content: dict[str, Any]
     quality: 数据质量等级 = 数据质量等级.中
     validated: bool = False
-    raw_data: Optional[Dict[str, Any]] = None
-    tags: List[str] = field(default_factory=list)
+    raw_data: dict[str, Any] | None = None
+    tags: list[str] = field(default_factory=list)
     confidence: float = 1.0
-    task_id: Optional[str] = None  # 所属任务ID
+    task_id: str | None = None  # 所属任务ID
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "source": self.source.value,
@@ -86,14 +85,14 @@ class 任务记录:
     """任务记录 - 分组展示用"""
     task_id: str
     start_time: datetime
-    end_time: Optional[datetime]
+    end_time: datetime | None
     user_request: str
     steps_count: int
-    tools_used: List[str]
+    tools_used: list[str]
     status: str  # 进行中, 已完成
-    entries: List[统一数据条目] = field(default_factory=list)
+    entries: list[统一数据条目] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "start_time": self.start_time.isoformat(),
@@ -117,11 +116,10 @@ class 数据清洗器:
         # 移除控制字符
         text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
         # 标准化空白字符
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
+        return re.sub(r'\s+', ' ', text).strip()
 
     @staticmethod
-    def clean_json(data: Dict[str, Any]) -> Dict[str, Any]:
+    def clean_json(data: dict[str, Any]) -> dict[str, Any]:
         """清洗JSON数据"""
         cleaned = {}
         for key, value in data.items():
@@ -139,7 +137,7 @@ class 数据清洗器:
         return cleaned
 
     @staticmethod
-    def standardize_tool_result(tool_name: str, result: Any) -> Dict[str, Any]:
+    def standardize_tool_result(tool_name: str, result: Any) -> dict[str, Any]:
         """标准化工具执行结果"""
         if isinstance(result, str):
             return {
@@ -147,18 +145,17 @@ class 数据清洗器:
                 "output": 数据清洗器.clean_text(result),
                 "error": None
             }
-        elif isinstance(result, dict):
+        if isinstance(result, dict):
             return {
                 "success": result.get("success", True),
                 "output": 数据清洗器.clean_text(str(result.get("output", result))),
                 "error": result.get("error")
             }
-        else:
-            return {
-                "success": True,
-                "output": str(result),
-                "error": None
-            }
+        return {
+            "success": True,
+            "output": str(result),
+            "error": None
+        }
 
     @staticmethod
     def validate_data(entry: 统一数据条目) -> bool:
@@ -168,10 +165,13 @@ class 数据清洗器:
             return False
 
         # 根据数据源检查必填字段
-        if entry.source == 数据源类型.工具结果:
-            if "tool" not in entry.content and "output" not in entry.content:
-                entry.quality = 数据质量等级.低
-                return False
+        if (
+            entry.source == 数据源类型.工具结果
+            and "tool" not in entry.content
+            and "output" not in entry.content
+        ):
+            entry.quality = 数据质量等级.低
+            return False
 
         entry.validated = True
         return True
@@ -180,7 +180,7 @@ class 数据清洗器:
 class 数据整合器:
     """数据整合器主类"""
 
-    def __init__(self, data_dir: Optional[Path] = None):
+    def __init__(self, data_dir: Path | None = None):
         if data_dir is None:
             data_dir = Path(__file__).parent.parent.parent / "workspace" / "data"
         self.data_dir = Path(data_dir).expanduser().resolve(strict=False)
@@ -191,14 +191,12 @@ class 数据整合器:
 
             # 数据存储文件
             self.raw_data_file = self.data_dir / "raw_data.jsonl"
-            self.processed_data_file = self.data_dir / "processed_data.json"
             self.data_index_file = self.data_dir / "data_index.json"
             self.task_sessions_file = self.data_dir / "task_sessions.json"
 
             # 当前任务ID
-            self._current_task_id: Optional[str] = None
-            self._current_task_start: Optional[datetime] = None
-            self._current_user_request: str = ""
+            self._current_task_id: str | None = None
+            self._current_task_start: datetime | None = None
 
             # 初始化索引
             self._init_index()
@@ -212,20 +210,19 @@ class 数据整合器:
             if not self.task_sessions_file.exists():
                 self._save_task_sessions([])
 
-    def _load_task_sessions(self) -> List[Dict[str, Any]]:
+    def _load_task_sessions(self) -> list[dict[str, Any]]:
         """加载任务会话"""
         with self._file_lock:
             try:
-                with open(self.task_sessions_file, 'r', encoding='utf-8') as f:
+                with open(self.task_sessions_file, encoding='utf-8') as f:
                     return json.load(f)
             except (FileNotFoundError, json.JSONDecodeError):
                 return []
 
-    def _save_task_sessions(self, sessions: List[Dict[str, Any]]):
+    def _save_task_sessions(self, sessions: list[dict[str, Any]]):
         """保存任务会话"""
-        with self._file_lock:
-            with open(self.task_sessions_file, 'w', encoding='utf-8') as f:
-                json.dump(sessions, f, ensure_ascii=False, indent=2)
+        with self._file_lock, open(self.task_sessions_file, 'w', encoding='utf-8') as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
 
     def start_task(self, user_request: str) -> str:
         """开始一个新任务"""
@@ -233,7 +230,6 @@ class 数据整合器:
         with self._file_lock:
             self._current_task_id = uuid.uuid4().hex[:12]
             self._current_task_start = datetime.now()
-            self._current_user_request = user_request
 
             # 记录任务开始
             sessions = self._load_task_sessions()
@@ -280,14 +276,13 @@ class 数据整合器:
 
             self._current_task_id = None
             self._current_task_start = None
-            self._current_user_request = ""
 
-    def get_current_task_id(self) -> Optional[str]:
+    def get_current_task_id(self) -> str | None:
         """获取当前任务ID"""
         with self._file_lock:
             return self._current_task_id
 
-    def get_recent_tasks(self, limit: int = 20) -> List[任务记录]:
+    def get_recent_tasks(self, limit: int = 20) -> list[任务记录]:
         """获取最近的任务列表（按任务分组）"""
         with self._file_lock:
             sessions = self._load_task_sessions()[-limit:]
@@ -331,31 +326,31 @@ class 数据整合器:
                     "total_count": 0
                 })
 
-    def _load_index(self) -> Dict[str, Any]:
+    def _load_index(self) -> dict[str, Any]:
         """加载数据索引"""
         with self._file_lock:
             try:
-                with open(self.data_index_file, 'r', encoding='utf-8') as f:
+                with open(self.data_index_file, encoding='utf-8') as f:
                     return json.load(f)
             except (FileNotFoundError, json.JSONDecodeError):
                 return {"entries": [], "last_updated": datetime.now().isoformat(), "total_count": 0}
 
-    def _save_index(self, index: Dict[str, Any]):
+    def _save_index(self, index: dict[str, Any]):
         """保存数据索引"""
         with self._file_lock:
             index["last_updated"] = datetime.now().isoformat()
             with open(self.data_index_file, 'w', encoding='utf-8') as f:
                 json.dump(index, f, ensure_ascii=False, indent=2)
 
-    def _generate_id(self, data: Dict[str, Any], source: 数据源类型) -> str:
+    def _generate_id(self, data: dict[str, Any], source: 数据源类型) -> str:
         """生成数据条目唯一ID"""
         content_str = json.dumps(data, sort_keys=True)
         hash_str = f"{source.value}_{content_str}_{datetime.now().isoformat()}"
         return hashlib.md5(hash_str.encode()).hexdigest()[:16]
 
-    def ingest_tool_result(self, tool_name: str, params: Dict[str, Any],
-                          result: Any, context: Optional[Dict[str, Any]] = None,
-                          task_id: Optional[str] = None) -> 统一数据条目:
+    def ingest_tool_result(self, tool_name: str, params: dict[str, Any],
+                          result: Any, context: dict[str, Any] | None = None,
+                          task_id: str | None = None) -> 统一数据条目:
         """接入工具执行结果"""
         with self._file_lock:
             # 如果没指定task_id，使用当前任务
@@ -385,9 +380,9 @@ class 数据整合器:
             self._append_raw_entry(entry)
             return entry
 
-    def ingest_user_behavior(self, action: str, params: Dict[str, Any],
-                            context: Optional[Dict[str, Any]] = None,
-                            task_id: Optional[str] = None) -> 统一数据条目:
+    def ingest_user_behavior(self, action: str, params: dict[str, Any],
+                            context: dict[str, Any] | None = None,
+                            task_id: str | None = None) -> 统一数据条目:
         """接入用户行为数据"""
         with self._file_lock:
             # 如果没指定task_id，使用当前任务
@@ -413,7 +408,7 @@ class 数据整合器:
             self._append_raw_entry(entry)
             return entry
 
-    def ingest_manual_config(self, config_type: str, config_data: Dict[str, Any],
+    def ingest_manual_config(self, config_type: str, config_data: dict[str, Any],
                              source: str = "manual") -> 统一数据条目:
         """注入手动配置"""
         with self._file_lock:
@@ -429,34 +424,6 @@ class 数据整合器:
                 timestamp=datetime.now(),
                 data_type="config",
                 content=content
-            )
-
-            self.cleaner.validate_data(entry)
-            self._append_raw_entry(entry)
-            return entry
-
-    def ingest_ai_response(self, response: str, context: Dict[str, Any],
-                           tool_calls: Optional[List[Dict]] = None,
-                           task_id: Optional[str] = None) -> 统一数据条目:
-        """接入AI响应数据"""
-        with self._file_lock:
-            # 如果没指定task_id，使用当前任务
-            if task_id is None:
-                task_id = self._current_task_id
-
-            content = {
-                "response_text": self.cleaner.clean_text(response),
-                "context": context,
-                "tool_calls": tool_calls or []
-            }
-
-            entry = 统一数据条目(
-                id=self._generate_id(content, 数据源类型.AI响应),
-                source=数据源类型.AI响应,
-                timestamp=datetime.now(),
-                data_type="ai_response",
-                content=content,
-                task_id=task_id
             )
 
             self.cleaner.validate_data(entry)
@@ -483,7 +450,7 @@ class 数据整合器:
             self._save_index(index)
 
     def get_recent_entries(self, limit: int = 50,
-                          source: Optional[数据源类型] = None) -> List[统一数据条目]:
+                          source: 数据源类型 | None = None) -> list[统一数据条目]:
         """获取最近的数据条目"""
         with self._file_lock:
             index = self._load_index()
@@ -495,7 +462,7 @@ class 数据整合器:
                     continue
                 # 从原始文件读取
                 try:
-                    with open(self.raw_data_file, 'r', encoding='utf-8') as f:
+                    with open(self.raw_data_file, encoding='utf-8') as f:
                         for line in f:
                             entry_data = json.loads(line)
                             if entry_data["id"] == info["id"]:
@@ -507,7 +474,7 @@ class 数据整合器:
 
             return results
 
-    def _dict_to_entry(self, data: Dict[str, Any]) -> 统一数据条目:
+    def _dict_to_entry(self, data: dict[str, Any]) -> 统一数据条目:
         """将字典转换为统一数据条目"""
         return 统一数据条目(
             id=data["id"],
@@ -522,7 +489,7 @@ class 数据整合器:
             task_id=data.get("task_id")
         )
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取数据统计"""
         with self._file_lock:
             index = self._load_index()
@@ -543,12 +510,12 @@ class 数据整合器:
 
             return stats
 
-    def query_entries(self, data_type: Optional[str] = None,
-                     source: Optional[数据源类型] = None,
-                     start_time: Optional[datetime] = None,
-                     end_time: Optional[datetime] = None,
-                     task_id: Optional[str] = None,
-                     limit: int = 100) -> List[统一数据条目]:
+    def query_entries(self, data_type: str | None = None,
+                     source: 数据源类型 | None = None,
+                     start_time: datetime | None = None,
+                     end_time: datetime | None = None,
+                     task_id: str | None = None,
+                     limit: int = 100) -> list[统一数据条目]:
         """按条件查询数据条目"""
         with self._file_lock:
             index = self._load_index()
@@ -570,7 +537,7 @@ class 数据整合器:
 
                 # 读取完整条目
                 try:
-                    with open(self.raw_data_file, 'r', encoding='utf-8') as f:
+                    with open(self.raw_data_file, encoding='utf-8') as f:
                         for line in f:
                             entry_data = json.loads(line)
                             if entry_data["id"] == entry_info["id"]:
@@ -598,12 +565,14 @@ class 数据整合器:
 
                 # 从原始文件中移除（重建文件）
                 temp_file = self.raw_data_file.with_suffix('.tmp')
-                with open(self.raw_data_file, 'r', encoding='utf-8') as f_in:
-                    with open(temp_file, 'w', encoding='utf-8') as f_out:
-                        for line in f_in:
-                            entry_data = json.loads(line)
-                            if entry_data["id"] != entry_id:
-                                f_out.write(line)
+                with (
+                    open(self.raw_data_file, encoding='utf-8') as f_in,
+                    open(temp_file, 'w', encoding='utf-8') as f_out,
+                ):
+                    for line in f_in:
+                        entry_data = json.loads(line)
+                        if entry_data["id"] != entry_id:
+                            f_out.write(line)
                 temp_file.replace(self.raw_data_file)
                 return True
             except Exception:
@@ -621,12 +590,14 @@ class 数据整合器:
 
                 # 从原始文件中移除
                 temp_file = self.raw_data_file.with_suffix('.tmp')
-                with open(self.raw_data_file, 'r', encoding='utf-8') as f_in:
-                    with open(temp_file, 'w', encoding='utf-8') as f_out:
-                        for line in f_in:
-                            entry_data = json.loads(line)
-                            if entry_data.get("task_id") != task_id:
-                                f_out.write(line)
+                with (
+                    open(self.raw_data_file, encoding='utf-8') as f_in,
+                    open(temp_file, 'w', encoding='utf-8') as f_out,
+                ):
+                    for line in f_in:
+                        entry_data = json.loads(line)
+                        if entry_data.get("task_id") != task_id:
+                            f_out.write(line)
                 temp_file.replace(self.raw_data_file)
 
                 # 从任务会话中移除
@@ -682,20 +653,22 @@ class 数据整合器:
 
             if self.raw_data_file.exists():
                 temp_file = self.raw_data_file.with_suffix('.tmp')
-                with open(self.raw_data_file, 'r', encoding='utf-8') as f_in:
-                    with open(temp_file, 'w', encoding='utf-8') as f_out:
-                        for line in f_in:
-                            try:
-                                entry_data = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            if entry_data.get("id") in keep_ids:
-                                f_out.write(line)
+                with (
+                    open(self.raw_data_file, encoding='utf-8') as f_in,
+                    open(temp_file, 'w', encoding='utf-8') as f_out,
+                ):
+                    for line in f_in:
+                        try:
+                            entry_data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if entry_data.get("id") in keep_ids:
+                            f_out.write(line)
                 temp_file.replace(self.raw_data_file)
 
             return removed_count
 
-    def get_task_entries_for_analysis(self, task_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_task_entries_for_analysis(self, task_id: str | None = None) -> list[dict[str, Any]]:
         """获取任务条目数据用于AI分析偏好"""
         with self._file_lock:
             if task_id:

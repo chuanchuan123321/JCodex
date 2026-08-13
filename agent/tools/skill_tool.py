@@ -66,7 +66,7 @@ class SkillTool:
             )
 
         except Exception as e:
-            return False, f"❌ Error loading skill: {str(e)}"
+            return False, f"❌ Error loading skill: {e!s}"
 
     def _get_file_structure(self, skill_dir) -> str:
         """
@@ -79,7 +79,6 @@ class SkillTool:
             Formatted file structure string
         """
         try:
-            from pathlib import Path
 
             if not skill_dir or not skill_dir.exists():
                 return "无法获取文件结构"
@@ -90,7 +89,7 @@ class SkillTool:
             grandparent_name = parent_dir.parent.name  # "workspace"
 
             lines = []
-            lines.append(f"```")
+            lines.append("```")
             lines.append(f"{grandparent_name}/{parent_name}/{skill_dir.name}/")
 
             # List all items in the skill directory
@@ -108,34 +107,12 @@ class SkillTool:
                             is_last_sub = j == len(subitems) - 1
                             subprefix = "    └── " if is_last_sub else "    ├── "
                             lines.append(f"{subprefix}{subitem.name}")
-                    except:
+                    except Exception:
                         pass
                 else:
                     lines.append(f"{prefix}{item.name}")
 
-            lines.append(f"```")
+            lines.append("```")
             return "\n".join(lines)
         except Exception as e:
-            return f"无法获取文件结构: {str(e)}"
-
-    def list_available_skills(self) -> tuple[bool, str]:
-        """
-        List all available skills
-
-        Returns:
-            Tuple of (success, result)
-        """
-        try:
-            skills = self.skills_loader.list_skills(filter_unavailable=True)
-
-            if not skills:
-                return True, "No skills available"
-
-            result = "Available skills:\n\n"
-            for skill in skills:
-                result += f"- **{skill['name']}**: {skill.get('description', 'N/A')}\n"
-
-            return True, result
-
-        except Exception as e:
-            return False, f"❌ Error listing skills: {str(e)}"
+            return f"无法获取文件结构: {e!s}"

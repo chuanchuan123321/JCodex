@@ -4,8 +4,9 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
 
 
 @dataclass
@@ -22,15 +23,14 @@ class ShellTool:
 
     def __init__(self, max_output_length: int = 5000):
         self.max_output_length = max_output_length
-        self.last_result: Optional[CommandResult] = None
 
     def execute(
         self,
         command: str,
-        cwd: Optional[str] = None,
-        timeout: Optional[float] = None,
-        cancel_event: Optional[object] = None,
-        cancelled: Optional[Callable[[], bool]] = None,
+        cwd: str | None = None,
+        timeout: float | None = None,
+        cancel_event: object | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CommandResult:
         """Execute a shell command and stop its process group on cancellation."""
         try:
@@ -113,8 +113,8 @@ class ShellTool:
 
     @staticmethod
     def _is_cancelled(
-        cancel_event: Optional[object],
-        cancelled: Optional[Callable[[], bool]],
+        cancel_event: object | None,
+        cancelled: Callable[[], bool] | None,
     ) -> bool:
         try:
             if callable(cancelled) and cancelled():
@@ -145,16 +145,12 @@ class ShellTool:
                 process.terminate()
         except (OSError, ProcessLookupError):
             if process.poll() is None:
-                try:
+                with suppress(OSError):
                     process.terminate()
-                except OSError:
-                    pass
 
         if process.poll() is None:
-            try:
+            with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=0.25)
-            except subprocess.TimeoutExpired:
-                pass
 
         try:
             # The shell can exit before its children. Signal the original
@@ -171,10 +167,8 @@ class ShellTool:
         try:
             stdout, stderr = process.communicate(timeout=0.25)
         except subprocess.TimeoutExpired:
-            try:
+            with suppress(OSError):
                 process.kill()
-            except OSError:
-                pass
             stdout, stderr = process.communicate()
         return stdout or "", stderr or ""
 
@@ -183,20 +177,7 @@ class ShellTool:
         return combined[:self.max_output_length]
 
     def _remember(self, result: CommandResult) -> CommandResult:
-        self.last_result = result
         return result
-
-    def get_current_dir(self) -> str:
-        """Get current working directory"""
-        return os.getcwd()
-
-    def change_dir(self, path: str) -> Tuple[bool, str]:
-        """Change working directory"""
-        try:
-            os.chdir(path)
-            return True, f"Changed to {os.getcwd()}"
-        except Exception as e:
-            return False, str(e)
 
     def format_result(self, result: CommandResult) -> str:
         """Format command result for display"""

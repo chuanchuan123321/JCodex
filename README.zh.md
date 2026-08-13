@@ -547,6 +547,60 @@ isort .
 
 桌面前端契约测试会在不启动完整浏览器的情况下检查关键 HTML/JavaScript 行为。涉及可视界面时，还应启动桌面端，手动验证任务切换、审批恢复、分屏、预览、窄屏布局与深色模式。
 
+桌面前端工具链（Node.js）：
+
+```bash
+npm ci                                # 安装前端测试依赖（jsdom/eslint/prettier）
+npm run test:frontend                 # jsdom 行为冒烟测试（真实经典脚本加载语义）
+npm run lint:js                       # ESLint 检查 js/ 拆分模块
+npm run format:check                  # Prettier 格式检查
+npm run version:frontend              # 用内容哈希刷新 index.html 的 ?v= 缓存版本
+npm run version:frontend:check        # 校验缓存版本未过期（CI 硬门禁）
+```
+
+## 代码质量与工程化
+
+桌面端代码正在从单个巨型模块拆分为职责清晰的包，规则见 `pyproject.toml`：
+
+- `agent/ui/desktop/constants.py`：纯常量与派生路径
+- `agent/ui/desktop/runtime.py`：共享可变状态（执行器、运行、锁、存储）的唯一属主
+- `agent/ui/desktop/helpers.py`：纯函数工具
+- `agent/ui/desktop/executor.py`：单对话隔离执行器与运行上下文
+- `agent/ui/desktop/pipeline.py`：图运行、子智能体、回滚快照、任务生命周期
+- `agent/ui/desktop/rpc_*.py`：按领域分组的 eel 接口（设置、技能、数据、知识库、语音）
+- `agent/ui/desktop/main.py`：编排层（RPC 入口、服务引导）与命名空间重导出
+
+前端 `app.js` 同样按职责拆分为共享全局作用域的经典脚本（`index.html` 按序加载，行为由 `tests/frontend/smoke.mjs` 锁定）：
+
+- `agent/ui/desktop/app.js`：入口编排、聊天渲染、语音、分屏/多智能体等核心逻辑
+- `agent/ui/desktop/js/data.js`：数据面板（归档对话、附件/文件列表）
+- `agent/ui/desktop/js/preferences.js`：偏好面板与快照
+- `agent/ui/desktop/js/knowledge.js`：知识库面板
+- `agent/ui/desktop/js/workspace.js`：工作区文件树与文件查看
+- `agent/ui/desktop/js/settings.js`：设置弹窗、模型配置与 Token 指示器
+- `agent/ui/desktop/js/skills.js`：技能面板与技能商店
+- `agent/ui/desktop/js/memory.js`：记忆文件面板
+- `agent/ui/desktop/js/agent-detail.js`：多智能体团队卡片、活动流与智能体详情面板
+- `agent/ui/desktop/js/review.js`：改动文件审核、diff 与回退
+- `agent/ui/desktop/js/split-pane.js`：子任务分屏窗口
+- `agent/ui/desktop/js/layout.js`：侧边栏导航、面板宽度与拖拽缩放
+- `agent/ui/desktop/js/dialogs.js`：输入/确认弹窗
+- `agent/ui/desktop/js/quick-commands.js`：快捷指令弹窗
+
+`index.html` 中的 `?v=` 缓存版本由 `scripts/fingerprint-frontend.mjs` 按内容哈希自动生成：改动任一前端文件后运行 `npm run version:frontend` 再打包即可，无需手工维护版本号。
+
+前端规范（由 `tests/frontend/smoke.mjs` 守卫）：
+- 禁止内联事件处理器（`onclick="..."` 等）：静态按钮在各模块的 `bind*StaticEvents()` 中通过 `addEventListener` 绑定，动态列表使用 `data-*` 属性 + 事件委托。
+- 动态内容插值必须经 `escapeHtml` 转义。
+- 所有 `app.js` 与 `js/*.js` 需通过 Prettier 格式检查（`npm run format:check`）。
+
+约定：
+
+- 新增/拆分模块必须通过 `ruff check` 且保持 `ruff format` 格式。
+- `ruff check .` 已全量清零，CI 的 lint 任务为硬门禁，任何新错误都会阻塞合并。
+- `pyproject.toml` 中保留的 `ignore`（`BLE001`、`E501`、`RUF001-3`）与 `per-file-ignores`（`agent/ui/desktop/main.py` 的 `F405/F811`）属于有意的豁免，仅在有明确理由时调整。
+- 运行检查：`ruff check .`、`ruff format --check .`、`python -m pytest -q`。
+
 ## 常见问题
 
 | 现象 | 检查项 |

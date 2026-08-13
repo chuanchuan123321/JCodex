@@ -7,7 +7,7 @@ from agent.ui.desktop import main as desktop
 
 def test_custom_system_prompt_env_round_trip(monkeypatch, tmp_path) -> None:
     env_file = tmp_path / ".env"
-    desktop._write_env_file(
+    desktop.helpers._write_env_file(
         env_file,
         {
             "api_base_url": "https://api.deepseek.com",
@@ -16,10 +16,10 @@ def test_custom_system_prompt_env_round_trip(monkeypatch, tmp_path) -> None:
         },
     )
 
-    raw = desktop._read_env_file(env_file)
+    raw = desktop.helpers._read_env_file(env_file)
     assert raw["CUSTOM_SYSTEM_PROMPT"] == "你是助手\\n请简洁回答"
 
-    monkeypatch.setattr(desktop, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(desktop.constants, "DATA_ROOT", tmp_path)
     settings = desktop.load_settings()
     assert settings["custom_system_prompt"] == "你是助手\n请简洁回答"
 
@@ -41,7 +41,7 @@ def test_list_local_models_via_openai_compatible(monkeypatch) -> None:
             200, {"data": [{"id": "llama3:8b"}, {"id": "qwen2.5:7b"}]}
         )
 
-    monkeypatch.setattr(desktop.requests, "get", fake_get)
+    monkeypatch.setattr(desktop.rpc_settings.requests, "get", fake_get)
     result = desktop.list_local_models("http://localhost:11434")
     assert result["success"] is True
     assert [entry["name"] for entry in result["models"]] == [
@@ -63,7 +63,7 @@ def test_list_local_models_falls_back_to_ollama_tags(monkeypatch) -> None:
             {"models": [{"name": "llama3:8b"}, {"name": "deepseek-r1:7b"}]},
         )
 
-    monkeypatch.setattr(desktop.requests, "get", fake_get)
+    monkeypatch.setattr(desktop.rpc_settings.requests, "get", fake_get)
     result = desktop.list_local_models("http://localhost:11434/")
     assert result["success"] is True
     assert [entry["name"] for entry in result["models"]] == [
@@ -92,7 +92,7 @@ def test_list_local_models_llamacpp_uses_friendly_name(monkeypatch) -> None:
             )
         return _FakeResponse(404, {})
 
-    monkeypatch.setattr(desktop.requests, "get", fake_get)
+    monkeypatch.setattr(desktop.rpc_settings.requests, "get", fake_get)
     result = desktop.list_local_models("http://127.0.0.1:8080")
     assert result["success"] is True
     assert result["server"] == ""

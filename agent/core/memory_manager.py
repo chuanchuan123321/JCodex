@@ -1,10 +1,8 @@
 """Memory management system for storing and retrieving compressed context."""
 
-import json
-import asyncio
 import re
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 class MemoryManager:
@@ -54,7 +52,7 @@ class MemoryManager:
     def load_accumulated_compression(self) -> str:
         """Load compressed memory without any leaked reasoning blocks."""
         if self.compression_file.exists():
-            with open(self.compression_file, "r", encoding="utf-8") as f:
+            with open(self.compression_file, encoding="utf-8") as f:
                 return self.strip_reasoning(f.read())
         return ""
 
@@ -83,7 +81,7 @@ class MemoryManager:
     def load_execution_history(self) -> list[str]:
         """Load execution history without model reasoning content."""
         if self.execution_history_file.exists():
-            with open(self.execution_history_file, "r", encoding="utf-8") as f:
+            with open(self.execution_history_file, encoding="utf-8") as f:
                 content = self.strip_reasoning(f.read())
                 lines = content.strip().split("\n")
                 return [line for line in lines if line.strip()]
@@ -93,13 +91,13 @@ class MemoryManager:
     def strip_reasoning(content: str) -> str:
         """Remove private reasoning blocks while preserving visible answers."""
         cleaned = re.sub(
-            r"<think\b[^>]*>[\s\S]*?</think>", "", str(content or ""), flags=re.I
+            r"<think\b[^>]*>[\s\S]*?</think>", "", str(content or ""), flags=re.IGNORECASE
         )
-        cleaned = re.sub(r"<think\b[^>]*>[\s\S]*$", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"<think\b[^>]*>[\s\S]*$", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(
             r"(?m)^【AI思考】[^\n]*(?:\n|$)", "", cleaned
         )
-        cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
         return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     @classmethod
@@ -120,62 +118,10 @@ class MemoryManager:
         self.execution_history_file.write_text(normalized, encoding="utf-8")
         return True
 
-    def save_execution_history(self, history: list[str]) -> None:
-        """Save execution history to file."""
-        with open(self.execution_history_file, "w", encoding="utf-8") as f:
-            for entry in history:
-                f.write(entry + "\n")
-
-    async def async_save_execution_history(self, history: list[str]) -> None:
-        """Asynchronously save execution history to file."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self.save_execution_history, history)
-
     def append_execution_step(self, step: str) -> None:
         """Append a single execution step to history file."""
         with open(self.execution_history_file, "a", encoding="utf-8") as f:
             f.write(step + "\n")
-
-    async def async_append_execution_step(self, step: str) -> None:
-        """Asynchronously append a single execution step to history file."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self.append_execution_step, step)
-
-    def load_index(self) -> dict:
-        """Load index of all memories."""
-        if self.index_file.exists():
-            try:
-                with open(self.index_file, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                    if content:
-                        return json.loads(content)
-            except json.JSONDecodeError:
-                pass
-            except Exception:
-                pass
-
-        return {"compressions": []}
-
-    def save_index(self, index: dict) -> None:
-        """Save index of all memories."""
-        with open(self.index_file, "w", encoding="utf-8") as f:
-            json.dump(index, f, indent=2, ensure_ascii=False)
-
-    def add_compression_entry(
-        self, compression_num: int, summary: str, archive_path: str
-    ) -> None:
-        """Add a new compression entry to the index."""
-        index = self.load_index()
-
-        entry = {
-            "compression_num": compression_num,
-            "timestamp": datetime.now().isoformat(),
-            "summary": summary[:100] + "..." if len(summary) > 100 else summary,
-            "archive_path": archive_path,
-        }
-
-        index["compressions"].append(entry)
-        self.save_index(index)
 
     def clear_all(self) -> None:
         """Clear all memory files including archives."""
@@ -209,73 +155,3 @@ class MemoryManager:
         with open(self.execution_history_file, "w", encoding="utf-8") as f:
             f.write("")
 
-    def get_memory_stats(self) -> dict:
-        """Get statistics about stored memories."""
-        compression = self.load_accumulated_compression()
-        history = self.load_execution_history()
-
-        compression_count = len(compression.split("【任务")) - 1
-
-        return {
-            "compression_count": compression_count,
-            "compression_size": len(compression),
-            "execution_history_steps": len(history),
-        }
-
-    def detect_doomsday_loop(self, recent_tool_calls: list, threshold: int = 3) -> bool:
-        """Detect if the agent is stuck in a doomsday loop
-
-        OpenCode-style doomsday detection:
-        - Monitors last N tool calls
-        - If same tool with same params called threshold+ times, likely stuck
-
-        Args:
-            recent_tool_calls: List of recent tool call dicts with 'tool' and 'params' keys
-            threshold: Number of identical calls to trigger detection
-
-        Returns:
-            True if doomsday loop detected
-        """
-        if len(recent_tool_calls) < threshold:
-            return False
-
-        # Get last N calls
-        last_calls = recent_tool_calls[-threshold:]
-
-        # Check if all are the same tool with same params
-        if not last_calls:
-            return False
-
-        first_call = last_calls[0]
-        first_tool = first_call.get("tool", "")
-        first_params = first_call.get("params", {})
-
-        # Compare with subsequent calls
-        identical_count = 1
-        for call in last_calls[1:]:
-            if call.get("tool") == first_tool and call.get("params") == first_params:
-                identical_count += 1
-            else:
-                break
-
-        return identical_count >= threshold
-
-    def prune_old_tool_results(
-        self, execution_history: list, max_tokens: int = 40000
-    ) -> list:
-        """Prune old tool results to save tokens - aligned with OpenCode
-
-        Keeps recent tool results but can clear old ones to prevent context overflow.
-
-        Args:
-            execution_history: List of execution steps
-            max_tokens: Maximum tokens to keep
-
-        Returns:
-            Pruned execution history
-        """
-        # Simplified version - in production would estimate token usage
-        # Keep last ~100 entries for recent context
-        if len(execution_history) > 100:
-            return execution_history[-100:]
-        return execution_history

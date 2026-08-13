@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import threading
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 PLAN_STATUSES = {"pending", "in_progress", "completed"}
 
 
-def get_plan_tool_definition() -> Dict[str, Any]:
+def get_plan_tool_definition() -> dict[str, Any]:
     """Return the OpenAI function schema for replacing the current task plan."""
     return {
         "type": "function",
@@ -61,10 +60,10 @@ class PlanTool:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._snapshot: Optional[Dict[str, Any]] = None
+        self._snapshot: dict[str, Any] | None = None
         self._version = 0
 
-    def update(self, params: Dict[str, Any]) -> str:
+    def update(self, params: dict[str, Any]) -> str:
         """Replace the plan and return a machine-readable progress summary."""
         try:
             snapshot = self._validate(params)
@@ -78,13 +77,13 @@ class PlanTool:
             result = self._summary(snapshot)
         return json.dumps(result, ensure_ascii=False)
 
-    def snapshot(self) -> Optional[Dict[str, Any]]:
+    def snapshot(self) -> dict[str, Any] | None:
         """Return an isolated copy of the latest valid plan."""
         with self._lock:
             return deepcopy(self._snapshot)
 
     @staticmethod
-    def _validate(params: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate(params: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(params, dict):
             raise ValueError("update_plan parameters must be an object")
         unexpected = set(params) - {"explanation", "plan"}
@@ -98,7 +97,7 @@ class PlanTool:
         if not isinstance(raw_plan, list) or not raw_plan:
             raise ValueError("plan must contain at least one step")
 
-        plan: List[Dict[str, str]] = []
+        plan: list[dict[str, str]] = []
         in_progress_count = 0
         for index, item in enumerate(raw_plan):
             if not isinstance(item, dict):
@@ -133,7 +132,7 @@ class PlanTool:
         }
 
     @staticmethod
-    def _summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def _summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         plan = snapshot["plan"]
         completed = sum(item["status"] == "completed" for item in plan)
         current = next(

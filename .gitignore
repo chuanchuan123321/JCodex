@@ -89,3 +89,6 @@ desktop_port.txt
 
 # Local Codex restore backups
 .codex-backup/
+
+# Node.js (frontend tooling)
+node_modules/

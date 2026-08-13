@@ -6,7 +6,7 @@ import hashlib
 import math
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
@@ -64,7 +64,7 @@ class ApiEmbeddingProvider(BaseEmbeddingProvider):
         api_base: str,
         api_key: str,
         model: str,
-        dimensions: Optional[int] = None,
+        dimensions: int | None = None,
     ) -> None:
         self.api_base = self._normalize_api_base(api_base)
         self.api_key = str(api_key or "")
@@ -199,13 +199,13 @@ def create_embedding_provider() -> BaseEmbeddingProvider:
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 def l2_distance(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 2.0
-    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b, strict=True)))
 
 
 def vector_hash(text: str) -> str:

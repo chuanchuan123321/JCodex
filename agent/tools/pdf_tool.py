@@ -1,7 +1,6 @@
 """PDF generation tool for converting various formats to PDF"""
 import os
-from pathlib import Path
-from typing import Tuple, Dict, Any
+
 from agent.tools.file import FileTool
 
 
@@ -65,16 +64,16 @@ class PDFTool:
             return None
 
     @staticmethod
-    def markdown_to_pdf(md_path: str, output_path: str) -> Tuple[bool, str]:
+    def markdown_to_pdf(md_path: str, output_path: str) -> tuple[bool, str]:
         """Convert Markdown file to PDF with proper formatting using fpdf2"""
         try:
-            import markdown
             from html.parser import HTMLParser
+
+            import markdown
         except ImportError as e:
             if "markdown" in str(e):
                 return False, "Error: markdown not installed. Try: pip install markdown"
-            else:
-                return False, f"Error: Missing dependency - {str(e)}"
+            return False, f"Error: Missing dependency - {e!s}"
 
         try:
             # Try to use fpdf2 for better rendering
@@ -88,7 +87,7 @@ class PDFTool:
             if not os.path.isfile(expanded_path):
                 return False, f"Error: File not found: {md_path}"
 
-            with open(expanded_path, 'r', encoding='utf-8') as f:
+            with open(expanded_path, encoding='utf-8') as f:
                 md_content = f.read()
 
             # Parse markdown to HTML
@@ -110,13 +109,13 @@ class PDFTool:
                             if font_path:
                                 self.add_font('Chinese', '', font_path)
                                 self.font_name = 'Chinese'
-                        except:
+                        except Exception:
                             pass
 
                     def add_title(self, text):
                         try:
                             self.set_font(self.font_name, 'B', 18)
-                        except:
+                        except Exception:
                             self.set_font(self.font_name, '', 18)
                         self.set_text_color(31, 71, 136)
                         self.cell(0, 10, text, ln=True)
@@ -125,7 +124,7 @@ class PDFTool:
                     def add_heading2(self, text):
                         try:
                             self.set_font(self.font_name, 'B', 14)
-                        except:
+                        except Exception:
                             self.set_font(self.font_name, '', 14)
                         self.set_text_color(46, 92, 138)
                         self.cell(0, 8, text, ln=True)
@@ -134,7 +133,7 @@ class PDFTool:
                     def add_heading3(self, text):
                         try:
                             self.set_font(self.font_name, 'B', 12)
-                        except:
+                        except Exception:
                             self.set_font(self.font_name, '', 12)
                         self.set_text_color(61, 111, 163)
                         self.cell(0, 7, text, ln=True)
@@ -225,9 +224,9 @@ class PDFTool:
             else:
                 # Fallback to reportlab
                 from reportlab.lib.pagesizes import A4
+                from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
                 from reportlab.lib.units import inch
-                from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-                from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+                from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
                 doc = SimpleDocTemplate(expanded_output, pagesize=A4)
                 story = []
@@ -326,10 +325,10 @@ class PDFTool:
             return True, f"Markdown converted to PDF: {expanded_output} ({file_size} bytes)"
 
         except Exception as e:
-            return False, f"Error converting Markdown to PDF: {str(e)}"
+            return False, f"Error converting Markdown to PDF: {e!s}"
 
     @staticmethod
-    def text_to_pdf(text_path: str, output_path: str) -> Tuple[bool, str]:
+    def text_to_pdf(text_path: str, output_path: str) -> tuple[bool, str]:
         """Convert text file to PDF using fpdf2"""
         try:
             from fpdf import FPDF
@@ -351,7 +350,7 @@ class PDFTool:
             except ImportError:
                 encoding = 'utf-8'
 
-            with open(expanded_path, 'r', encoding=encoding) as f:
+            with open(expanded_path, encoding=encoding) as f:
                 text_content = f.read()
 
             expanded_output = FileTool.expand_path(output_path)
@@ -368,7 +367,7 @@ class PDFTool:
                         if font_path:
                             self.add_font('Chinese', '', font_path)
                             self.font_name = 'Chinese'
-                    except:
+                    except Exception:
                         pass
 
             pdf = TextPDF()
@@ -389,10 +388,10 @@ class PDFTool:
             return True, f"Text converted to PDF: {expanded_output} ({file_size} bytes)"
 
         except Exception as e:
-            return False, f"Error converting text to PDF: {str(e)}"
+            return False, f"Error converting text to PDF: {e!s}"
 
     @staticmethod
-    def html_to_pdf(html_path: str, output_path: str) -> Tuple[bool, str]:
+    def html_to_pdf(html_path: str, output_path: str) -> tuple[bool, str]:
         """Convert HTML file to PDF using fpdf2"""
         try:
             from fpdf import FPDF
@@ -404,7 +403,7 @@ class PDFTool:
             if not os.path.isfile(expanded_path):
                 return False, f"Error: File not found: {html_path}"
 
-            with open(expanded_path, 'r', encoding='utf-8') as f:
+            with open(expanded_path, encoding='utf-8') as f:
                 html_content = f.read()
 
             # Use BeautifulSoup if available, otherwise use HTMLParser
@@ -473,7 +472,7 @@ class PDFTool:
                         if font_path:
                             self.add_font('Chinese', '', font_path)
                             self.font_name = 'Chinese'
-                    except:
+                    except Exception:
                         pass
 
             pdf = HTMLPDF()
@@ -494,10 +493,10 @@ class PDFTool:
             return True, f"HTML converted to PDF: {expanded_output} ({file_size} bytes)"
 
         except Exception as e:
-            return False, f"Error converting HTML to PDF: {str(e)}"
+            return False, f"Error converting HTML to PDF: {e!s}"
 
     @staticmethod
-    def docx_to_pdf(docx_path: str, output_path: str) -> Tuple[bool, str]:
+    def docx_to_pdf(docx_path: str, output_path: str) -> tuple[bool, str]:
         """Convert DOCX file to PDF using fpdf2 with style support"""
         try:
             from docx import Document
@@ -505,10 +504,9 @@ class PDFTool:
         except ImportError as e:
             if "docx" in str(e):
                 return False, "Error: python-docx not installed. Try: pip install python-docx"
-            elif "fpdf" in str(e):
+            if "fpdf" in str(e):
                 return False, "Error: fpdf2 not installed. Try: pip install fpdf2"
-            else:
-                return False, f"Error: Missing dependency - {str(e)}"
+            return False, f"Error: Missing dependency - {e!s}"
 
         try:
             expanded_path = FileTool.expand_path(docx_path)
@@ -531,7 +529,7 @@ class PDFTool:
                         if font_path:
                             self.add_font('Chinese', '', font_path)
                             self.font_name = 'Chinese'
-                    except:
+                    except Exception:
                         pass
 
                 def add_heading1(self, text):
@@ -616,18 +614,17 @@ class PDFTool:
             return True, f"DOCX converted to PDF: {expanded_output} ({file_size} bytes)"
 
         except Exception as e:
-            return False, f"Error converting DOCX to PDF: {str(e)}"
+            return False, f"Error converting DOCX to PDF: {e!s}"
 
     @staticmethod
-    def generate_pdf(input_path: str, output_path: str, format_type: str) -> Tuple[bool, str]:
+    def generate_pdf(input_path: str, output_path: str, format_type: str) -> tuple[bool, str]:
         """Generate PDF from various formats"""
         if format_type == "markdown":
             return PDFTool.markdown_to_pdf(input_path, output_path)
-        elif format_type == "text":
+        if format_type == "text":
             return PDFTool.text_to_pdf(input_path, output_path)
-        elif format_type == "html":
+        if format_type == "html":
             return PDFTool.html_to_pdf(input_path, output_path)
-        elif format_type == "docx":
+        if format_type == "docx":
             return PDFTool.docx_to_pdf(input_path, output_path)
-        else:
-            return False, f"Error: Unsupported format '{format_type}'. Supported: markdown, text, html, docx"
+        return False, f"Error: Unsupported format '{format_type}'. Supported: markdown, text, html, docx"

@@ -3,7 +3,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Any
 
 
 class ConfigManager:
@@ -14,14 +14,14 @@ class ConfigManager:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.config_dir / "api_configs.json"
         self.active_config_file = self.config_dir / "active_config.txt"
-        self.configs: Dict[str, Dict[str, str]] = self._load_configs()
+        self.configs: dict[str, dict[str, str]] = self._load_configs()
         self.active_config = self._load_active_config()
 
-    def _load_configs(self) -> Dict[str, Dict[str, str]]:
+    def _load_configs(self) -> dict[str, dict[str, str]]:
         """加载所有保存的配置"""
         if self.config_file.exists():
             try:
-                with open(self.config_file, "r", encoding="utf-8") as f:
+                with open(self.config_file, encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
                 return {}
@@ -32,11 +32,11 @@ class ConfigManager:
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(self.configs, f, indent=2, ensure_ascii=False)
 
-    def _load_active_config(self) -> Optional[str]:
+    def _load_active_config(self) -> str | None:
         """加载当前激活的配置名称"""
         if self.active_config_file.exists():
             try:
-                with open(self.active_config_file, "r", encoding="utf-8") as f:
+                with open(self.active_config_file, encoding="utf-8") as f:
                     return f.read().strip()
             except Exception:
                 return None
@@ -112,19 +112,19 @@ class ConfigManager:
         self._save_active_config(name)
         return True
 
-    def get_active_config(self) -> Optional[Dict[str, str]]:
+    def get_active_config(self) -> dict[str, str] | None:
         """获取当前活跃配置"""
         if self.active_config and self.active_config in self.configs:
             return self.configs[self.active_config].copy()
         return None
 
-    def get_config(self, name: str) -> Optional[Dict[str, str]]:
+    def get_config(self, name: str) -> dict[str, str] | None:
         """获取指定配置"""
         if name in self.configs:
             return self.configs[name].copy()
         return None
 
-    def list_configs(self) -> Dict[str, Any]:
+    def list_configs(self) -> dict[str, Any]:
         """列出所有配置"""
         return {
             "configs": self.configs,
@@ -132,18 +132,7 @@ class ConfigManager:
             "available": list(self.configs.keys()),
         }
 
-    def import_from_env(self, config_name: str = "default") -> bool:
-        """从环境变量导入配置"""
-        api_base_url = os.getenv("API_BASE_URL")
-        api_key = os.getenv("API_KEY")
-        api_model = os.getenv("API_MODEL")
-
-        if not (api_base_url and api_key and api_model):
-            return False
-
-        return self.add_config(config_name, api_base_url, api_key, api_model)
-
-    def export_to_env(self, config_name: Optional[str] = None) -> bool:
+    def export_to_env(self, config_name: str | None = None) -> bool:
         """将配置导出到环境变量"""
         config = self.get_active_config() if config_name is None else self.get_config(config_name)
 
@@ -163,9 +152,3 @@ class ConfigManager:
             value = os.getenv(key)
             if value:
                 os.environ[key] = value
-
-    def apply_config(self, config_name: Optional[str] = None) -> bool:
-        """应用配置到环境变量"""
-        if not self.set_active_config(config_name or self.active_config or ""):
-            return False
-        return self.export_to_env()

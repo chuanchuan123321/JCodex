@@ -1,9 +1,10 @@
 """WebSearch tool - Real-time web search using Exa API"""
 
 import os
-import requests
-from typing import Dict, Any, Optional
 from dataclasses import dataclass
+from typing import Any
+
+import requests
 
 
 def _normalize_image_items(image_items: Any) -> list:
@@ -51,7 +52,7 @@ class WebSearchTool:
     def execute(
         self,
         query: str,
-        num_results: Optional[int] = None,
+        num_results: int | None = None,
         livecrawl: str = "fallback",
         search_type: str = "auto",
     ) -> WebSearchResult:
@@ -83,7 +84,7 @@ class WebSearchTool:
         try:
             # Try Exa API first
             return self._search_exa(query, num_results, livecrawl, search_type)
-        except Exception as e:
+        except Exception:
             # Fallback to Tavily
             return self._search_tavily(query, num_results)
 
@@ -192,7 +193,7 @@ class WebSearchTool:
 
 
 # Tool definition for OpenAI function calling
-def get_websearch_tool_definition() -> Dict[str, Any]:
+def get_websearch_tool_definition() -> dict[str, Any]:
     """Get tool definition in OpenAI function calling format"""
     return {
         "type": "function",
@@ -224,7 +225,7 @@ def get_websearch_tool_definition() -> Dict[str, Any]:
     }
 
 
-def execute_websearch(params: Dict[str, Any]) -> str:
+def execute_websearch(params: dict[str, Any]) -> str:
     """Execute websearch tool"""
     tool = WebSearchTool()
     query = params.get("query", "")
@@ -240,5 +241,4 @@ def execute_websearch(params: Dict[str, Any]) -> str:
 
     if result.success:
         return result.results
-    else:
-        return f"Error: {result.error}"
+    return f"Error: {result.error}"

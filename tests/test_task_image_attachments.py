@@ -20,7 +20,6 @@ from agent.core.memory_manager import MemoryManager
 from agent.core.tool_result import ToolExecutionResult
 from agent.ui.desktop import main as desktop
 
-
 PNG_BYTES = b"\x89PNG\r\n\x1a\nimage-data"
 
 
@@ -103,7 +102,7 @@ class _ManifestImageModel(BaseChatModel):
                 for message in messages
                 if isinstance(message, HumanMessage)
             )
-            path_match = re.search(r"^- (/.+\.png)$", user_text, flags=re.M)
+            path_match = re.search(r"^- (/.+\.png)$", user_text, flags=re.MULTILINE)
             assert path_match is not None
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
@@ -136,7 +135,7 @@ class _RepeatedManifestImageModel(_ManifestImageModel):
                 for message in messages
                 if isinstance(message, HumanMessage)
             )
-            path_match = re.search(r"^- (/.+\.png)$", user_text, flags=re.M)
+            path_match = re.search(r"^- (/.+\.png)$", user_text, flags=re.MULTILINE)
             assert path_match is not None
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
@@ -169,7 +168,7 @@ class _FollowUpImageModel(_ManifestImageModel):
                 for message in messages
                 if isinstance(message, HumanMessage)
             )
-            path_match = re.search(r"^- (/.+\.png)$", user_text, flags=re.M)
+            path_match = re.search(r"^- (/.+\.png)$", user_text, flags=re.MULTILINE)
             assert path_match is not None
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
@@ -204,9 +203,9 @@ class _DataIntegrator:
 def test_image_attachment_is_saved_and_represented_by_a_path(monkeypatch, tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("images")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
-    context, metadata, reads, task_images = desktop._prepare_attachments(
+    context, metadata, reads, task_images = desktop.helpers._prepare_attachments(
         [
             {
                 "name": "screen.png",
@@ -240,9 +239,9 @@ def test_directory_reference_is_validated_without_copying_contents(
     reference = tmp_path / "reference-project"
     reference.mkdir()
     (reference / "README.md").write_text("reference", encoding="utf-8")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
-    context, metadata, reads, task_images = desktop._prepare_attachments(
+    context, metadata, reads, task_images = desktop.helpers._prepare_attachments(
         [
             {
                 "name": reference.name,
@@ -408,8 +407,8 @@ def test_view_image_only_allows_the_current_task_attachment(
 
 
 def test_view_image_tool_follows_multimodal_vision_switch(monkeypatch) -> None:
-    from agent.core.langgraph_runner import LangGraphRunner
     from agent.core.extended_tool_executor import strip_disabled_vision_prompt
+    from agent.core.langgraph_runner import LangGraphRunner
     from agent.ui.desktop import main as desktop
 
     monkeypatch.setenv("MODEL_SUPPORTS_VISION", "true")
@@ -420,7 +419,7 @@ def test_view_image_tool_follows_multimodal_vision_switch(monkeypatch) -> None:
     ]
     assert "view_image" in tool_names
     assert "view_image" not in LangGraphRunner._hidden_tools_for_runtime({})
-    assert "view_image" in desktop._append_image_manifest("base", ["/tmp/a.png"])
+    assert "view_image" in desktop.helpers._append_image_manifest("base", ["/tmp/a.png"])
     sample_prompt = "- `view_image`: Inspect an image.\n- `read`: Read a file.\n"
     assert "view_image" in strip_disabled_vision_prompt(sample_prompt)
 
@@ -431,7 +430,7 @@ def test_view_image_tool_follows_multimodal_vision_switch(monkeypatch) -> None:
     ]
     assert "view_image" not in tool_names
     assert "view_image" in LangGraphRunner._hidden_tools_for_runtime({})
-    assert desktop._append_image_manifest("base", ["/tmp/a.png"]) == "base"
+    assert desktop.helpers._append_image_manifest("base", ["/tmp/a.png"]) == "base"
     assert "view_image" not in strip_disabled_vision_prompt(sample_prompt)
     assert "- `read`" in strip_disabled_vision_prompt(sample_prompt)
 
@@ -540,11 +539,11 @@ def test_desktop_image_submission_passes_path_then_viewed_image(
         lambda request, _context, **_kwargs: ("system", request)
     )
 
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    desktop.conversation_runs.clear()
-    desktop.conversation_executors.clear()
-    desktop.conversation_generations.clear()
-    desktop.conversation_executors[conversation["id"]] = executor
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    desktop.runtime.conversation_runs.clear()
+    desktop.runtime.conversation_executors.clear()
+    desktop.runtime.conversation_generations.clear()
+    desktop.runtime.conversation_executors[conversation["id"]] = executor
     message_id = 301
 
     result = desktop.send_message(
@@ -622,11 +621,11 @@ def test_desktop_task_can_view_the_same_image_more_than_once(
         lambda request, _context, **_kwargs: ("system", request)
     )
 
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    desktop.conversation_runs.clear()
-    desktop.conversation_executors.clear()
-    desktop.conversation_generations.clear()
-    desktop.conversation_executors[conversation["id"]] = executor
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    desktop.runtime.conversation_runs.clear()
+    desktop.runtime.conversation_executors.clear()
+    desktop.runtime.conversation_generations.clear()
+    desktop.runtime.conversation_executors[conversation["id"]] = executor
     message_id = 302
 
     assert desktop.send_message(
@@ -683,11 +682,11 @@ def test_follow_up_task_rehydrates_images_from_its_conversation(
         lambda request, _context, **_kwargs: ("system", request)
     )
 
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    desktop.conversation_runs.clear()
-    desktop.conversation_executors.clear()
-    desktop.conversation_generations.clear()
-    desktop.conversation_executors[conversation["id"]] = executor
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    desktop.runtime.conversation_runs.clear()
+    desktop.runtime.conversation_executors.clear()
+    desktop.runtime.conversation_generations.clear()
+    desktop.runtime.conversation_executors[conversation["id"]] = executor
 
     first_message_id = 303
     assert desktop.send_message(

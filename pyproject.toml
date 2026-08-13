@@ -1,0 +1,39 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    "electron/node_modules",
+    "electron/dist",
+    "electron/dist-server",
+    "workspace",
+    "Memory",
+    "docs",
+    ".codex-backup",
+    ".claude",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+# ruff check 已全量清零，CI 中作为硬门禁。以下豁免均为有意保留：
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RET", "RUF", "FURB"]
+ignore = [
+    "BLE001", "S110", "S112", "PLW1510", "DTZ005",
+    "E501",  # 行长由 black 控制（中文长字符串无法安全折行）
+    "RUF001", "RUF002", "RUF003",  # 中文项目里 unicode/全角字符提示是误报
+]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py 作为拆包后的编排层，故意用星号重导出保持 desktop.main 命名空间稳定
+# （测试通过 desktop.<name> 访问管线/执行器符号），因此 F405/F811 属于预期模式。
+"agent/ui/desktop/main.py" = ["F405", "F811"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100

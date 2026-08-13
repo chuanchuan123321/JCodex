@@ -1,5 +1,6 @@
 """Extended tool executor with document reading capabilities"""
 
+import asyncio
 import base64
 import copy
 import hashlib
@@ -8,33 +9,40 @@ import os
 import re
 import signal
 import subprocess
-import time
 import threading
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import requests
 from langchain_community.agent_toolkits import FileManagementToolkit
 
-from agent.tools.shell import ShellTool
-from agent.tools.file import FileTool
-from agent.tools.time_tool import TimeTool
-from agent.tools.pdf_tool import PDFTool
-from agent.tools.skill_tool import SkillTool
-from agent.tools.grep import execute_grep, get_grep_tool_definition
-from agent.tools.edit import execute_edit, get_edit_tool_definition
-from agent.tools.websearch import execute_websearch, get_websearch_tool_definition
-from agent.tools.codesearch import execute_codesearch, get_codesearch_tool_definition
-from agent.tools.preview import PreviewManager
-from agent.tools.plan import PlanTool
 from agent.core.multi_agent import MULTI_AGENT_TOOL_NAMES
 from agent.core.tool_result import ToolExecutionResult
-
+from agent.tools.codesearch import execute_codesearch, get_codesearch_tool_definition
+from agent.tools.edit import execute_edit, get_edit_tool_definition
+from agent.tools.file import FileTool
+from agent.tools.grep import execute_grep, get_grep_tool_definition
+from agent.tools.pdf_tool import PDFTool
+from agent.tools.plan import PlanTool
+from agent.tools.preview import PreviewManager
+from agent.tools.shell import ShellTool
+from agent.tools.skill_tool import SkillTool
+from agent.tools.websearch import execute_websearch, get_websearch_tool_definition
 
 MAX_TASK_IMAGE_BYTES = 12 * 1024 * 1024
 _TASK_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+# Keep references to fire-and-forget asyncio tasks so they are not
+# garbage-collected before completion.
+_FIRE_AND_FORGET_TASKS: set[asyncio.Task] = set()
+
+
+def _discard_fire_and_forget_task(task: asyncio.Task) -> None:
+    _FIRE_AND_FORGET_TASKS.discard(task)
 
 
 def _vision_tools_enabled() -> bool:
@@ -76,7 +84,7 @@ _SCOPED_COMMAND_TOOLS = frozenset(
 _MUTATION_SCOPE_UNSET = object()
 
 
-def _detect_supported_image_mime(content: bytes) -> Optional[str]:
+def _detect_supported_image_mime(content: bytes) -> str | None:
     """Identify image bytes accepted by the model-facing image viewer."""
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -108,13 +116,13 @@ class ExtendedToolExecutor:
     def __init__(
         self,
         skills_loader=None,
-        preview_manager: Optional[PreviewManager] = None,
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
-        project_root: Optional[str] = None,
-        workspace_root: Optional[str] = None,
-        protected_root: Optional[str] = None,
-        data_root: Optional[str] = None,
+        preview_manager: PreviewManager | None = None,
+        conversation_id: str | None = None,
+        message_id: str | None = None,
+        project_root: str | None = None,
+        workspace_root: str | None = None,
+        protected_root: str | None = None,
+        data_root: str | None = None,
         restrict_reads_to_project: bool = False,
     ):
         self.shell_tool = ShellTool()
@@ -173,24 +181,24 @@ class ExtendedToolExecutor:
         )
         self.conversation_id = conversation_id
         self.message_id = message_id
-        self._plan_tools: Dict[str, PlanTool] = {}
+        self._plan_tools: dict[str, PlanTool] = {}
         self._plan_tools_lock = threading.RLock()
-        self._todo_states: Dict[str, Dict[str, Any]] = {}
+        self._todo_states: dict[str, dict[str, Any]] = {}
         self._todo_state_lock = threading.RLock()
-        self._loaded_skills: Dict[str, set[str]] = {}
+        self._loaded_skills: dict[str, set[str]] = {}
         self._loaded_skills_lock = threading.RLock()
-        self._task_images: Dict[str, Dict[str, _TaskImage]] = {}
+        self._task_images: dict[str, dict[str, _TaskImage]] = {}
         self._task_images_lock = threading.RLock()
-        self._task_reference_roots: Dict[str, tuple[Path, ...]] = {}
+        self._task_reference_roots: dict[str, tuple[Path, ...]] = {}
         self._task_reference_roots_lock = threading.RLock()
         self.memory_store = None
-        self._background_tasks: Dict[str, Dict[str, Any]] = {}
+        self._background_tasks: dict[str, dict[str, Any]] = {}
         self._background_tasks_lock = threading.RLock()
-        self._scheduled_tasks: Dict[str, Dict[str, Any]] = {}
+        self._scheduled_tasks: dict[str, dict[str, Any]] = {}
         self._scheduled_tasks_lock = threading.RLock()
-        self.scheduled_prompt_callback: Optional[Callable[[str], Any]] = None
-        self._goal_state: Dict[str, Any] = {"status": "active", "message": ""}
-        self.tools: Dict[str, Callable] = {
+        self.scheduled_prompt_callback: Callable[[str], Any] | None = None
+        self._goal_state: dict[str, Any] = {"status": "active", "message": ""}
+        self.tools: dict[str, Callable] = {
             "bash": self.execute_shell,
             "read": self.execute_file_read,
             "glob": self.execute_glob,
@@ -225,7 +233,6 @@ class ExtendedToolExecutor:
             "monitor": self.execute_monitor,
             "search_tool": self.execute_search_tool,
             "use_tool": self.execute_use_tool,
-            "wait_tasks": self.execute_get_task_output,
             "scheduler_create": self.execute_scheduler_create,
             "scheduler_delete": self.execute_scheduler_delete,
             "scheduler_list": self.execute_scheduler_list,
@@ -239,7 +246,7 @@ class ExtendedToolExecutor:
 
     def get_available_tools(
         self, *, include_gateway_tools: bool = False
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Return model tools, exposing gateway-only actions only when requested."""
         tools = [
             {
@@ -573,7 +580,7 @@ class ExtendedToolExecutor:
             ]
         return tools
 
-    def _grok_compatible_tool_definitions(self) -> List[Dict[str, Any]]:
+    def _grok_compatible_tool_definitions(self) -> list[dict[str, Any]]:
         """Return executable Grok Build-compatible aliases and extensions."""
         definitions = []
         aliases = {
@@ -588,8 +595,11 @@ class ExtendedToolExecutor:
         }
         by_name = {
             tool["function"]["name"]: tool
-            for tool in definitions
-            + [get_edit_tool_definition(), get_websearch_tool_definition()]
+            for tool in [
+                *definitions,
+                get_edit_tool_definition(),
+                get_websearch_tool_definition(),
+            ]
         }
         base_tools = {tool["function"]["name"]: tool for tool in self._legacy_public_tools()}
         base_tools.update(by_name)
@@ -622,7 +632,7 @@ class ExtendedToolExecutor:
             tool for tool in definitions if tool["function"]["name"] not in existing
         ]
 
-    def _legacy_public_tools(self) -> List[Dict[str, Any]]:
+    def _legacy_public_tools(self) -> list[dict[str, Any]]:
         """Build only definitions needed as sources for Grok-compatible aliases."""
         return [
             {
@@ -686,7 +696,7 @@ class ExtendedToolExecutor:
         ]
 
     @staticmethod
-    def _list_dir_definition() -> Dict[str, Any]:
+    def _list_dir_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -701,7 +711,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _todo_write_definition() -> Dict[str, Any]:
+    def _todo_write_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -733,7 +743,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _memory_search_definition() -> Dict[str, Any]:
+    def _memory_search_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -752,7 +762,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _memory_get_definition() -> Dict[str, Any]:
+    def _memory_get_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -771,7 +781,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _task_output_definition() -> Dict[str, Any]:
+    def _task_output_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -789,7 +799,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _wait_tasks_definition() -> Dict[str, Any]:
+    def _wait_tasks_definition() -> dict[str, Any]:
         definition = copy.deepcopy(ExtendedToolExecutor._task_output_definition())
         definition["function"]["name"] = "wait_tasks"
         definition["function"]["description"] = (
@@ -798,7 +808,7 @@ class ExtendedToolExecutor:
         return definition
 
     @staticmethod
-    def _kill_task_definition() -> Dict[str, Any]:
+    def _kill_task_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -813,7 +823,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _monitor_definition() -> Dict[str, Any]:
+    def _monitor_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -832,7 +842,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _search_tool_definition() -> Dict[str, Any]:
+    def _search_tool_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -847,7 +857,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _use_tool_definition() -> Dict[str, Any]:
+    def _use_tool_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -865,7 +875,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _scheduler_create_definition() -> Dict[str, Any]:
+    def _scheduler_create_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -887,7 +897,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _scheduler_delete_definition() -> Dict[str, Any]:
+    def _scheduler_delete_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -902,7 +912,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _scheduler_list_definition() -> Dict[str, Any]:
+    def _scheduler_list_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -913,7 +923,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _update_goal_definition() -> Dict[str, Any]:
+    def _update_goal_definition() -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -931,7 +941,7 @@ class ExtendedToolExecutor:
         }
 
     @staticmethod
-    def _multi_agent_tool_definitions() -> List[Dict[str, Any]]:
+    def _multi_agent_tool_definitions() -> list[dict[str, Any]]:
         """Return tools dispatched by the active desktop collaboration runtime."""
         return [
             {
@@ -1129,10 +1139,10 @@ class ExtendedToolExecutor:
 
     def execute(
         self,
-        tool_call: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
-        runtime: Optional[Dict[str, Any]] = None,
+        tool_call: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
+        runtime: dict[str, Any] | None = None,
     ) -> Any:
         """Execute a tool call"""
         tool_name = tool_call.get("tool")
@@ -1214,16 +1224,15 @@ class ExtendedToolExecutor:
                     conversation_id=resolved_conversation_id,
                     message_id=resolved_message_id,
                 )
-            result = self.tools[tool_name](params)
-            return result
+            return self.tools[tool_name](params)
         except Exception as e:
-            return f"Error executing {tool_name}: {str(e)}"
+            return f"Error executing {tool_name}: {e!s}"
 
     def _mutation_scope_error(
         self,
         tool_name: object,
         params: object,
-        runtime: Optional[Dict[str, Any]],
+        runtime: dict[str, Any] | None,
     ) -> str:
         """Reject mutations that escape a child agent's assigned write roots.
 
@@ -1236,7 +1245,7 @@ class ExtendedToolExecutor:
         if isinstance(runtime, dict) and "mutation_scope_roots" in runtime:
             raw_roots = runtime["mutation_scope_roots"]
         elif hasattr(self, "mutation_scope_roots"):
-            raw_roots = getattr(self, "mutation_scope_roots")
+            raw_roots = self.mutation_scope_roots
         if raw_roots is _MUTATION_SCOPE_UNSET:
             return ""
 
@@ -1246,12 +1255,15 @@ class ExtendedToolExecutor:
                 "Error: command execution is unavailable while this agent has "
                 "restricted write paths"
             )
-        if normalized_name == "project_preview" and isinstance(params, dict):
-            if str(params.get("action", "")).strip().lower() == "start":
-                return (
-                    "Error: starting a project preview is unavailable while this "
-                    "agent has restricted write paths"
-                )
+        if (
+            normalized_name == "project_preview"
+            and isinstance(params, dict)
+            and str(params.get("action", "")).strip().lower() == "start"
+        ):
+            return (
+                "Error: starting a project preview is unavailable while this "
+                "agent has restricted write paths"
+            )
 
         target_groups = _SCOPED_MUTATION_TARGETS.get(normalized_name)
         if target_groups is None:
@@ -1332,8 +1344,8 @@ class ExtendedToolExecutor:
     @staticmethod
     def _execute_multi_agent_tool(
         tool_name: str,
-        params: Dict[str, Any],
-        runtime: Optional[Dict[str, Any]],
+        params: dict[str, Any],
+        runtime: dict[str, Any] | None,
     ) -> Any:
         """Dispatch collaboration tools only through the active graph runtime."""
         dispatch = (runtime or {}).get("multi_agent_dispatch")
@@ -1352,14 +1364,14 @@ class ExtendedToolExecutor:
 
     @staticmethod
     def _plan_key(
-        conversation_id: Optional[str], message_id: Optional[str]
+        conversation_id: str | None, message_id: str | None
     ) -> str:
         conversation = str(conversation_id or "").strip()
         message = str(message_id or "").strip()
         return f"{conversation}:{message}" if conversation or message else "default"
 
     def _plan_tool_for(
-        self, conversation_id: Optional[str], message_id: Optional[str]
+        self, conversation_id: str | None, message_id: str | None
     ) -> PlanTool:
         key = self._plan_key(conversation_id, message_id)
         with self._plan_tools_lock:
@@ -1367,18 +1379,18 @@ class ExtendedToolExecutor:
 
     def execute_update_plan(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Replace the plan isolated to the active task message."""
         return self._plan_tool_for(conversation_id, message_id).update(params)
 
     def get_plan_snapshot(
         self,
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        conversation_id: str | None = None,
+        message_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the latest snapshot for one task without creating it."""
         key = self._plan_key(conversation_id, message_id)
         with self._plan_tools_lock:
@@ -1387,8 +1399,8 @@ class ExtendedToolExecutor:
 
     def discard_plan_snapshot(
         self,
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         """Release one completed task's legacy and todo plan state."""
         key = self._plan_key(conversation_id, message_id)
@@ -1399,7 +1411,7 @@ class ExtendedToolExecutor:
         with self._loaded_skills_lock:
             self._loaded_skills.pop(key, None)
 
-    def clear_plan_snapshots(self, conversation_id: Optional[str] = None) -> None:
+    def clear_plan_snapshots(self, conversation_id: str | None = None) -> None:
         """Release legacy and todo plan state for one conversation."""
         conversation = str(conversation_id or "").strip()
         with self._plan_tools_lock:
@@ -1429,16 +1441,16 @@ class ExtendedToolExecutor:
 
     def get_todo_snapshot(
         self,
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
-    ) -> list[Dict[str, Any]]:
+        conversation_id: str | None = None,
+        message_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return the current Grok-style todos without mutating their state."""
         key = self._plan_key(conversation_id, message_id)
         with self._todo_state_lock:
             state = self._todo_states.get(key, {})
             return [dict(item) for item in state.get("todos", {}).values()]
 
-    def get_running_background_tasks(self) -> list[Dict[str, str]]:
+    def get_running_background_tasks(self) -> list[dict[str, str]]:
         """Return active background commands for compaction reminders."""
         with self._background_tasks_lock:
             return [
@@ -1449,8 +1461,8 @@ class ExtendedToolExecutor:
 
     def get_loaded_skills(
         self,
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> list[str]:
         """Return skills successfully loaded for the active task."""
         key = self._plan_key(conversation_id, message_id)
@@ -1459,7 +1471,7 @@ class ExtendedToolExecutor:
 
     @staticmethod
     def _task_image_key(
-        conversation_id: Optional[str], message_id: Optional[str]
+        conversation_id: str | None, message_id: str | None
     ) -> str:
         conversation = str(conversation_id or "").strip()
         message = str(message_id or "").strip()
@@ -1469,13 +1481,13 @@ class ExtendedToolExecutor:
 
     def register_task_images(
         self,
-        conversation_id: Optional[str],
-        message_id: Optional[str],
-        images: List[Dict[str, Any]],
+        conversation_id: str | None,
+        message_id: str | None,
+        images: list[dict[str, Any]],
     ) -> None:
         """Register validated image files for exactly one active task run."""
         key = self._task_image_key(conversation_id, message_id)
-        records: Dict[str, _TaskImage] = {}
+        records: dict[str, _TaskImage] = {}
         for image in images or []:
             if not isinstance(image, dict):
                 continue
@@ -1509,7 +1521,7 @@ class ExtendedToolExecutor:
                 self._task_images.pop(key, None)
 
     def clear_task_images(
-        self, conversation_id: Optional[str], message_id: Optional[str]
+        self, conversation_id: str | None, message_id: str | None
     ) -> None:
         """Forget the in-memory allowlist once its task run has finished."""
         try:
@@ -1521,9 +1533,9 @@ class ExtendedToolExecutor:
 
     def register_task_reference_roots(
         self,
-        conversation_id: Optional[str],
-        message_id: Optional[str],
-        paths: List[str],
+        conversation_id: str | None,
+        message_id: str | None,
+        paths: list[str],
     ) -> None:
         """Remember dropped folders as explicit task context."""
         key = self._task_image_key(conversation_id, message_id)
@@ -1544,7 +1556,7 @@ class ExtendedToolExecutor:
                 self._task_reference_roots.pop(key, None)
 
     def clear_task_reference_roots(
-        self, conversation_id: Optional[str], message_id: Optional[str]
+        self, conversation_id: str | None, message_id: str | None
     ) -> None:
         """Forget dropped reference folders after their task run finishes."""
         try:
@@ -1557,9 +1569,9 @@ class ExtendedToolExecutor:
     def _task_reference_root_for_path(
         self,
         path: Path,
-        conversation_id: Optional[str],
-        message_id: Optional[str],
-    ) -> Optional[Path]:
+        conversation_id: str | None,
+        message_id: str | None,
+    ) -> Path | None:
         try:
             key = self._task_image_key(conversation_id, message_id)
         except ValueError:
@@ -1631,7 +1643,7 @@ class ExtendedToolExecutor:
                 )
         return ""
 
-    def _workspace_image_source(self, path: Path) -> Optional[str]:
+    def _workspace_image_source(self, path: Path) -> str | None:
         """Identify the allowlisted workspace image folder containing ``path``."""
         if self._is_within_directory(path, self.workspace_temp_root):
             return "workspace temp"
@@ -1681,9 +1693,9 @@ class ExtendedToolExecutor:
 
     def execute_view_image(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> ToolExecutionResult | str:
         """Load one allowlisted image and return it only to the active model run."""
         requested_path = str(params.get("path", "")).strip()
@@ -1722,8 +1734,8 @@ class ExtendedToolExecutor:
 
     def execute_shell(
         self,
-        params: Dict[str, Any],
-        runtime: Optional[Dict[str, Any]] = None,
+        params: dict[str, Any],
+        runtime: dict[str, Any] | None = None,
     ) -> str:
         """Execute shell command"""
         command = params.get("command", "")
@@ -1755,9 +1767,9 @@ class ExtendedToolExecutor:
 
     def execute_file_read(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Read file with pagination support - aligned with OpenCode"""
         file_path = params.get("filePath", "") or params.get("path", "")
@@ -1788,7 +1800,7 @@ class ExtendedToolExecutor:
             return content
         return f"Error: {content}"
 
-    def get_glob_tool_definition(self) -> Dict[str, Any]:
+    def get_glob_tool_definition(self) -> dict[str, Any]:
         """Expose LangChain's scoped file search through the existing glob API."""
         return {
             "type": "function",
@@ -1818,9 +1830,9 @@ class ExtendedToolExecutor:
 
     def execute_glob(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Delegate filename matching to LangChain's scoped FileSearchTool."""
         pattern = str(params.get("pattern", "")).strip()
@@ -1901,16 +1913,16 @@ class ExtendedToolExecutor:
 
     def execute_grep(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Search content with relative paths rooted at the bound project."""
         normalized = dict(params)
         normalized["path"] = self._resolve_project_path(params.get("path"), ".")
         return execute_grep(normalized)
 
-    def execute_edit(self, params: Dict[str, Any]) -> str:
+    def execute_edit(self, params: dict[str, Any]) -> str:
         """Edit a file with relative paths rooted at the bound project."""
         normalized = dict(params)
         path = params.get("filePath") or params.get("file_path") or params.get("path")
@@ -1923,7 +1935,7 @@ class ExtendedToolExecutor:
         normalized["replaceAll"] = params.get("replaceAll", params.get("replace_all", False))
         return execute_edit(normalized)
 
-    def execute_read_excel(self, params: Dict[str, Any]) -> str:
+    def execute_read_excel(self, params: dict[str, Any]) -> str:
         """Read an Excel workbook as tab-separated sheet content."""
         path = params.get("path", "") or params.get("filePath", "")
         if not path:
@@ -1951,9 +1963,9 @@ class ExtendedToolExecutor:
         except ImportError:
             return "Error: openpyxl not installed. Try: pip install openpyxl"
         except Exception as exc:
-            return f"Error reading Excel workbook: {str(exc)}"
+            return f"Error reading Excel workbook: {exc!s}"
 
-    def execute_file_write(self, params: Dict[str, Any]) -> str:
+    def execute_file_write(self, params: dict[str, Any]) -> str:
         """Write file"""
         path = params.get("path", "")
         content = params.get("content", "")
@@ -1967,7 +1979,7 @@ class ExtendedToolExecutor:
         success, message = self.file_tool.write_file(path, content)
         return message if success else f"Error: {message}"
 
-    def execute_file_list(self, params: Dict[str, Any]) -> str:
+    def execute_file_list(self, params: dict[str, Any]) -> str:
         """List files"""
         path = self._resolve_project_path(
             params.get("path") or params.get("target_directory"), "."
@@ -1983,9 +1995,9 @@ class ExtendedToolExecutor:
 
     def execute_todo_write(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Persist one task's Grok-style todo plan and return its snapshot."""
         todos = params.get("todos")
@@ -2046,7 +2058,7 @@ class ExtendedToolExecutor:
             ensure_ascii=False,
         )
 
-    def execute_memory_search(self, params: Dict[str, Any]) -> str:
+    def execute_memory_search(self, params: dict[str, Any]) -> str:
         """Search the bound Grok-style memory store."""
         if self.memory_store is None:
             return "Memory is not enabled."
@@ -2062,7 +2074,7 @@ class ExtendedToolExecutor:
             return "No memory results found for query."
         return self.memory_store.format_memory_context(results)
 
-    def execute_memory_get(self, params: Dict[str, Any]) -> str:
+    def execute_memory_get(self, params: dict[str, Any]) -> str:
         """Read one memory Markdown file with Grok-compatible line bounds."""
         if self.memory_store is None:
             return "Memory is not enabled."
@@ -2089,7 +2101,7 @@ class ExtendedToolExecutor:
         )
         return f"**File:** {requested}\n**Lines:** {len(selected)}\n\n{numbered}"
 
-    def _start_background_command(self, params: Dict[str, Any]) -> str:
+    def _start_background_command(self, params: dict[str, Any]) -> str:
         command = str(params.get("command", "")).strip()
         if not command:
             return "Error: command parameter required"
@@ -2098,7 +2110,7 @@ class ExtendedToolExecutor:
         task_id = uuid.uuid4().hex[:12]
         output_path = self.task_log_root / f"task-{task_id}.log"
         output_handle = output_path.open("w", encoding="utf-8")
-        options: Dict[str, Any] = {}
+        options: dict[str, Any] = {}
         if os.name == "posix":
             options["start_new_session"] = True
         process = subprocess.Popen(
@@ -2126,12 +2138,12 @@ class ExtendedToolExecutor:
             }
         )
 
-    def execute_monitor(self, params: Dict[str, Any]) -> str:
+    def execute_monitor(self, params: dict[str, Any]) -> str:
         normalized = dict(params)
         normalized["is_background"] = True
         return self._start_background_command(normalized)
 
-    def execute_get_task_output(self, params: Dict[str, Any]) -> str:
+    def execute_get_task_output(self, params: dict[str, Any]) -> str:
         task_ids = params.get("task_ids")
         if isinstance(task_ids, str):
             task_ids = [task_ids]
@@ -2177,7 +2189,7 @@ class ExtendedToolExecutor:
                 )
         return json.dumps({"results": results}, ensure_ascii=False)
 
-    def execute_kill_task(self, params: Dict[str, Any]) -> str:
+    def execute_kill_task(self, params: dict[str, Any]) -> str:
         task_id = str(params.get("task_id", "")).strip()
         if not task_id:
             return "Error: task_id parameter required"
@@ -2196,7 +2208,7 @@ class ExtendedToolExecutor:
                 pass
         return json.dumps({"success": True, "task_id": task_id})
 
-    def execute_search_tool(self, params: Dict[str, Any]) -> str:
+    def execute_search_tool(self, params: dict[str, Any]) -> str:
         query = str(params.get("query", "")).lower().strip()
         if not query:
             return "Error: query parameter required"
@@ -2214,8 +2226,8 @@ class ExtendedToolExecutor:
 
     def execute_use_tool(
         self,
-        params: Dict[str, Any],
-        runtime: Optional[Dict[str, Any]] = None,
+        params: dict[str, Any],
+        runtime: dict[str, Any] | None = None,
     ) -> Any:
         """Invoke one tool while preserving the caller's runtime policy."""
         tool_name = str(params.get("tool_name", "")).strip()
@@ -2275,7 +2287,7 @@ class ExtendedToolExecutor:
             with self._scheduled_tasks_lock:
                 self._scheduled_tasks.pop(task_id, None)
 
-    def execute_scheduler_create(self, params: Dict[str, Any]) -> str:
+    def execute_scheduler_create(self, params: dict[str, Any]) -> str:
         task_id = str(params.get("task_id", "")).strip()
         updating = bool(task_id)
         with self._scheduled_tasks_lock:
@@ -2317,7 +2329,7 @@ class ExtendedToolExecutor:
             }
         )
 
-    def execute_scheduler_delete(self, params: Dict[str, Any]) -> str:
+    def execute_scheduler_delete(self, params: dict[str, Any]) -> str:
         task_id = str(params.get("task_id", "")).strip()
         with self._scheduled_tasks_lock:
             task = self._scheduled_tasks.pop(task_id, None)
@@ -2325,7 +2337,7 @@ class ExtendedToolExecutor:
             task["timer"].cancel()
         return json.dumps({"success": task is not None, "task_id": task_id})
 
-    def execute_scheduler_list(self, _params: Dict[str, Any]) -> str:
+    def execute_scheduler_list(self, _params: dict[str, Any]) -> str:
         with self._scheduled_tasks_lock:
             tasks = [
                 {
@@ -2337,7 +2349,7 @@ class ExtendedToolExecutor:
             ]
         return json.dumps({"tasks": tasks}, ensure_ascii=False)
 
-    def execute_update_goal(self, params: Dict[str, Any]) -> str:
+    def execute_update_goal(self, params: dict[str, Any]) -> str:
         completed = params.get("completed") is True
         blocked_reason = str(params.get("blocked_reason", "")).strip()
         message = str(params.get("message", "")).strip()
@@ -2352,7 +2364,7 @@ class ExtendedToolExecutor:
         }
         return json.dumps({"success": True, **self._goal_state}, ensure_ascii=False)
 
-    def execute_read_pdf(self, params: Dict[str, Any]) -> str:
+    def execute_read_pdf(self, params: dict[str, Any]) -> str:
         """Read PDF or document file"""
         path = params.get("path", "")
         if not path:
@@ -2400,12 +2412,12 @@ class ExtendedToolExecutor:
                     return "Error: PyPDF2 not installed. Try: pip install PyPDF2"
 
             else:
-                return f"Error: Unsupported file format. Supported: .pdf, .docx, .doc"
+                return "Error: Unsupported file format. Supported: .pdf, .docx, .doc"
 
         except Exception as e:
-            return f"Error reading document: {str(e)}"
+            return f"Error reading document: {e!s}"
 
-    def execute_read_url(self, params: Dict[str, Any]) -> str:
+    def execute_read_url(self, params: dict[str, Any]) -> str:
         """Read and extract content from a URL"""
         url = params.get("url", "")
         if not url:
@@ -2436,7 +2448,7 @@ class ExtendedToolExecutor:
                             response.content.decode(encoding)
                             response.encoding = encoding
                             break
-                        except:
+                        except Exception:
                             continue
 
             response.raise_for_status()
@@ -2466,8 +2478,7 @@ class ExtendedToolExecutor:
 
                 if text:
                     return f"URL 内容:\n{text}"
-                else:
-                    return "Error: 无法从 URL 提取内容"
+                return "Error: 无法从 URL 提取内容"
 
             except ImportError:
                 # If BeautifulSoup not available, try simple regex extraction
@@ -2489,19 +2500,19 @@ class ExtendedToolExecutor:
 
                 if content:
                     return f"URL 内容:\n{content}"
-                else:
-                    return "Error: 无法从 URL 提取内容"
+                return "Error: 无法从 URL 提取内容"
 
         except requests.exceptions.Timeout:
             return "Error: 请求超时"
         except requests.exceptions.RequestException as e:
-            return f"Error: 网络请求失败 - {str(e)}"
+            return f"Error: 网络请求失败 - {e!s}"
         except Exception as e:
-            return f"Error: 读取 URL 失败 - {str(e)}"
+            return f"Error: 读取 URL 失败 - {e!s}"
 
-    def execute_send_file(self, params: Dict[str, Any]) -> str:
+    def execute_send_file(self, params: dict[str, Any]) -> str:
         """Send a file to the user via Feishu"""
         import asyncio
+
         from agent.bus.events import OutboundMessage
 
         file_path = params.get("path", "")
@@ -2543,16 +2554,18 @@ class ExtendedToolExecutor:
             )
 
             # Send via bus (non-blocking)
-            asyncio.create_task(executor.bus.publish_outbound(msg))
+            task = asyncio.create_task(executor.bus.publish_outbound(msg))
+            _FIRE_AND_FORGET_TASKS.add(task)
+            task.add_done_callback(_discard_fire_and_forget_task)
 
             file_name = os.path.basename(file_path)
             file_size = os.path.getsize(file_path)
             return f"✅ 文件已发送: {file_name} ({file_size} bytes)"
 
         except Exception as e:
-            return f"Error: 发送文件失败 - {str(e)}"
+            return f"Error: 发送文件失败 - {e!s}"
 
-    def execute_generate_pdf(self, params: Dict[str, Any]) -> str:
+    def execute_generate_pdf(self, params: dict[str, Any]) -> str:
         """Generate PDF from various formats"""
         input_path = params.get("input_path", "")
         output_path = params.get("output_path", "")
@@ -2592,14 +2605,13 @@ class ExtendedToolExecutor:
 
         if success:
             return f"✅ {message}"
-        else:
-            return message
+        return message
 
     def execute_load_skill(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Load a skill's complete content"""
         if not self.skill_tool:
@@ -2616,7 +2628,7 @@ class ExtendedToolExecutor:
                 self._loaded_skills.setdefault(key, set()).add(skill_name)
         return content
 
-    def execute_question(self, params: Dict[str, Any]) -> str:
+    def execute_question(self, params: dict[str, Any]) -> str:
         """Execute question - ask user for input"""
         questions = params.get("questions", [])
         if not questions:
@@ -2643,9 +2655,9 @@ class ExtendedToolExecutor:
 
     def execute_project_preview(
         self,
-        params: Dict[str, Any],
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
+        params: dict[str, Any],
+        conversation_id: str | None = None,
+        message_id: str | None = None,
     ) -> str:
         """Execute a persistent project preview lifecycle action."""
         action = str(params.get("action", "")).strip().lower()

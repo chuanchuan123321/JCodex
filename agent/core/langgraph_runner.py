@@ -10,11 +10,11 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import nullcontext
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, NotRequired
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -34,12 +34,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Command, interrupt
-from typing_extensions import Annotated, NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 from agent.core.multi_agent import MULTI_AGENT_TOOL_NAMES
 from agent.core.tool_loop_guard import ToolLoopGuard
 from agent.core.tool_result import ToolExecutionResult
-
 
 EventCallback = Callable[[dict[str, Any]], None]
 ToolExecutor = Callable[..., Any]
@@ -188,7 +187,6 @@ class AgentState(TypedDict):
 class PendingInterrupt:
     kind: Literal["question", "approval"]
     value: dict[str, Any]
-    interrupt_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -197,7 +195,7 @@ class RunResult:
     thread_id: str
     run_id: str
     content: str = ""
-    pending: Optional[PendingInterrupt] = None
+    pending: PendingInterrupt | None = None
     error: str = ""
 
 
@@ -209,7 +207,7 @@ class _RuntimeBinding:
 
 
 def create_checkpoint_saver(
-    path: Optional[str | Path] = None,
+    path: str | Path | None = None,
 ) -> BaseCheckpointSaver[Any]:
     """Create an in-memory saver or a durable SQLite saver."""
     if path is None:
@@ -241,8 +239,8 @@ class LangGraphRunner:
         tool_definitions: Sequence[dict[str, Any] | BaseTool],
         tool_executor: ToolExecutor,
         *,
-        checkpointer: Optional[BaseCheckpointSaver[Any]] = None,
-        requires_approval: Optional[ApprovalPredicate] = None,
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
+        requires_approval: ApprovalPredicate | None = None,
         max_steps: int = 100,
     ) -> None:
         self.model = model
@@ -267,9 +265,9 @@ class LangGraphRunner:
         messages: str | BaseMessage | Sequence[BaseMessage | Mapping[str, Any]],
         *,
         system_prompt: str = "",
-        runtime: Optional[dict[str, Any]] = None,
-        emit: Optional[EventCallback] = None,
-        run_id: Optional[str] = None,
+        runtime: dict[str, Any] | None = None,
+        emit: EventCallback | None = None,
+        run_id: str | None = None,
     ) -> RunResult:
         """Start one new run and stream events to ``emit`` synchronously."""
         normalized_thread = self._validate_thread_id(thread_id)
@@ -307,9 +305,9 @@ class LangGraphRunner:
         thread_id: str,
         resume: dict[str, Any],
         *,
-        runtime: Optional[dict[str, Any]] = None,
-        emit: Optional[EventCallback] = None,
-        run_id: Optional[str] = None,
+        runtime: dict[str, Any] | None = None,
+        emit: EventCallback | None = None,
+        run_id: str | None = None,
     ) -> RunResult:
         """Resume the interrupt currently pending for ``thread_id``."""
         normalized_thread = self._validate_thread_id(thread_id)
@@ -334,14 +332,14 @@ class LangGraphRunner:
             run_id=current_run,
         )
 
-    def get_pending(self, thread_id: str) -> Optional[PendingInterrupt]:
+    def get_pending(self, thread_id: str) -> PendingInterrupt | None:
         snapshot = self.graph.get_state(self._config(self._validate_thread_id(thread_id)))
         for task in snapshot.tasks:
             for item in task.interrupts:
                 value = item.value if isinstance(item.value, dict) else {}
                 kind = value.get("kind")
                 if kind in {"question", "approval"}:
-                    return PendingInterrupt(kind, dict(value), str(item.id))
+                    return PendingInterrupt(kind, dict(value))
         return None
 
     def delete_thread(self, thread_id: str) -> None:
@@ -511,7 +509,7 @@ class LangGraphRunner:
                 )
             )
 
-        assembled: Optional[AIMessageChunk] = None
+        assembled: AIMessageChunk | None = None
         announced_tools: set[tuple[int, str]] = set()
         prepared_at: dict[str, int] = {}
         cancellation_scope = getattr(self.model, "cancellation_scope", None)
@@ -739,7 +737,7 @@ class LangGraphRunner:
         guard.restore(state.get("loop_guard"))
         guard_decision = guard.before_call(name, args)
 
-        preparation_duration_ms: Optional[int] = None
+        preparation_duration_ms: int | None = None
         if (
             guard_decision["action"] == "execute"
             and self.requires_approval(name, args)
@@ -1024,10 +1022,11 @@ class LangGraphRunner:
             return []
         try:
             signature = inspect.signature(callback)
-            if signature.bind(dict(state)):
-                raw_messages = callback(dict(state))
-            else:
-                raw_messages = callback()
+            raw_messages = (
+                callback(dict(state))
+                if signature.bind(dict(state))
+                else callback()
+            )
         except TypeError:
             try:
                 raw_messages = callback()
@@ -1070,8 +1069,8 @@ class LangGraphRunner:
         thread_id: str,
         graph_input: AgentState | Command[Any],
         *,
-        runtime: Optional[dict[str, Any]],
-        emit: Optional[EventCallback],
+        runtime: dict[str, Any] | None,
+        emit: EventCallback | None,
         run_id: str,
     ) -> RunResult:
         callback = emit or (lambda _event: None)
@@ -1092,7 +1091,7 @@ class LangGraphRunner:
                     item = interrupts[0]
                     value = item.value if isinstance(item.value, dict) else {}
                     pending = PendingInterrupt(
-                        value.get("kind", "approval"), dict(value), str(item.id)
+                        value.get("kind", "approval"), dict(value)
                     )
                     callback(
                         self._event(
@@ -1289,7 +1288,7 @@ class LangGraphRunner:
         binding: _RuntimeBinding,
         state: AgentState,
         final_content: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Return a continuation instruction when a runtime blocks completion.
 
         ``finish_guard`` may return a boolean, a blocking message, or a mapping

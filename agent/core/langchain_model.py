@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import queue
 import threading
-from contextlib import contextmanager
 from collections.abc import Iterator, Sequence
-from typing import Any, Optional
+from contextlib import contextmanager, suppress
+from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -36,17 +36,17 @@ class AIEngineChatModel(BaseChatModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     model_name: str = ""
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
+    max_tokens: int | None = None
+    temperature: float | None = None
     streaming: bool = True
     bound_tools: list[dict[str, Any]] = Field(default_factory=list)
     tool_choice: Any = None
-    parallel_tool_calls: Optional[bool] = False
+    parallel_tool_calls: bool | None = False
 
     _engine: AIEngine = PrivateAttr()
     _stream_local: threading.local = PrivateAttr()
 
-    def __init__(self, engine: Optional[AIEngine] = None, **data: Any) -> None:
+    def __init__(self, engine: AIEngine | None = None, **data: Any) -> None:
         resolved_engine = engine or AIEngine()
         data.setdefault("model_name", resolved_engine.model)
         data.setdefault("max_tokens", resolved_engine.max_tokens)
@@ -64,10 +64,8 @@ class AIEngineChatModel(BaseChatModel):
             yield
         finally:
             if previous is None:
-                try:
+                with suppress(AttributeError):
                     del self._stream_local.checker
-                except AttributeError:
-                    pass
             else:
                 self._stream_local.checker = previous
 
@@ -92,8 +90,8 @@ class AIEngineChatModel(BaseChatModel):
         tools: Sequence[dict[str, Any] | type | Any | BaseTool],
         *,
         tool_choice: dict[str, Any] | str | bool | None = None,
-        strict: Optional[bool] = None,
-        parallel_tool_calls: Optional[bool] = False,
+        strict: bool | None = None,
+        parallel_tool_calls: bool | None = False,
         **kwargs: Any,
     ) -> Runnable[Any, AIMessage]:
         """Bind tools using the same OpenAI function schema AIEngine accepts."""
@@ -109,7 +107,7 @@ class AIEngineChatModel(BaseChatModel):
     def _generate(
         self,
         messages: list[BaseMessage],
-        stop: Optional[list[str]] = None,
+        stop: list[str] | None = None,
         run_manager: Any = None,
         **kwargs: Any,
     ) -> ChatResult:
@@ -136,7 +134,7 @@ class AIEngineChatModel(BaseChatModel):
     def _stream(
         self,
         messages: list[BaseMessage],
-        stop: Optional[list[str]] = None,
+        stop: list[str] | None = None,
         run_manager: Any = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
@@ -312,11 +310,11 @@ class AIEngineChatModel(BaseChatModel):
         tools = kwargs.get("tools", kwargs.get("bound_tools", self.bound_tools))
         return list(tools or [])
 
-    def _resolve_max_tokens(self, kwargs: dict[str, Any]) -> Optional[int]:
+    def _resolve_max_tokens(self, kwargs: dict[str, Any]) -> int | None:
         value = kwargs.get("max_tokens", kwargs.get("max_completion_tokens"))
         return self.max_tokens if value is None else int(value)
 
-    def _resolve_temperature(self, kwargs: dict[str, Any]) -> Optional[float]:
+    def _resolve_temperature(self, kwargs: dict[str, Any]) -> float | None:
         value = kwargs.get("temperature")
         return self.temperature if value is None else float(value)
 

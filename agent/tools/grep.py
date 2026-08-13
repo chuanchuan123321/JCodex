@@ -2,9 +2,9 @@
 
 import os
 import re
-from pathlib import Path
-from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -17,15 +17,13 @@ class GrepMatch:
 @dataclass
 class GrepResult:
     success: bool
-    matches: List[GrepMatch]
+    matches: list[GrepMatch]
     total_files: int
     error: str = ""
 
 
 class GrepTool:
     """Fast content search tool using regular expressions"""
-
-    DEFAULT_LIMIT = 50
 
     def __init__(self, max_matches: int = 50):
         self.max_matches = max_matches
@@ -34,7 +32,7 @@ class GrepTool:
         self,
         pattern: str,
         path: str = ".",
-        include: Optional[str] = None,
+        include: str | None = None,
     ) -> GrepResult:
         """Execute grep pattern search
 
@@ -68,7 +66,7 @@ class GrepTool:
                     error=f"Invalid regex pattern: {e}",
                 )
 
-            matches: List[GrepMatch] = []
+            matches: list[GrepMatch] = []
             files_with_matches: set = set()
 
             # Walk through directory
@@ -101,7 +99,7 @@ class GrepTool:
                     # Search in file
                     try:
                         with open(
-                            filepath, "r", encoding="utf-8", errors="ignore"
+                            filepath, encoding="utf-8", errors="ignore"
                         ) as f:
                             for line_num, line in enumerate(f, 1):
                                 if regex.search(line):
@@ -185,10 +183,10 @@ class GrepTool:
             return f"Error: {result.error}"
 
         if not result.matches:
-            return f"No matches found"
+            return "No matches found"
 
         # Group by file
-        by_file: Dict[str, List[GrepMatch]] = {}
+        by_file: dict[str, list[GrepMatch]] = {}
         for match in result.matches:
             if match.file_path not in by_file:
                 by_file[match.file_path] = []
@@ -213,7 +211,7 @@ class GrepTool:
 
 
 # Tool definition for OpenAI function calling
-def get_grep_tool_definition() -> Dict[str, Any]:
+def get_grep_tool_definition() -> dict[str, Any]:
     """Get tool definition in OpenAI function calling format"""
     return {
         "type": "function",
@@ -242,7 +240,7 @@ def get_grep_tool_definition() -> Dict[str, Any]:
     }
 
 
-def execute_grep(params: Dict[str, Any]) -> str:
+def execute_grep(params: dict[str, Any]) -> str:
     """Execute grep tool"""
     tool = GrepTool()
     pattern = params.get("pattern", "")

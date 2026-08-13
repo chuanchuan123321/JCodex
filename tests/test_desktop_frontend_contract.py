@@ -2,22 +2,31 @@
 
 from pathlib import Path
 
-
-APP_JS = (
-    Path(__file__).resolve().parents[1]
-    / "agent"
-    / "ui"
-    / "desktop"
-    / "app.js"
-)
+DESKTOP_DIR = Path(__file__).resolve().parents[1] / "agent" / "ui" / "desktop"
+APP_JS = DESKTOP_DIR / "app.js"
 INDEX_HTML = APP_JS.with_name("index.html")
 STYLES_CSS = APP_JS.with_name("styles.css")
 AGENT_PROMPT = APP_JS.parents[3] / "Agent.md"
 
 
+def frontend_source() -> str:
+    """Concatenate app.js + js/ modules in index.html load order.
+
+    The desktop UI is split into multiple classic scripts (see index.html),
+    so contract assertions run against the combined source to stay valid
+    as modules are extracted from app.js.
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    parts = [APP_JS.read_text(encoding="utf-8")]
+    for match in __import__("re").finditer(r'<script src="(js/[^"]+\.js)', html):
+        script_path = DESKTOP_DIR / match.group(1)
+        parts.append(script_path.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 
 def test_context_window_slider_and_token_indicator_contract() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
     assert (
@@ -51,14 +60,12 @@ def test_context_window_slider_and_token_indicator_contract() -> None:
 
     assert "previewContextWindow" in source
     assert "eel.preview_context_window(option)" in source
-    assert (
-        'oninput="updateContextWindowLabel(); previewContextWindow()"'
-        in INDEX_HTML.read_text(encoding="utf-8")
-    )
+    assert "slider.addEventListener('input', () => {" in source
+    assert "updateContextWindowLabel();" in source
 
 
 def test_api_config_dropdown_and_model_quick_switch_contract() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     css_source = STYLES_CSS.read_text(encoding="utf-8")
     html_source = INDEX_HTML.read_text(encoding="utf-8")
 
@@ -99,7 +106,7 @@ def test_api_config_dropdown_and_model_quick_switch_contract() -> None:
 
 
 def test_chat_markdown_renders_address_only_images_and_videos() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     css_source = STYLES_CSS.read_text(encoding="utf-8")
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     prompt = AGENT_PROMPT.read_text(encoding="utf-8")
@@ -148,7 +155,7 @@ def test_chat_markdown_renders_address_only_images_and_videos() -> None:
 
 
 def test_only_final_compression_end_is_a_terminal_event() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     assert "if (isTerminalTaskEvent(result))" in source
     helper = source.split("function isTerminalTaskEvent(result)", 1)[1]
@@ -161,17 +168,17 @@ def test_only_final_compression_end_is_a_terminal_event() -> None:
 
 
 def test_historical_compression_does_not_set_a_running_status() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     assert "announceStatus = true" in source
     assert "if (announceStatus)" in source
-    assert "!isRestoringConversation,\n            !isRestoringConversation" in source
+    assert "startCompressionActivity(result, msgId, !isRestoringConversation, !isRestoringConversation);" in source
     assert "restoreStatusAfterCompression();" in source
     assert "if (!isProcessing && isInitialized) setAppStatus('ready', '就绪');" in source
 
 
 def test_streaming_scroll_follows_only_while_user_is_at_bottom() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     assert "let chatAutoFollow = true;" in source
     assert "function updateChatAutoFollow(" in source
@@ -195,7 +202,7 @@ def test_streaming_scroll_follows_only_while_user_is_at_bottom() -> None:
 
 
 def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -218,7 +225,7 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert "event.code !== 'Space'" in source
     assert "startVoiceListening();" in source
     assert "stopVoiceListening();" in source
-    assert "messageInput.dispatchEvent(new Event('input', {bubbles: true}))" in source
+    assert "messageInput.dispatchEvent(new Event('input', { bubbles: true }))" in source  # prettier spacing
     assert "sendMessage();" in source
     assert "speechSynthesis.speak(utterance)" in source
     assert "window.speechSynthesis.getVoices()" in source
@@ -302,19 +309,20 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert "lostpointercapture" in source
     assert "voicePointerId !== null" in source
     assert "'input, textarea, select" not in source
-    assert "}, true);" in source
+    assert "document.addEventListener(\n    'keydown'," in source
+    assert "document.addEventListener(\n    'keyup'," in source
     finish_helper = source.split("function finishCurrentMessage(", 1)[1]
     finish_helper = finish_helper.split("\nfunction invalidatePolling", 1)[0]
     assert "if (!voiceModeActive) document.getElementById('messageInput').focus();" in finish_helper
     streaming_helper = source.split("function finalizeStreamingResponse(", 1)[1]
     streaming_helper = streaming_helper.split("\nfunction getVisibleModelContent", 1)[0]
-    assert "flushVoiceStreamingResponse(state, {final: true});" in streaming_helper
+    assert "flushVoiceStreamingResponse(state, { final: true });" in streaming_helper  # prettier spacing
     commentary_branch = streaming_helper.rsplit("if (isCommentary) {", 1)[1]
     commentary_branch = commentary_branch.split("return;", 1)[0]
     assert "speakVoiceResponse" not in commentary_branch
     assert "if (!state || !state.voiceQueuedText) speakVoiceResponse(content, msgId);" in streaming_helper
     assert "function getVoiceStreamSentenceBoundary(text)" in source
-    assert "function flushVoiceStreamingResponse(state, {final = false} = {})" in source
+    assert "function flushVoiceStreamingResponse(state, { final = false } = {})" in source  # prettier spacing
     assert "state.isCommentary || state.voiceDisabled" in source
     assert "getVoiceStreamSentenceBoundary(pending)" in source
     assert "enqueueVoiceSpeech(" in source
@@ -323,11 +331,11 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
     assert "flushVoiceStreamingResponse(state);" in append_helper
     commentary_marker = source.split("function markStreamingCommentary(", 1)[1]
     commentary_marker = commentary_marker.split("\nfunction createStreamingThinking", 1)[0]
-    assert "flushVoiceStreamingResponse(state, {final: true});" in commentary_marker
+    assert "flushVoiceStreamingResponse(state, { final: true });" in commentary_marker  # prettier spacing
     assert "state.voiceDisabled = true;" in commentary_marker
     commentary_setup = streaming_helper.split("if (isCommentary && state) {", 1)[1]
     commentary_setup = commentary_setup.split("state.isCommentary = true;", 1)[0]
-    assert "flushVoiceStreamingResponse(state, {final: true});" in commentary_setup
+    assert "flushVoiceStreamingResponse(state, { final: true });" in commentary_setup
     assert "positionVoiceStrands" in source
     assert "--voice-strands-center-x" in source
     assert "window.innerHeight - inputRect.top + 10" in source
@@ -368,7 +376,7 @@ def test_voice_mode_uses_hold_to_talk_and_existing_message_pipeline() -> None:
 
 
 def test_sidebar_rows_are_updated_in_place_during_live_polling() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     render_helper = source.split("function renderConversationList()", 1)[1]
     render_helper = render_helper.split(
@@ -387,7 +395,7 @@ def test_sidebar_rows_are_updated_in_place_during_live_polling() -> None:
 
 
 def test_jcodex_welcome_has_three_action_modules() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -402,7 +410,7 @@ def test_jcodex_welcome_has_three_action_modules() -> None:
 
 
 def test_sidebar_uses_persistent_two_level_navigation() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -441,16 +449,16 @@ def test_sidebar_uses_persistent_two_level_navigation() -> None:
 
 
 def test_memory_sidebar_exposes_the_exact_injected_context_file() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert "openMemoryFile('memory_context')" in html_source
+    assert 'data-memory-file="memory_context"' in html_source  # delegation, no inline onclick
     assert "memory_context.md" in html_source
     assert "memory_context: 'memory_context.md'" in app_source
 
 
 def test_sidebar_skills_tree_and_resizing_contracts() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -466,7 +474,7 @@ def test_sidebar_skills_tree_and_resizing_contracts() -> None:
     assert "--sidebar-panel-width" in app_source
     assert "workspaceExpandedDirectories" in app_source
     assert "function toggleWorkspaceDirectory" in app_source
-    assert "eel.list_workspace_files(folder, path)" in app_source
+    assert ".list_workspace_files(folder, path)" in app_source  # formatter-tolerant (prettier wraps eel chains)
     assert "data-workspace-toggle" in app_source
     assert "aria-expanded" in app_source
     assert "openFile(folder, fileItem.dataset.workspaceFile)" in app_source
@@ -498,7 +506,7 @@ def test_files_panel_keeps_roots_adjacent_with_taller_tree_viewports() -> None:
 
 
 def test_docked_sidebar_and_review_widths_are_clamped_to_the_viewport() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     review_limit = source.split("function getReviewPanelWidthLimit", 1)[1]
     review_limit = review_limit.split("\nfunction ", 1)[0]
@@ -513,7 +521,7 @@ def test_docked_sidebar_and_review_widths_are_clamped_to_the_viewport() -> None:
 
 
 def test_panel_resize_cleanup_handles_interrupted_pointer_gestures() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
 
     cleanup = source.split("function installPointerResizeCleanup", 1)[1]
@@ -542,7 +550,7 @@ def test_panel_resize_cleanup_handles_interrupted_pointer_gestures() -> None:
 
 
 def test_frontend_stops_background_eel_calls_after_disconnect() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     assert "let eelConnectionLost = false;" in source
     assert "function markEelConnectionLost()" in source
@@ -555,7 +563,7 @@ def test_frontend_stops_background_eel_calls_after_disconnect() -> None:
 
 
 def test_skill_folder_import_uses_the_browser_picker_not_tk() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
 
     assert 'id="skillFolderInput"' in html_source
@@ -570,7 +578,7 @@ def test_skill_folder_import_uses_the_browser_picker_not_tk() -> None:
 
 
 def test_skill_store_has_sidebar_entry_search_and_install_states() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -604,7 +612,7 @@ def test_skill_store_has_sidebar_entry_search_and_install_states() -> None:
 
 
 def test_project_folder_picker_disables_repeated_requests_and_ignores_cancel() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     handler = source.split(
         "document.getElementById('projectBrowseButton')?.addEventListener", 1
     )[1].split("document.getElementById('projectDialog')", 1)[0]
@@ -617,7 +625,7 @@ def test_project_folder_picker_disables_repeated_requests_and_ignores_cancel() -
 
 
 def test_project_list_uses_only_the_context_menu_for_new_project_tasks() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     render_helper = source.split("function renderProjectList()", 1)[1]
     render_helper = render_helper.split("\nasync function refreshProjects", 1)[0]
 
@@ -627,7 +635,7 @@ def test_project_list_uses_only_the_context_menu_for_new_project_tasks() -> None
 
 
 def test_composer_drop_supports_reference_folders() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
 
     assert "function getDroppedDirectoryEntries" in source
@@ -641,7 +649,7 @@ def test_composer_drop_supports_reference_folders() -> None:
 
 
 def test_composer_menu_can_select_a_reference_folder() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
 
     assert 'data-composer-action="upload-folder"' in html_source
@@ -652,7 +660,7 @@ def test_composer_menu_can_select_a_reference_folder() -> None:
 
 
 def test_sidebar_scrollbars_auto_hide_until_interaction() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     styles = STYLES_CSS.read_text(encoding="utf-8")
 
     assert "function initializeSidebarAutoHideScrollbars" in source
@@ -662,7 +670,7 @@ def test_sidebar_scrollbars_auto_hide_until_interaction() -> None:
 
 
 def test_deleting_an_inactive_task_does_not_redraw_the_active_task() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     delete_handler = source.split(
         "menu.querySelector('[data-action=\"delete\"]').onclick = async () => {", 1
     )[1].split("setTimeout(() => document.addEventListener", 1)[0]
@@ -676,17 +684,17 @@ def test_deleting_an_inactive_task_does_not_redraw_the_active_task() -> None:
     assert "frame.src = 'about:blank'" in hide_split
     assert "if (!deletedWasActive) return;" in delete_handler
     assert delete_handler.index("if (!deletedWasActive) return;") < delete_handler.index(
-        "eel.load_conversation(nextActiveId)"
+        ".load_conversation(nextActiveId)"
     )
 
 
 def test_deleting_the_active_task_finishes_at_the_latest_message() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     delete_handler = source.split(
         "menu.querySelector('[data-action=\"delete\"]').onclick = async () => {", 1
     )[1].split("setTimeout(() => document.addEventListener", 1)[0]
 
-    final_pin = "pinChatToBottom(document.getElementById('chatMessages'), {force: true});"
+    final_pin = "pinChatToBottom(document.getElementById('chatMessages'), { force: true });"
     assert "restoreSplitTaskForConversation(nextActiveId)" in delete_handler
     assert delete_handler.index(final_pin) > delete_handler.index(
         "restoreSplitTaskForConversation(nextActiveId)"
@@ -694,7 +702,7 @@ def test_deleting_the_active_task_finishes_at_the_latest_message() -> None:
 
 
 def test_split_window_initializes_its_pinned_task_id() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     initializer = source.split("async function initializeOSAgent()", 1)[1]
     initializer = initializer.split("\nfunction splitTaskUrl", 1)[0]
 
@@ -703,7 +711,7 @@ def test_split_window_initializes_its_pinned_task_id() -> None:
 
 
 def test_plan_progress_uses_single_composer_component_and_latest_snapshot() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -714,8 +722,8 @@ def test_plan_progress_uses_single_composer_component_and_latest_snapshot() -> N
     assert "const activePlanProgress = new Map();" in app_source
     assert "result?.type === 'plan_update'" in app_source
     assert "if (result?.error)" in app_source
-    assert "{...previous, error:" in app_source
-    assert "plan: [{step: '计划更新失败', status: 'pending'}]" in app_source
+    assert "{ ...previous, error:" in app_source  # prettier spacing
+    assert "plan: [{ step: '计划更新失败', status: 'pending' }]" in app_source  # prettier spacing
     assert "raw.terminal_state || raw.terminalState" in app_source
     assert "raw.terminal_message || raw.terminalMessage" in app_source
     assert "function markPlanProgressTerminal" in app_source
@@ -724,8 +732,8 @@ def test_plan_progress_uses_single_composer_component_and_latest_snapshot() -> N
     assert "terminalState === 'complete'" in app_source
     assert "? finishedMessage" in app_source
     assert "function getLatestConversationPlan" in app_source
-    assert "activeState?.running ? null" in app_source
-    assert "const planMatchesActiveRun = !activeExecution?.running" in app_source
+    assert "activeState?.running\n      ? null" in app_source  # prettier multiline ternary
+    assert "const planMatchesActiveRun =\n      !activeExecution?.running" in app_source  # prettier wrap
     assert "latestPlan?.messageId === Number(activeExecution.messageId || 0)" in app_source
     assert "const pendingIndex = planState.plan.findIndex" in app_source
     assert "'completed', 'cancelled'" in app_source
@@ -743,7 +751,7 @@ def test_plan_progress_uses_single_composer_component_and_latest_snapshot() -> N
 
 
 def test_composer_plan_mode_is_persistent_and_captured_at_submit() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -783,7 +791,7 @@ def test_dark_theme_does_not_force_the_plan_mode_pill_visible() -> None:
 
 
 def test_tool_cards_show_a_safe_call_target() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     assert "function getToolTarget(toolName, params = {}, explicitTarget = '')" in source
     assert "['filePath', 'file_path', 'path', 'filename']" in source
@@ -796,20 +804,20 @@ def test_tool_cards_show_a_safe_call_target() -> None:
 
 
 def test_switching_conversations_finishes_at_the_latest_message() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     switch_helper = source.split("async function switchConversation(conversationId)", 1)[1]
     switch_helper = switch_helper.split("\nfunction openConversationMenu", 1)[0]
-    final_pin = "pinChatToBottom(document.getElementById('chatMessages'), {force: true});"
+    final_pin = "pinChatToBottom(document.getElementById('chatMessages'), { force: true });"
 
     assert final_pin in switch_helper
     assert switch_helper.index(final_pin) > switch_helper.index(
-        "syncActiveConversationProcessingUI({showPlaceholder: true});"
+        "syncActiveConversationProcessingUI({ showPlaceholder: true });"
     )
 
 
 def test_task_end_modified_files_summary_is_dedicated_and_restorable() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
     assert "function addModifiedFilesSummary(result, animate = true)" in app_source
@@ -839,7 +847,7 @@ def test_task_end_modified_files_summary_is_dedicated_and_restorable() -> None:
 
 
 def test_modified_files_review_opens_an_accessible_vscode_style_side_panel() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -867,18 +875,18 @@ def test_modified_files_review_opens_an_accessible_vscode_style_side_panel() -> 
 
 
 def test_review_normalization_preserves_historical_diff_data() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     normalizer = source.split("function normalizeModifiedFiles(result)", 1)[1]
     normalizer = normalizer.split("\nfunction addModifiedFilesSummary", 1)[0]
 
     assert "reviewable" in normalizer
     assert "review_reason" in normalizer
     assert "hunks" in normalizer
-    assert "structuredClone" in source or ".map(hunk" in normalizer
+    assert "structuredClone" in source or ".map((hunk)" in normalizer  # prettier wraps arrow args
 
 
 def test_terminal_polling_drains_and_restores_task_end_summary() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     polling_helper = source.split("function startPolling(", 1)[1]
     polling_helper = polling_helper.split("\nfunction isTerminalTaskEvent", 1)[0]
@@ -891,7 +899,7 @@ def test_terminal_polling_drains_and_restores_task_end_summary() -> None:
     assert "batch < 8; batch += 1" in drain_helper
     assert "batch < 8 && !terminal" not in drain_helper
     assert "poller.terminalEventSeen = true;" in drain_helper
-    assert "eel.load_conversation(id)()" in finish_helper
+    assert ".load_conversation(id)()" in finish_helper  # prettier wraps eel chains
     assert "event?.type === 'modified_files'" in finish_helper
     assert "Number(event.message_id || 0) === messageId" in finish_helper
     assert "addModifiedFilesSummary(summary, false);" in finish_helper
@@ -899,7 +907,7 @@ def test_terminal_polling_drains_and_restores_task_end_summary() -> None:
 
 
 def test_terminal_polling_never_keeps_stop_button_visible_for_finalization() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     polling_helper = source.split("function startPolling(", 1)[1]
     polling_helper = polling_helper.split("\nfunction isTerminalTaskEvent", 1)[0]
@@ -914,7 +922,7 @@ def test_terminal_polling_never_keeps_stop_button_visible_for_finalization() -> 
 
 
 def test_stale_sidebar_snapshot_cannot_revive_a_terminal_task() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
 
     state_helper = source.split("function updateConversationExecutionState", 1)[1]
     state_helper = state_helper.split("\nfunction isConversationRunning", 1)[0]
@@ -927,7 +935,7 @@ def test_stale_sidebar_snapshot_cannot_revive_a_terminal_task() -> None:
 
 
 def test_plan_terminal_state_tracks_real_execution_outcomes() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     stop_handler = source.split(
         "stopButton.addEventListener('click', async () => {", 1
     )[1].split("clearChat.addEventListener", 1)[0]
@@ -950,11 +958,11 @@ def test_plan_terminal_state_tracks_real_execution_outcomes() -> None:
     polling_helper = source.split("function startPolling(", 1)[1]
     polling_helper = polling_helper.split("\nfunction isTerminalTaskEvent", 1)[0]
     assert "finishCurrentMessage(executionId, messageId);" in polling_helper
-    assert "'error',\n                    '桌面端与执行服务连接中断'" in polling_helper
+    assert "finishCurrentMessage(executionId, messageId, 'error', '桌面端与执行服务连接中断');" in polling_helper
 
 
 def test_stop_renders_the_synchronously_returned_modified_files_summary() -> None:
-    source = APP_JS.read_text(encoding="utf-8")
+    source = frontend_source()
     stop_handler = source.split(
         "stopButton.addEventListener('click', async () => {", 1
     )[1].split("clearChat.addEventListener", 1)[0]
@@ -968,7 +976,7 @@ def test_stop_renders_the_synchronously_returned_modified_files_summary() -> Non
 
 
 def test_multi_agent_mode_renders_bounded_isolated_team_snapshots() -> None:
-    app_source = APP_JS.read_text(encoding="utf-8")
+    app_source = frontend_source()
     html_source = INDEX_HTML.read_text(encoding="utf-8")
     css_source = STYLES_CSS.read_text(encoding="utf-8")
 
@@ -1138,15 +1146,15 @@ def test_multi_agent_mode_renders_bounded_isolated_team_snapshots() -> None:
     send_helper = send_helper.split("\n// 直接发送指定消息", 1)[0]
     assert "const multiAgentMode = multiAgentModeEnabled;" in send_helper
     assert "const allowAll = autoAllowAll;" in send_helper
-    assert "voiceMode,\n            multiAgentMode" in send_helper
-    assert "multiAgentMode,\n            allowAll" in send_helper
+    assert "      voiceMode,\n      multiAgentMode," in send_helper  # prettier args
+    assert "      multiAgentMode,\n      allowAll," in send_helper
 
     queued_helper = app_source.split("async function sendMessageWithText(", 1)[1]
     queued_helper = queued_helper.split("\nfunction updateQueueDisplay", 1)[0]
     assert "multiAgentMode = multiAgentModeEnabled" in queued_helper
     assert "allowAll = autoAllowAll" in queued_helper
-    assert "Boolean(voiceMode),\n            Boolean(multiAgentMode)" in queued_helper
-    assert "Boolean(multiAgentMode),\n            Boolean(allowAll)" in queued_helper
+    assert "      Boolean(voiceMode),\n      Boolean(multiAgentMode)," in queued_helper  # prettier args
+    assert "      Boolean(multiAgentMode),\n      Boolean(allowAll)," in queued_helper  # prettier args
     assert "typeof queued.multiAgentMode === 'boolean'" in app_source
     assert "typeof queued.allowAll === 'boolean'" in app_source
     assert "function normalizeToolActor(result)" in app_source
@@ -1176,7 +1184,7 @@ def test_multi_agent_mode_renders_bounded_isolated_team_snapshots() -> None:
     history_helper = app_source.split("function renderConversation(conversation)", 1)[1]
     history_helper = history_helper.split("\nasync function sendMessage()", 1)[0]
     assert "event.type === 'agent_team'" in history_helper
-    assert "{animate: false}" in history_helper
+    assert "{ animate: false }" in history_helper  # prettier spacing
     assert "if (!isQuestionToolName(event.tool))" in history_helper
 
     result_helper = app_source.split("function handleResult(", 1)[1]
@@ -1184,13 +1192,13 @@ def test_multi_agent_mode_renders_bounded_isolated_team_snapshots() -> None:
     assert "result?.type === 'agent_team_update'" in result_helper
     assert "updateAgentTeamSnapshot(" in result_helper
 
-    assert "closeChangeReview({restoreFocus: false});" in app_source
+    assert "closeChangeReview({ restoreFocus: false });" in app_source
     review_helper = app_source.split("function openChangeReview(", 1)[1]
     review_helper = review_helper.split("\nfunction closeChangeReview", 1)[0]
-    assert "closeAgentDetail({restoreFocus: false});" in review_helper
+    assert "closeAgentDetail({ restoreFocus: false });" in review_helper  # prettier spacing
     reset_helper = app_source.split("function resetConversationView(", 1)[1]
     reset_helper = reset_helper.split("\nfunction formatConversationDate", 1)[0]
-    assert "closeAgentDetail({restoreFocus: false});" in reset_helper
+    assert "closeAgentDetail({ restoreFocus: false });" in reset_helper
     assert "detachAgentTeamCardsForConversation" in reset_helper
     assert "markAgentTeamsTerminal(conversationId, messageId, 'cancelled');" in app_source
 

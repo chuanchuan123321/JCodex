@@ -14,9 +14,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.outputs import ChatGenerationChunk
 
+from agent.core.conversation_store import ConversationStore
 from agent.core.langgraph_runner import LangGraphRunner
 from agent.core.memory_manager import MemoryManager
-from agent.core.conversation_store import ConversationStore
 from agent.core.memory_store import MemoryStore
 from agent.core.project_store import ProjectStore
 from agent.ui.desktop import main as desktop
@@ -24,8 +24,8 @@ from agent.ui.desktop import main as desktop
 
 def _use_tmp_workspace(monkeypatch, tmp_path) -> None:
     """Isolate both runtime roots so tests never touch the real repo/data dir."""
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(desktop, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(desktop.constants, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(desktop.constants, "DATA_ROOT", tmp_path)
 
 
 class _DataIntegrator:
@@ -283,11 +283,11 @@ def _prepare_desktop(
     reset_state: bool = True,
 ) -> desktop.DesktopTaskExecutor:
     if not persist_steps:
-        monkeypatch.setattr(desktop, "_persist_step", lambda *args: None)
+        monkeypatch.setattr(desktop.pipeline, "_persist_step", lambda *args: None)
     if reset_state:
-        desktop.conversation_runs.clear()
-        desktop.conversation_executors.clear()
-        desktop.conversation_generations.clear()
+        desktop.runtime.conversation_runs.clear()
+        desktop.runtime.conversation_executors.clear()
+        desktop.runtime.conversation_generations.clear()
     executor = desktop.DesktopTaskExecutor()
     executor.memory_manager = MemoryManager(str(tmp_path / "memory"))
     executor.data_integrator = _DataIntegrator()
@@ -304,7 +304,7 @@ def _register_executor(
     conversation_id: str, executor: desktop.DesktopTaskExecutor
 ) -> None:
     executor.conversation_id = conversation_id
-    desktop.conversation_executors[conversation_id] = executor
+    desktop.runtime.conversation_executors[conversation_id] = executor
 
 
 def test_desktop_startup_does_not_import_terminal_memory(
@@ -337,12 +337,12 @@ def test_desktop_startup_does_not_import_terminal_memory(
             pass
 
     _use_tmp_workspace(monkeypatch, tmp_path)
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    monkeypatch.setattr(desktop, "AIEngine", _AIEngine)
-    monkeypatch.setattr(desktop, "SkillsLoader", _SkillsLoader)
-    monkeypatch.setattr(desktop, "PreviewManager", _PreviewManager)
-    monkeypatch.setattr(desktop, "ExtendedToolExecutor", _ToolExecutor)
-    monkeypatch.setattr(desktop, "create_checkpoint_saver", lambda _path: object())
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    monkeypatch.setattr(desktop.executor, "AIEngine", _AIEngine)
+    monkeypatch.setattr(desktop.executor, "SkillsLoader", _SkillsLoader)
+    monkeypatch.setattr(desktop.executor, "PreviewManager", _PreviewManager)
+    monkeypatch.setattr(desktop.executor, "ExtendedToolExecutor", _ToolExecutor)
+    monkeypatch.setattr(desktop.executor, "create_checkpoint_saver", lambda _path: object())
     monkeypatch.setattr(
         desktop.DesktopTaskExecutor, "rebuild_langgraph_runner", lambda _self: None
     )
@@ -367,7 +367,7 @@ def test_desktop_conversation_memory_store_is_task_scoped(monkeypatch, tmp_path)
     first = store.active_id()
     second = store.create("second")["id"]
     _use_tmp_workspace(monkeypatch, tmp_path)
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     executor = desktop.DesktopTaskExecutor()
     executor.conversation_id = first
@@ -404,10 +404,10 @@ def test_desktop_memory_cleanup_preserves_tasks_projects_and_cli_scope(
             user_requests=[f"memory {index}"],
         )
     _use_tmp_workspace(monkeypatch, tmp_path)
-    monkeypatch.setattr(desktop, "conversation_store", conversation_store)
-    monkeypatch.setattr(desktop, "project_store", project_store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", conversation_store)
+    monkeypatch.setattr(desktop.runtime, "project_store", project_store)
 
-    result = desktop._cleanup_orphaned_long_term_memory()
+    result = desktop.helpers._cleanup_orphaned_long_term_memory()
 
     assert task_memory.workspace_dir.is_dir()
     assert project_memory.workspace_dir.is_dir()
@@ -425,7 +425,7 @@ def test_desktop_project_memory_store_is_shared_between_project_tasks(
     project_root = tmp_path / "project"
     project_root.mkdir()
     _use_tmp_workspace(monkeypatch, tmp_path)
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     executor = desktop.DesktopTaskExecutor()
     executor.project = {"id": "project", "available": True}
@@ -446,10 +446,10 @@ def test_desktop_split_task_long_term_store_is_isolated_for_ordinary_tasks(
     parent = store.create("parent")
     child = store.create_split(parent["id"])
     _use_tmp_workspace(monkeypatch, tmp_path)
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
-    parent_memory = desktop._memory_store_for_conversation(store.load(parent["id"]))
-    child_memory = desktop._memory_store_for_conversation(store.load(child["id"]))
+    parent_memory = desktop.helpers._memory_store_for_conversation(store.load(parent["id"]))
+    child_memory = desktop.helpers._memory_store_for_conversation(store.load(child["id"]))
 
     assert parent_memory.workspace_dir != child_memory.workspace_dir
     assert parent_memory.workspace_path == store.memory_dir(parent["id"])
@@ -465,7 +465,7 @@ def test_desktop_lists_primary_and_split_tasks_in_separate_views(
     store = ConversationStore(tmp_path / "conversations")
     parent = store.create("parent")
     child = store.create_split(parent["id"])
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     primary = desktop.list_conversations()
     split = desktop.list_conversations(child["id"])
@@ -476,7 +476,7 @@ def test_desktop_lists_primary_and_split_tasks_in_separate_views(
     assert split["active_id"] == child["id"]
 
     store.set_active(parent["id"])
-    monkeypatch.setattr(desktop, "_executor_for_conversation", lambda _id: object())
+    monkeypatch.setattr(desktop.runtime, "_executor_for_conversation", lambda _id: object())
     activated = desktop.set_active_conversation(child["id"])
     assert activated["success"] is True
     assert store.active_id() == parent["id"]
@@ -488,7 +488,7 @@ def test_desktop_delete_split_routes_to_exact_internal_child(
     store = ConversationStore(tmp_path / "conversations")
     parent = store.create("parent")
     child = store.create_split(parent["id"])
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     deleted = []
     monkeypatch.setattr(
         desktop,
@@ -507,8 +507,8 @@ def test_desktop_split_response_distinguishes_create_from_restore(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     parent = store.create("parent")
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    monkeypatch.setattr(desktop, "_executor_for_conversation", lambda _id: object())
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "_executor_for_conversation", lambda _id: object())
 
     created = desktop.create_split_conversation(parent["id"])
     child_id = created["conversation"]["id"]
@@ -629,7 +629,7 @@ def test_desktop_media_route_streams_unicode_filename_ranges(
 def test_desktop_task_switch_discards_stale_retrieval_cache(monkeypatch, tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation_id = store.active_id()
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     executor = desktop.DesktopTaskExecutor()
     executor.tool_executor = SimpleNamespace(clear_plan_snapshots=lambda _id: None)
@@ -642,7 +642,7 @@ def test_desktop_task_switch_discards_stale_retrieval_cache(monkeypatch, tmp_pat
 
 
 def test_desktop_memory_file_map_includes_injected_memory_context() -> None:
-    assert desktop.MEMORY_FILE_NAMES["memory_context"] == "memory_context.md"
+    assert desktop.constants.MEMORY_FILE_NAMES["memory_context"] == "memory_context.md"
 
 
 def test_desktop_eel_connection_guards_and_close_callback_keep_server_alive() -> None:
@@ -719,8 +719,8 @@ def test_desktop_main_disables_eel_auto_shutdown(monkeypatch) -> None:
         "_create_secured_eel_app",
         lambda _port: (object(), "test-session"),
     )
-    monkeypatch.setattr(desktop.os_agent, "preview_manager", None)
-    monkeypatch.setattr(desktop, "conversation_runs", {})
+    monkeypatch.setattr(desktop.runtime.os_agent, "preview_manager", None)
+    monkeypatch.setattr(desktop.runtime, "conversation_runs", {})
 
     def fake_start(*args, **kwargs):
         started["args"] = args
@@ -741,12 +741,12 @@ def _prepare_checkpoint_cleanup_desktop(monkeypatch, tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("checkpoint cleanup")
     runner = _CheckpointCleanupRunner()
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    desktop.conversation_runs.clear()
-    desktop.conversation_executors.clear()
-    desktop.conversation_generations.clear()
-    monkeypatch.setattr(desktop.os_agent, "preview_manager", None)
-    monkeypatch.setattr(desktop.os_agent, "langgraph_runner", runner)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    desktop.runtime.conversation_runs.clear()
+    desktop.runtime.conversation_executors.clear()
+    desktop.runtime.conversation_generations.clear()
+    monkeypatch.setattr(desktop.runtime.os_agent, "preview_manager", None)
+    monkeypatch.setattr(desktop.runtime.os_agent, "langgraph_runner", runner)
     executor = desktop.DesktopTaskExecutor()
     executor.preview_manager = None
     executor.langgraph_runner = runner
@@ -754,11 +754,9 @@ def _prepare_checkpoint_cleanup_desktop(monkeypatch, tmp_path):
     executor.memory_manager = MemoryManager(
         str(store.memory_dir(conversation["id"]))
     )
-    desktop.conversation_executors[conversation["id"]] = executor
-    monkeypatch.setattr(
-        desktop,
-        "_executor_for_conversation",
-        lambda conversation_id: desktop.conversation_executors.setdefault(
+    desktop.runtime.conversation_executors[conversation["id"]] = executor
+    monkeypatch.setattr(desktop.runtime, "_executor_for_conversation",
+        lambda conversation_id: desktop.runtime.conversation_executors.setdefault(
             conversation_id, executor
         ),
     )
@@ -798,7 +796,7 @@ def test_desktop_persists_thinking_duration_for_history_reload(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("duration")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     desktop._persist_step(
         {
@@ -821,7 +819,7 @@ def test_desktop_persists_safe_tool_target_without_raw_arguments(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("tool target")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     desktop._persist_step(
         {
@@ -851,7 +849,7 @@ def test_desktop_emits_one_persisted_modified_files_summary_at_task_end(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("edited files")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     _use_tmp_workspace(monkeypatch, tmp_path)
     executor = _prepare_desktop(
         monkeypatch,
@@ -1081,7 +1079,7 @@ def test_modified_files_diff_is_persisted_instead_of_read_from_current_disk(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("durable code review")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     step = {
         "type": "modified_files",
         "files": [
@@ -1133,7 +1131,7 @@ def test_desktop_finalization_barrier_opens_after_task_end_summary_persists(
     """Keep polling alive while the final task-end event is being persisted."""
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("completion barrier")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     _use_tmp_workspace(monkeypatch, tmp_path)
     executor = _prepare_desktop(
         monkeypatch,
@@ -1188,7 +1186,7 @@ def test_desktop_ignores_failed_file_mutations_in_task_summary(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("failed write")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -1235,7 +1233,7 @@ def test_desktop_stop_persists_completed_file_changes_once(
     """Stop returns a card for completed writes without waiting for the worker."""
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("stopped write")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     _use_tmp_workspace(monkeypatch, tmp_path)
     executor = _prepare_desktop(
         monkeypatch,
@@ -1301,7 +1299,7 @@ def test_desktop_history_keeps_plan_snapshots_for_latest_only_restore(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("history plans")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     desktop._persist_step(
         {
@@ -1351,7 +1349,7 @@ def test_desktop_emits_and_persists_plan_as_dedicated_snapshot(
         [_plan_tool()],
         lambda *_args: json.dumps(snapshot, ensure_ascii=False),
     )
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(monkeypatch, tmp_path, runner, persist_steps=True)
     executor.memory_manager = MemoryManager(str(store.memory_dir(conversation["id"])))
     _register_executor(conversation["id"], executor)
@@ -1394,7 +1392,7 @@ def test_desktop_plan_error_is_live_only_and_not_persisted(
         [_plan_tool()],
         lambda *_args: "Error: only one plan step may be in_progress",
     )
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(monkeypatch, tmp_path, runner, persist_steps=True)
     executor.memory_manager = MemoryManager(str(store.memory_dir(conversation["id"])))
     _register_executor(conversation["id"], executor)
@@ -1419,11 +1417,11 @@ def test_desktop_plan_error_is_live_only_and_not_persisted(
 
 
 def test_plan_mode_only_auto_enables_for_exceptionally_complex_projects() -> None:
-    assert desktop._resolve_plan_mode(False, "读取这个文件并修复一个拼写错误") == (
+    assert desktop.helpers._resolve_plan_mode(False, "读取这个文件并修复一个拼写错误") == (
         False,
         "off",
     )
-    assert desktop._resolve_plan_mode("true", "回复用户的问题") == (True, "manual")
+    assert desktop.helpers._resolve_plan_mode("true", "回复用户的问题") == (True, "manual")
 
     complex_request = """开发一个完整的全栈项目：
     - 设计系统架构和认证授权
@@ -1431,7 +1429,7 @@ def test_plan_mode_only_auto_enables_for_exceptionally_complex_projects() -> Non
     - 建立数据库数据模型与迁移
     - 编写集成测试并用 Docker 部署
     """
-    assert desktop._resolve_plan_mode(False, complex_request) == (True, "auto")
+    assert desktop.helpers._resolve_plan_mode(False, complex_request) == (True, "auto")
 
 
 def test_plan_mode_is_removed_from_the_runtime_tool_binding_when_off() -> None:
@@ -1579,7 +1577,7 @@ def test_multi_agent_prompt_and_runtime_tools_are_task_scoped(
     assert "{multi_agent_mode_instruction}" not in enabled_prompt
     assert "{multi_agent_mode_instruction}" not in disabled_prompt
 
-    collaboration_tools = desktop.ExtendedToolExecutor._multi_agent_tool_definitions()
+    collaboration_tools = desktop.executor.ExtendedToolExecutor._multi_agent_tool_definitions()
     monkeypatch.setattr(
         executor,
         "get_available_tools",
@@ -1595,7 +1593,7 @@ def test_multi_agent_prompt_and_runtime_tools_are_task_scoped(
     }
 
     assert disabled_names == {"read"}
-    assert desktop._MULTI_AGENT_TOOL_NAMES.issubset(enabled_names)
+    assert desktop.constants._MULTI_AGENT_TOOL_NAMES.issubset(enabled_names)
 
     _register_executor("multi-runtime", executor)
     run = desktop._begin_execution(
@@ -1622,7 +1620,7 @@ def test_primary_tool_events_are_explicitly_attributed(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("primary tool attribution")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -1687,7 +1685,7 @@ def test_message_access_mode_is_captured_atomically_for_the_task(
     store = ConversationStore(tmp_path / "conversations")
     conversation_id = store.active_id()
     assert conversation_id
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -1729,8 +1727,8 @@ def test_subagent_runtime_has_private_memory_prompt_and_tool_context(
         def clear_history(self) -> None:
             pass
 
-    monkeypatch.setattr(desktop, "AIEngine", _Engine)
-    monkeypatch.setattr(desktop, "AIEngineChatModel", lambda engine: object())
+    monkeypatch.setattr(desktop.executor, "AIEngine", _Engine)
+    monkeypatch.setattr(desktop.executor, "AIEngineChatModel", lambda engine: object())
     monkeypatch.setattr(
         "agent.core.data_integrator.DataIntegrator",
         lambda **_kwargs: _DataIntegrator(),
@@ -1847,7 +1845,7 @@ def test_subagent_runtime_has_private_memory_prompt_and_tool_context(
     assert {"read", "glob", "grep"}.issubset(read_only_names)
     assert {"edit", "write"}.isdisjoint(read_only_names)
     assert {"edit", "write"}.issubset(writable_names)
-    assert desktop._SUBAGENT_COLLABORATION_TOOLS.issubset(writable_names)
+    assert desktop.constants._SUBAGENT_COLLABORATION_TOOLS.issubset(writable_names)
     assert {"spawn_agent", "wait_agents", "list_agents", "cancel_agent"}.isdisjoint(
         writable_names
     )
@@ -1861,8 +1859,8 @@ def test_subagent_workdir_binds_relative_writes_to_generated_project(
         def clear_history(self) -> None:
             pass
 
-    monkeypatch.setattr(desktop, "AIEngine", _Engine)
-    monkeypatch.setattr(desktop, "AIEngineChatModel", lambda engine: object())
+    monkeypatch.setattr(desktop.executor, "AIEngine", _Engine)
+    monkeypatch.setattr(desktop.executor, "AIEngineChatModel", lambda engine: object())
     monkeypatch.setattr(
         "agent.core.data_integrator.DataIntegrator",
         lambda **_kwargs: _DataIntegrator(),
@@ -2155,9 +2153,9 @@ def test_save_settings_refreshes_token_indicator_context_window(
         show_knowledge_appendix = True
         context_compactor = _FakeCompactor()
 
-    monkeypatch.setattr(desktop, "_write_env_file", lambda *args, **kwargs: None)
-    monkeypatch.setattr(desktop, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(desktop, "os_agent", _FakeOSAgent())
+    monkeypatch.setattr(desktop.helpers, "_write_env_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(desktop.rpc_settings, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(desktop.runtime, "os_agent", _FakeOSAgent())
 
     previous_context_window = os.environ.get("CONTEXT_WINDOW")
     try:
@@ -2271,7 +2269,7 @@ def test_desktop_prompt_only_protects_os_agent_source_from_normal_tasks(
         LangGraphRunner(_FinalModel(), [], lambda *args: ""),
     )
     executor.project = None
-    executor.project_root = desktop.PROJECT_ROOT
+    executor.project_root = desktop.constants.PROJECT_ROOT
 
     prompt, _ = executor.build_system_prompt("编辑桌面上的文件")
 
@@ -2313,7 +2311,7 @@ def test_desktop_persists_intermediate_reasoning_before_commentary(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("multi-round")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     desktop._persist_step(
         {
@@ -2364,7 +2362,7 @@ def test_desktop_reload_keeps_every_tool_round_reasoning(
         [_simple_tool("read"), _simple_tool("write")],
         lambda name, _args, _runtime: f"{name} complete",
     )
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(
         monkeypatch, tmp_path, runner, persist_steps=True
     )
@@ -2567,7 +2565,7 @@ def test_desktop_plan_registry_is_cleared_on_activation_and_finish(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("plan lifecycle")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -2628,7 +2626,7 @@ def test_desktop_stop_allows_immediate_new_run_while_old_worker_unwinds(
         lambda conversation_id, shared_from: None,
     )
     monkeypatch.setattr(
-        desktop,
+        desktop.pipeline,
         "DesktopTaskExecutor",
         lambda shared_from=None: fresh_executor,
     )
@@ -2687,7 +2685,7 @@ def test_desktop_suppresses_late_events_from_an_old_generation(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     conversation = store.create("generation isolation")
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
     executor = _prepare_desktop(
         monkeypatch,
         tmp_path,
@@ -2726,7 +2724,7 @@ def test_clearing_a_desktop_task_cleans_its_graph_checkpoints(
             self.cleared.append(conversation_id)
 
     preview_manager = _PreviewManager()
-    monkeypatch.setattr(desktop.os_agent, "preview_manager", preview_manager)
+    monkeypatch.setattr(desktop.runtime.os_agent, "preview_manager", preview_manager)
 
     result = desktop.clear_conversation(conversation["id"])
 
@@ -2767,7 +2765,7 @@ def test_deleting_primary_desktop_task_cleans_internal_split_runtime_state(
     store = ConversationStore(tmp_path / "conversations")
     parent = store.create("parent")
     child = store.create_split(parent["id"])
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     class _Runner:
         def __init__(self) -> None:
@@ -2789,14 +2787,14 @@ def test_deleting_primary_desktop_task_cleans_internal_split_runtime_state(
 
     runner = _Runner()
     preview = _PreviewManager()
-    monkeypatch.setattr(desktop.os_agent, "preview_manager", preview)
-    monkeypatch.setattr(desktop.os_agent, "langgraph_runner", runner)
-    desktop.conversation_runs.clear()
-    desktop.conversation_executors.clear()
-    desktop.conversation_generations.clear()
-    desktop.conversation_generations[parent["id"]] = 1
-    desktop.conversation_generations[child["id"]] = 1
-    monkeypatch.setattr(desktop, "_executor_for_conversation", lambda _id: object())
+    monkeypatch.setattr(desktop.runtime.os_agent, "preview_manager", preview)
+    monkeypatch.setattr(desktop.runtime.os_agent, "langgraph_runner", runner)
+    desktop.runtime.conversation_runs.clear()
+    desktop.runtime.conversation_executors.clear()
+    desktop.runtime.conversation_generations.clear()
+    desktop.runtime.conversation_generations[parent["id"]] = 1
+    desktop.runtime.conversation_generations[child["id"]] = 1
+    monkeypatch.setattr(desktop.runtime, "_executor_for_conversation", lambda _id: object())
 
     result = desktop.delete_conversation(parent["id"])
 
@@ -2806,8 +2804,8 @@ def test_deleting_primary_desktop_task_cleans_internal_split_runtime_state(
     assert sorted(runner.prefixes) == sorted(
         [f"{parent['id']}:", f"{child['id']}:"]
     )
-    assert parent["id"] not in desktop.conversation_generations
-    assert child["id"] not in desktop.conversation_generations
+    assert parent["id"] not in desktop.runtime.conversation_generations
+    assert child["id"] not in desktop.runtime.conversation_generations
 
 
 def test_initialize_ignores_deleted_base_executor_conversation(
@@ -2817,7 +2815,7 @@ def test_initialize_ignores_deleted_base_executor_conversation(
     deleted = store.create("deleted")
     store.set_active(deleted["id"])
     replacement_id = store.delete(deleted["id"])["active_id"]
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     class _BaseExecutor:
         conversation_id = deleted["id"]
@@ -2827,10 +2825,8 @@ def test_initialize_ignores_deleted_base_executor_conversation(
             return True, "Already initialized"
 
     requested = []
-    monkeypatch.setattr(desktop, "os_agent", _BaseExecutor())
-    monkeypatch.setattr(
-        desktop,
-        "_executor_for_conversation",
+    monkeypatch.setattr(desktop.runtime, "os_agent", _BaseExecutor())
+    monkeypatch.setattr(desktop.runtime, "_executor_for_conversation",
         lambda conversation_id: requested.append(conversation_id),
     )
 
@@ -2847,7 +2843,7 @@ def test_initialize_returns_stale_split_as_normal_failure(
     parent = store.create("parent")
     child = store.create_split(parent["id"])
     store.delete(parent["id"])
-    monkeypatch.setattr(desktop, "conversation_store", store)
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
 
     class _BaseExecutor:
         conversation_id = parent["id"]
@@ -2856,7 +2852,7 @@ def test_initialize_returns_stale_split_as_normal_failure(
         def initialize():
             return True, "Already initialized"
 
-    monkeypatch.setattr(desktop, "os_agent", _BaseExecutor())
+    monkeypatch.setattr(desktop.runtime, "os_agent", _BaseExecutor())
 
     assert desktop.initialize(child["id"]) == (False, "Conversation not found")
 

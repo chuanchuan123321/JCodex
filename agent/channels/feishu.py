@@ -3,7 +3,6 @@
 import asyncio
 import json
 import threading
-import ssl
 from collections import OrderedDict
 from typing import Any
 
@@ -15,10 +14,10 @@ from agent.config.schema import FeishuConfig
 try:
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (
-        CreateMessageRequest,
-        CreateMessageRequestBody,
         CreateMessageReactionRequest,
         CreateMessageReactionRequestBody,
+        CreateMessageRequest,
+        CreateMessageRequestBody,
         Emoji,
         P2ImMessageReceiveV1,
     )
@@ -104,6 +103,7 @@ class FeishuChannel(BaseChannel):
 
                 # Fix SSL certificate issue on macOS
                 import os
+
                 import certifi
                 os.environ['SSL_CERT_FILE'] = certifi.where()
                 os.environ['SSL_CERT_DIR'] = certifi.where()
@@ -174,10 +174,9 @@ class FeishuChannel(BaseChannel):
         try:
             # Determine receive_id_type based on chat_id format
             # open_id starts with "ou_", chat_id starts with "oc_"
-            if msg.chat_id.startswith("oc_"):
-                receive_id_type = "chat_id"
-            else:
-                receive_id_type = "open_id"
+            receive_id_type = (
+                "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
+            )
 
             # Check if content is a file path
             import os
@@ -219,6 +218,7 @@ class FeishuChannel(BaseChannel):
         """Send a file through Feishu."""
         try:
             import os
+
             from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
             if not os.path.isfile(file_path):
@@ -269,7 +269,7 @@ class FeishuChannel(BaseChannel):
 
             access_token = auth_response.json().get("tenant_access_token")
             if not access_token:
-                print(f"❌ Access token is empty")
+                print("❌ Access token is empty")
                 return
 
             # Upload file
@@ -298,7 +298,7 @@ class FeishuChannel(BaseChannel):
 
             file_key = upload_data.get("data", {}).get("file_key")
             if not file_key:
-                print(f"❌ File key is empty")
+                print("❌ File key is empty")
                 return
 
             # Send file message
@@ -328,6 +328,7 @@ class FeishuChannel(BaseChannel):
         """Send an image through Feishu."""
         try:
             import os
+
             import requests
             from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
@@ -430,7 +431,7 @@ class FeishuChannel(BaseChannel):
             # Skip bot messages
             sender_type = sender.sender_type
             if sender_type == "bot":
-                print(f"⚠️  跳过机器人消息")
+                print("⚠️  跳过机器人消息")
                 return
 
             sender_id = sender.sender_id.open_id if sender.sender_id else "unknown"
@@ -438,7 +439,7 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type  # "p2p" or "group"
             msg_type = message.message_type
 
-            print(f"\n🔔 【飞书事件】")
+            print("\n🔔 【飞书事件】")
             print(f"  消息ID: {message_id}")
             print(f"  发送者: {sender_id}")
             print(f"  聊天类型: {chat_type}")
@@ -457,7 +458,7 @@ class FeishuChannel(BaseChannel):
                 content = MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
 
             if not content:
-                print(f"⚠️  消息内容为空")
+                print("⚠️  消息内容为空")
                 return
 
             print(f"  内容: {content}\n")
