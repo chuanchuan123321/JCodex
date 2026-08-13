@@ -7,22 +7,23 @@ Features:
 - Knowledge provenance tracking
 """
 
-import json
 import hashlib
+import json
 import os
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 import re
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
+from agent.core.ai_engine import AIEngine
 from agent.core.embedding_provider import (
     cosine_similarity,
     create_embedding_provider,
     vector_hash,
 )
-from agent.core.ai_engine import AIEngine
 
 
 class KnowledgeType(Enum):
@@ -34,7 +35,6 @@ class KnowledgeType(Enum):
     RULE = "rule"
     CUSTOM = "custom"
 
-
 class ConflictStrategy(Enum):
     """Conflict resolution strategies."""
     KEEP_BOTH = "keep_both"
@@ -44,7 +44,6 @@ class ConflictStrategy(Enum):
     MERGE = "merge"
     MANUAL = "manual"
 
-
 @dataclass
 class KnowledgeEntry:
     """Single knowledge entry."""
@@ -52,20 +51,20 @@ class KnowledgeEntry:
     knowledge_type: KnowledgeType
     title: str
     content: str
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     provenance: str = ""  # Source of this knowledge
     confidence: float = 1.0
     usage_count: int = 0
-    last_used: Optional[datetime] = None
-    related_entries: Set[str] = field(default_factory=set)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    last_used: datetime | None = None
+    related_entries: set[str] = field(default_factory=set)
+    metadata: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     status: str = "active"  # active, deprecated, merged
-    previous_versions: List[Dict[str, Any]] = field(default_factory=list)
+    previous_versions: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "knowledge_type": self.knowledge_type.value,
@@ -86,8 +85,8 @@ class KnowledgeEntry:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> 'KnowledgeEntry':
-        entry = KnowledgeEntry(
+    def from_dict(data: dict[str, Any]) -> 'KnowledgeEntry':
+        return KnowledgeEntry(
             id=data["id"],
             knowledge_type=KnowledgeType(data["knowledge_type"]),
             title=data["title"],
@@ -105,8 +104,6 @@ class KnowledgeEntry:
             status=data.get("status", "active"),
             previous_versions=data.get("previous_versions", [])
         )
-        return entry
-
 
 @dataclass
 class ConflictRecord:
@@ -118,10 +115,9 @@ class ConflictRecord:
     value_a: Any
     value_b: Any
     detected_at: datetime
-    resolution: Optional[str] = None
-    resolved_at: Optional[datetime] = None
+    resolution: str | None = None
+    resolved_at: datetime | None = None
     resolved_by: str = "system"  # system, user, ai
-
 
 class KnowledgeBase:
     """Main knowledge base class."""
@@ -131,7 +127,7 @@ class KnowledgeBase:
     INDEX_FILE = "knowledge_index.json"
     VECTORS_FILE = "knowledge_vectors.json"
 
-    def __init__(self, knowledge_dir: Optional[Path] = None):
+    def __init__(self, knowledge_dir: Path | None = None):
         if knowledge_dir is None:
             knowledge_dir = Path(__file__).parent.parent.parent / "workspace" / "knowledge"
         self.knowledge_dir = knowledge_dir
@@ -144,11 +140,11 @@ class KnowledgeBase:
         self.vectors_file = self.knowledge_dir / self.VECTORS_FILE
 
         # In-memory storage
-        self._entries: Dict[str, KnowledgeEntry] = {}
-        self._conflicts: List[ConflictRecord] = []
-        self._index: Dict[str, List[str]] = {}  # tag -> entry_ids
-        self._vectors: Dict[str, Dict[str, Any]] = {}
-        self._last_retrieved: List[Tuple[KnowledgeEntry, float]] = []
+        self._entries: dict[str, KnowledgeEntry] = {}
+        self._conflicts: list[ConflictRecord] = []
+        self._index: dict[str, list[str]] = {}  # tag -> entry_ids
+        self._vectors: dict[str, dict[str, Any]] = {}
+        self._last_retrieved: list[tuple[KnowledgeEntry, float]] = []
         self.embedding_provider = create_embedding_provider()
 
         # Load existing data
@@ -162,7 +158,7 @@ class KnowledgeBase:
         """Load knowledge from disk."""
         if self.knowledge_file.exists():
             try:
-                with open(self.knowledge_file, 'r', encoding='utf-8') as f:
+                with open(self.knowledge_file, encoding='utf-8') as f:
                     data = json.load(f)
                     for entry_data in data.get("entries", []):
                         entry = KnowledgeEntry.from_dict(entry_data)
@@ -174,7 +170,7 @@ class KnowledgeBase:
         """Load conflict records."""
         if self.conflicts_file.exists():
             try:
-                with open(self.conflicts_file, 'r', encoding='utf-8') as f:
+                with open(self.conflicts_file, encoding='utf-8') as f:
                     data = json.load(f)
                     for conflict_data in data.get("conflicts", []):
                         self._conflicts.append(ConflictRecord(
@@ -196,7 +192,7 @@ class KnowledgeBase:
         """Load search index."""
         if self.index_file.exists():
             try:
-                with open(self.index_file, 'r', encoding='utf-8') as f:
+                with open(self.index_file, encoding='utf-8') as f:
                     self._index = json.load(f)
             except json.JSONDecodeError:
                 self._index = {}
@@ -269,26 +265,13 @@ class KnowledgeBase:
         """Load vector index from disk."""
         if self.vectors_file.exists():
             try:
-                with open(self.vectors_file, 'r', encoding='utf-8') as f:
+                with open(self.vectors_file, encoding='utf-8') as f:
                     data = json.load(f)
                     vectors = data.get("vectors", {})
                     if isinstance(vectors, dict):
                         self._vectors = vectors
             except json.JSONDecodeError:
                 self._vectors = {}
-
-    def reload(self) -> None:
-        """Reload knowledge data from disk and clear stale retrieval state."""
-        self._entries = {}
-        self._conflicts = []
-        self._index = {}
-        self._vectors = {}
-        self._last_retrieved = []
-        self._load_knowledge()
-        self._load_conflicts()
-        self._load_index()
-        self._load_vectors()
-        self._ensure_vectors()
 
     def _save_vectors(self):
         """Save vector index to disk."""
@@ -355,7 +338,7 @@ class KnowledgeBase:
         if changed:
             self._save_vectors()
 
-    def get_vector_status(self) -> Dict[str, Any]:
+    def get_vector_status(self) -> dict[str, Any]:
         """Return vector index diagnostics for UI and evaluation reports."""
         provider_status = self.embedding_provider.status()
         active_ids = {entry.id for entry in self._entries.values() if entry.status == "active"}
@@ -378,7 +361,7 @@ class KnowledgeBase:
         content = f"{prefix}:{key}"
         return hashlib.md5(content.encode()).hexdigest()[:16]
 
-    def _detect_conflicts(self, entry: KnowledgeEntry, existing: Optional[KnowledgeEntry] = None) -> List[ConflictRecord]:
+    def _detect_conflicts(self, entry: KnowledgeEntry, existing: KnowledgeEntry | None = None) -> list[ConflictRecord]:
         """Detect conflicts with existing entries."""
         conflicts = []
 
@@ -427,10 +410,10 @@ class KnowledgeBase:
         return len(intersection) / len(union) if union else 0.0
 
     def add_knowledge(self, knowledge_type: KnowledgeType, title: str, content: str,
-                    tags: Optional[Set[str]] = None,
+                    tags: set[str] | None = None,
                     provenance: str = "",
                     confidence: float = 1.0,
-                    metadata: Optional[Dict[str, Any]] = None,
+                    metadata: dict[str, Any] | None = None,
                     conflict_strategy: ConflictStrategy = ConflictStrategy.HIGHEST_CONFIDENCE) -> KnowledgeEntry:
         """Add new knowledge entry."""
         entry = KnowledgeEntry(
@@ -469,10 +452,10 @@ class KnowledgeBase:
         knowledge_type: KnowledgeType,
         title: str,
         content: str,
-        tags: Optional[Set[str]] = None,
+        tags: set[str] | None = None,
         provenance: str = "",
         confidence: float = 1.0,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> KnowledgeEntry:
         """Insert or update a knowledge entry with a stable ID.
 
@@ -509,116 +492,18 @@ class KnowledgeBase:
         self._save_vectors()
         return entry
 
-    def sync_memory_snapshot(
-        self,
-        archive_path: str,
-        user_request: str,
-        summary_text: str,
-        history_text: str,
-        task_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Import a task snapshot into the knowledge base.
-
-        The goal is to expose memory as searchable knowledge without requiring
-        any manual data-entry fields in the UI.
-        """
-        base_key = archive_path or user_request or summary_text
-        base_id = self._stable_id("memory", base_key)
-        short_title = (user_request or "任务记忆").strip()[:40]
-
-        summary_entry = self.upsert_knowledge(
-            entry_id=self._stable_id("memory-summary", base_key),
-            knowledge_type=KnowledgeType.WORKFLOW,
-            title=f"记忆摘要: {short_title}",
-            content=summary_text.strip() if summary_text else history_text[:1500],
-            tags={"memory", "summary", "workflow"},
-            provenance=archive_path,
-            confidence=0.9,
-            metadata={
-                "kind": "summary",
-                "task_id": task_id,
-                "user_request": user_request,
-                "archive_path": archive_path,
-                "base_id": base_id,
-            },
-        )
-
-        archive_entry = self.upsert_knowledge(
-            entry_id=self._stable_id("memory-archive", base_key),
-            knowledge_type=KnowledgeType.FACT,
-            title=f"完整记忆: {short_title}",
-            content=history_text.strip(),
-            tags={"memory", "archive", "full"},
-            provenance=archive_path,
-            confidence=0.85,
-            metadata={
-                "kind": "archive",
-                "task_id": task_id,
-                "user_request": user_request,
-                "archive_path": archive_path,
-                "base_id": base_id,
-            },
-        )
-
-        fragment_entries: List[KnowledgeEntry] = []
-        important_lines = [
-            line.strip()
-            for line in history_text.splitlines()
-            if line.strip()
-        ]
-
-        keep_markers = (
-            "【用户请求】",
-            "【AI响应】",
-            "【最终回应】",
-            "执行 ",
-            "结果:",
-        )
-
-        fragment_count = 0
-        for index, line in enumerate(important_lines):
-            if not line.startswith(keep_markers):
-                continue
-            fragment_count += 1
-            fragment_entries.append(
-                self.upsert_knowledge(
-                    entry_id=self._stable_id(f"memory-fragment-{fragment_count}", f"{base_key}:{index}"),
-                    knowledge_type=KnowledgeType.CUSTOM,
-                    title=f"记忆片段 {fragment_count}: {short_title}",
-                    content=line[:2000],
-                    tags={"memory", "fragment"},
-                    provenance=archive_path,
-                    confidence=0.8,
-                    metadata={
-                        "kind": "fragment",
-                        "line_index": index,
-                        "task_id": task_id,
-                        "user_request": user_request,
-                        "archive_path": archive_path,
-                        "base_id": base_id,
-                    },
-                )
-            )
-            if fragment_count >= 12:
-                break
-
-        return {
-            "summary_entry_id": summary_entry.id,
-            "archive_entry_id": archive_entry.id,
-            "fragment_count": len(fragment_entries),
-            "archive_path": archive_path,
-        }
-
-    def _find_similar_entry(self, title: str, ktype: KnowledgeType) -> Optional[KnowledgeEntry]:
+    def _find_similar_entry(self, title: str, ktype: KnowledgeType) -> KnowledgeEntry | None:
         """Find similar entry by title and type."""
         for entry in self._entries.values():
-            if entry.knowledge_type == ktype:
-                if self._calculate_similarity(title, entry.title) > 0.7:
-                    return entry
+            if (
+                entry.knowledge_type == ktype
+                and self._calculate_similarity(title, entry.title) > 0.7
+            ):
+                return entry
         return None
 
     def _handle_conflicts(self, new_entry: KnowledgeEntry, existing: KnowledgeEntry,
-                         conflicts: List[ConflictRecord], strategy: ConflictStrategy):
+                         conflicts: list[ConflictRecord], strategy: ConflictStrategy):
         """Handle detected conflicts."""
         # Record conflicts
         self._conflicts.extend(conflicts)
@@ -678,32 +563,6 @@ class KnowledgeBase:
 
         self._save_index()
 
-    def update_knowledge(self, entry_id: str, title: Optional[str] = None,
-                        content: Optional[str] = None, tags: Optional[Set[str]] = None,
-                        metadata: Optional[Dict[str, Any]] = None) -> Optional[KnowledgeEntry]:
-        """Update existing knowledge entry."""
-        if entry_id not in self._entries:
-            return None
-
-        entry = self._entries[entry_id]
-        entry.updated_at = datetime.now()
-        entry.version += 1
-
-        if title:
-            entry.title = title
-        if content:
-            entry.content = content
-        if tags:
-            entry.tags = tags
-        if metadata:
-            entry.metadata.update(metadata)
-
-        self._rebuild_index()
-        self._upsert_vector(entry)
-        self._save_knowledge()
-        self._save_vectors()
-        return entry
-
     def delete_knowledge(self, entry_id: str) -> bool:
         """Delete knowledge entry."""
         if entry_id in self._entries:
@@ -719,7 +578,7 @@ class KnowledgeBase:
             return True
         return False
 
-    def _keyword_score(self, entry: KnowledgeEntry, query_words: Set[str]) -> float:
+    def _keyword_score(self, entry: KnowledgeEntry, query_words: set[str]) -> float:
         """Calculate lexical relevance score."""
         title_text = entry.title.lower()
         content_text = entry.content.lower()
@@ -752,8 +611,8 @@ class KnowledgeBase:
             + (entry.confidence * 0.5)
         )
 
-    def search(self, query: str, knowledge_type: Optional[KnowledgeType] = None,
-              tags: Optional[List[str]] = None, limit: int = 10) -> List[Tuple[KnowledgeEntry, float]]:
+    def search(self, query: str, knowledge_type: KnowledgeType | None = None,
+              tags: list[str] | None = None, limit: int = 10) -> list[tuple[KnowledgeEntry, float]]:
         """Search knowledge with vector-first hybrid relevance ranking."""
         query_words = set(re.findall(r'\w+', query.lower()))
         results = []
@@ -810,32 +669,6 @@ class KnowledgeBase:
         self._last_retrieved = results[:limit]
         return self._last_retrieved
 
-    def retrieve_workflows(self, context: Optional[Dict[str, Any]] = None) -> List[KnowledgeEntry]:
-        """Retrieve relevant workflows based on context."""
-        if context is None:
-            context = {}
-
-        query = context.get("query", "")
-        if query:
-            results = self.search(query, KnowledgeType.WORKFLOW, limit=5)
-            return [r[0] for r in results]
-
-        # Return recent workflows
-        workflows = [e for e in self._entries.values()
-                    if e.knowledge_type == KnowledgeType.WORKFLOW and e.status == "active"]
-        return sorted(workflows, key=lambda x: x.usage_count, reverse=True)[:5]
-
-    def retrieve_cases(self, domain: Optional[str] = None) -> List[KnowledgeEntry]:
-        """Retrieve success cases."""
-        cases = [e for e in self._entries.values()
-                if e.knowledge_type == KnowledgeType.SUCCESS_CASE and e.status == "active"]
-
-        if domain:
-            cases = [c for c in cases if domain.lower() in c.title.lower() or
-                    domain.lower() in ' '.join(c.tags)]
-
-        return sorted(cases, key=lambda x: x.confidence, reverse=True)[:10]
-
     def generate_prompt_context(self, query: str, limit: int = 5) -> str:
         """Generate compact knowledge context for the agent prompt."""
         results = self.search(query, limit=limit)
@@ -853,41 +686,6 @@ class KnowledgeBase:
                 f"(score={score:.3f}, tags={tags}): {content}"
             )
         return "\n".join(lines)
-
-    def build_query_context(
-        self,
-        user_request: str,
-        current_context: str = "",
-        accumulated_compression: str = "",
-        execution_history: str = "",
-        limit: int = 5,
-    ) -> str:
-        """Build a richer query from all available task context."""
-        parts = [user_request.strip(), current_context.strip()]
-        if accumulated_compression:
-            parts.append(accumulated_compression.strip())
-        if execution_history:
-            parts.append(execution_history.strip())
-
-        query = "\n".join([p for p in parts if p])
-        if not query:
-            query = user_request.strip() or "记忆"
-
-        query = query[:6000]
-        context = self.generate_prompt_context(query, limit=limit)
-        if context != "（暂无相关知识）":
-            return context
-
-        fallback_parts = []
-        if accumulated_compression:
-            fallback_parts.append(accumulated_compression[:2000])
-        if execution_history:
-            fallback_parts.append(execution_history[:2000])
-
-        fallback_query = "\n".join([p for p in fallback_parts if p]).strip()
-        if fallback_query:
-            context = self.generate_prompt_context(fallback_query, limit=limit)
-        return context
 
     def _prepare_memory_extract_text(self, memory_text: str, max_chars: int = 12000) -> str:
         """Trim noisy runtime records before sending memory to the extraction model."""
@@ -919,18 +717,16 @@ class KnowledgeBase:
                 break
         return "\n".join(lines).strip()
 
-    def _parse_ai_json(self, ai_content: str) -> Optional[Dict[str, Any]]:
+    def _parse_ai_json(self, ai_content: str) -> dict[str, Any] | None:
         """Parse model JSON output using the same tolerant strategy as preferences."""
         content = re.sub(r"<think>[\s\S]*?</think>", "", ai_content, flags=re.DOTALL).strip()
         content = re.sub(r"<minimax:tool_call>[\s\S]*?</minimax:tool_call>", "", content, flags=re.DOTALL).strip()
         content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE).strip()
         content = re.sub(r"\s*```$", "", content).strip()
 
-        parsed: Optional[Any] = None
-        try:
+        parsed: Any | None = None
+        with suppress(json.JSONDecodeError):
             parsed = json.loads(content)
-        except json.JSONDecodeError:
-            pass
 
         if parsed is None:
             match = re.search(r"\{[\s\S]*\}", content)
@@ -963,10 +759,10 @@ class KnowledgeBase:
         memory_text: str,
         archive_path: str = "",
         task_id: str = "",
-        api_base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        api_base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         """Use AI to extract reusable knowledge from full memory text.
 
         This is the main path for the competition requirement: automatically
@@ -1108,60 +904,7 @@ knowledge_type 必须是以下之一：workflow, success_case, template, fact, r
         except Exception as e:
             return {"success": False, "message": f"提取失败: {e}", "extracted_count": 0}
 
-    def get_last_retrieved_summary(self) -> str:
-        """Summarize the most recent knowledge retrieval."""
-        if not self._last_retrieved:
-            return "（未检索到知识片段）"
-
-        lines = ["【知识命中】"]
-        for entry, score in self._last_retrieved:
-            snippet = entry.content.strip().replace("\n", " ")
-            if len(snippet) > 180:
-                snippet = snippet[:180] + "..."
-            lines.append(f"- {entry.title} (score={score:.3f}): {snippet}")
-        return "\n".join(lines)
-
-    def get_last_retrieved_entries(self) -> List[Dict[str, Any]]:
-        """Return the most recent retrieved entries as dictionaries."""
-        return [
-            {
-                "id": entry.id,
-                "title": entry.title,
-                "knowledge_type": entry.knowledge_type.value,
-                "score": score,
-                "content": entry.content,
-                "tags": sorted(entry.tags),
-            }
-            for entry, score in self._last_retrieved
-        ]
-
-    def format_last_retrieved_entries(self, max_content_length: int = 240) -> str:
-        """Format the most recent retrieval results for display."""
-        lines = ["【知识附录】", f"{len(self._last_retrieved)} 条片段"]
-        if not self._last_retrieved:
-            lines.append("（本轮未命中知识）")
-            return "\n".join(lines)
-
-        for idx, (entry, score) in enumerate(self._last_retrieved, 1):
-            snippet = entry.content.strip().replace("\n", " ")
-            if len(snippet) > max_content_length:
-                snippet = snippet[:max_content_length] + "..."
-            tags = ", ".join(sorted(entry.tags)) if entry.tags else "none"
-            lines.append(
-                f"{idx}. [{entry.knowledge_type.value}] {entry.title} "
-                f"(score={score:.3f}, tags={tags})"
-            )
-            lines.append(f"   {snippet}")
-        return "\n".join(lines)
-
-    def record_usage(self, entry_id: str):
-        """Record knowledge usage for analytics."""
-        if entry_id in self._entries:
-            self._entries[entry_id].usage_count += 1
-            self._entries[entry_id].last_used = datetime.now()
-            self._save_knowledge()
-
-    def get_knowledge_stats(self) -> Dict[str, Any]:
+    def get_knowledge_stats(self) -> dict[str, Any]:
         """Get knowledge base statistics."""
         by_type = {}
         for entry in self._entries.values():
@@ -1179,8 +922,8 @@ knowledge_type 必须是以下之一：workflow, success_case, template, fact, r
             "vector_status": self.get_vector_status()
         }
 
-    def list_entries(self, knowledge_type: Optional[KnowledgeType] = None,
-                    status: str = "active", limit: int = 50) -> List[KnowledgeEntry]:
+    def list_entries(self, knowledge_type: KnowledgeType | None = None,
+                    status: str = "active", limit: int = 50) -> list[KnowledgeEntry]:
         """List knowledge entries with filters."""
         entries = list(self._entries.values())
 
@@ -1192,7 +935,7 @@ knowledge_type 必须是以下之一：workflow, success_case, template, fact, r
 
         return sorted(entries, key=lambda x: x.updated_at, reverse=True)[:limit]
 
-    def get_conflicts(self, unresolved_only: bool = True) -> List[Dict[str, Any]]:
+    def get_conflicts(self, unresolved_only: bool = True) -> list[dict[str, Any]]:
         """Get conflict records."""
         conflicts = []
         for c in self._conflicts:
@@ -1213,46 +956,3 @@ knowledge_type 必须是以下之一：workflow, success_case, template, fact, r
             })
         return conflicts
 
-    def resolve_conflict(self, conflict_id: str, resolution: str, resolved_by: str = "user"):
-        """Resolve a recorded conflict."""
-        for c in self._conflicts:
-            if c.id == conflict_id:
-                c.resolution = resolution
-                c.resolved_at = datetime.now()
-                c.resolved_by = resolved_by
-                self._save_conflicts()
-                return True
-        return False
-
-    def add_workflow(self, title: str, steps: List[Dict[str, Any]],
-                    description: str = "", tags: Optional[Set[str]] = None) -> KnowledgeEntry:
-        """Convenience method to add a workflow."""
-        content = json.dumps(steps, ensure_ascii=False, indent=2)
-        return self.add_knowledge(
-            knowledge_type=KnowledgeType.WORKFLOW,
-            title=title,
-            content=content,
-            tags=tags or {"workflow"},
-            metadata={"step_count": len(steps), "description": description}
-        )
-
-    def add_success_case(self, title: str, case_data: Dict[str, Any],
-                        tags: Optional[Set[str]] = None) -> KnowledgeEntry:
-        """Convenience method to add a success case."""
-        content = json.dumps(case_data, ensure_ascii=False, indent=2)
-        return self.add_knowledge(
-            knowledge_type=KnowledgeType.SUCCESS_CASE,
-            title=title,
-            content=content,
-            tags=tags or {"success-case"}
-        )
-
-    def add_template(self, title: str, template_content: str,
-                    tags: Optional[Set[str]] = None) -> KnowledgeEntry:
-        """Convenience method to add a template."""
-        return self.add_knowledge(
-            knowledge_type=KnowledgeType.TEMPLATE,
-            title=title,
-            content=template_content,
-            tags=tags or {"template"}
-        )

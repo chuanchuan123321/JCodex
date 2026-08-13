@@ -14,7 +14,6 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from agent.core.ai_engine import ToolCall
 from agent.core.langchain_model import AIEngineChatModel
 from agent.core.langgraph_runner import (
     LangGraphRunner,

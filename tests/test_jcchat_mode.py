@@ -11,7 +11,6 @@ from agent.core.extended_tool_executor import ExtendedToolExecutor
 from agent.core.memory_manager import MemoryManager
 from agent.ui.desktop import main as desktop
 
-
 PNG_BYTES = b"\x89PNG\r\n\x1a\nimage-data"
 
 
@@ -72,11 +71,11 @@ def _install(monkeypatch, tmp_path, name: str = "jcchat"):
     executor.ai_engine = _FakeAIEngine()
     executor.tool_executor = ExtendedToolExecutor(preview_manager=object())
     executor.compress_at = 999999
-    monkeypatch.setattr(desktop, "conversation_store", store)
-    desktop.conversation_runs.clear()
-    desktop.conversation_executors.clear()
-    desktop.conversation_generations.clear()
-    desktop.conversation_executors[conversation["id"]] = executor
+    monkeypatch.setattr(desktop.runtime, "conversation_store", store)
+    desktop.runtime.conversation_runs.clear()
+    desktop.runtime.conversation_executors.clear()
+    desktop.runtime.conversation_generations.clear()
+    desktop.runtime.conversation_executors[conversation["id"]] = executor
     return store, conversation, executor
 
 
@@ -100,7 +99,7 @@ def test_jcchat_runs_tool_free_chat_turn(monkeypatch, tmp_path) -> None:
     )
 
     assert result == {"status": "processing"}
-    assert desktop.conversation_runs[conversation["id"]].mode == "jcchat"
+    assert desktop.runtime.conversation_runs[conversation["id"]].mode == "jcchat"
     _wait_for_finish(conversation["id"], message_id)
 
     engine = executor.ai_engine
@@ -127,7 +126,7 @@ def test_jcchat_mode_is_isolated_from_jcodex_mode(monkeypatch, tmp_path) -> None
     )
 
     assert result == {"status": "processing"}
-    assert desktop.conversation_runs[conversation["id"]].mode == "jcodex"
+    assert desktop.runtime.conversation_runs[conversation["id"]].mode == "jcodex"
     _wait_for_finish(conversation["id"], message_id)
 
     engine = executor.ai_engine
@@ -138,7 +137,7 @@ def test_jcchat_mode_is_isolated_from_jcodex_mode(monkeypatch, tmp_path) -> None
 def test_jcchat_token_count_reports_system_and_message_tokens(
     monkeypatch, tmp_path
 ) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
+    _store, conversation, _executor = _install(monkeypatch, tmp_path)
     message_id = 403
 
     result = desktop.send_message(
@@ -163,7 +162,7 @@ def test_jcchat_token_count_reports_system_and_message_tokens(
 def test_jcchat_writes_chat_content_to_execution_history(
     monkeypatch, tmp_path
 ) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
+    _store, conversation, executor = _install(monkeypatch, tmp_path)
     message_id = 404
 
     result = desktop.send_message(
@@ -183,7 +182,7 @@ def test_jcchat_writes_chat_content_to_execution_history(
 def test_jcchat_includes_compressed_summary_in_system_prompt(
     monkeypatch, tmp_path
 ) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
+    _store, conversation, executor = _install(monkeypatch, tmp_path)
     executor.accumulated_compression = "压缩摘要：用户之前问过天气。"
     message_id = 405
 
@@ -204,7 +203,7 @@ def test_jcchat_includes_compressed_summary_in_system_prompt(
 
 
 def test_jcchat_uses_custom_system_prompt(monkeypatch, tmp_path) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
+    _store, conversation, executor = _install(monkeypatch, tmp_path)
     message_id = 406
     previous = os.environ.get("CUSTOM_SYSTEM_PROMPT")
     try:
@@ -230,7 +229,7 @@ def test_jcchat_uses_custom_system_prompt(monkeypatch, tmp_path) -> None:
 def test_jcchat_image_attachment_embeds_multimodal_content(
     monkeypatch, tmp_path
 ) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
+    _store, conversation, executor = _install(monkeypatch, tmp_path)
     message_id = 407
     previous = os.environ.get("MODEL_SUPPORTS_VISION")
     try:
@@ -279,7 +278,7 @@ def test_jcchat_image_attachment_embeds_multimodal_content(
 def test_jcchat_image_attachment_with_vision_off_has_no_tools(
     monkeypatch, tmp_path
 ) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
+    _store, conversation, executor = _install(monkeypatch, tmp_path)
     message_id = 408
     previous = os.environ.get("MODEL_SUPPORTS_VISION")
     try:
@@ -315,8 +314,8 @@ def test_jcchat_image_attachment_with_vision_off_has_no_tools(
 def test_jcchat_text_file_attachment_is_parsed_into_message(
     monkeypatch, tmp_path
 ) -> None:
-    store, conversation, executor = _install(monkeypatch, tmp_path)
-    monkeypatch.setattr(desktop, "DATA_ROOT", tmp_path)
+    _store, conversation, executor = _install(monkeypatch, tmp_path)
+    monkeypatch.setattr(desktop.constants, "DATA_ROOT", tmp_path)
     message_id = 409
 
     result = desktop.send_message(

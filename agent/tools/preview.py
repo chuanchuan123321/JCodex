@@ -14,9 +14,11 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 try:
@@ -25,7 +27,7 @@ except ImportError:  # pragma: no cover - reported clearly on unsupported instal
     psutil = None
 
 
-EventCallback = Callable[[Dict[str, Any]], None]
+EventCallback = Callable[[dict[str, Any]], None]
 
 _ACTIVE_STATUSES = {"starting", "ready", "stopping"}
 _SENSITIVE_ENV_MARKERS = (
@@ -58,7 +60,7 @@ _WINDOWS_PREVIEW_VARIABLE_PATTERN = re.compile(
     r"\$\{(?P<braced>HOST|PORT)\}|\$(?P<plain>HOST|PORT)\b"
 )
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-ListenerEndpoint = Tuple[str, int]
+ListenerEndpoint = tuple[str, int]
 
 
 @dataclass
@@ -76,17 +78,17 @@ class _PreviewProcess:
     conversation_id: str
     message_id: str
     log_path: Path
-    process: Optional[subprocess.Popen] = None
+    process: subprocess.Popen | None = None
     status: str = "starting"
     error: str = ""
     stop_reason: str = ""
     started_at: float = field(default_factory=time.time)
-    ready_at: Optional[float] = None
-    stopped_at: Optional[float] = None
+    ready_at: float | None = None
+    stopped_at: float | None = None
     stop_requested: bool = False
     state_event: threading.Event = field(default_factory=threading.Event)
     log_tail: bytearray = field(default_factory=bytearray)
-    managed_processes: Dict[int, float] = field(default_factory=dict)
+    managed_processes: dict[int, float] = field(default_factory=dict)
 
 
 class PreviewManager:
@@ -99,9 +101,9 @@ class PreviewManager:
 
     def __init__(
         self,
-        project_root: Union[str, Path],
-        event_callback: Optional[EventCallback] = None,
-        log_dir: Optional[Union[str, Path]] = None,
+        project_root: str | Path,
+        event_callback: EventCallback | None = None,
+        log_dir: str | Path | None = None,
     ) -> None:
         self.project_root = Path(project_root).expanduser().resolve()
         if not self.project_root.is_dir():
@@ -116,27 +118,23 @@ class PreviewManager:
         self.log_dir = raw_log_dir.resolve()
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.event_callback = event_callback
-        self._previews: Dict[str, _PreviewProcess] = {}
+        self._previews: dict[str, _PreviewProcess] = {}
         self._lock = threading.RLock()
         self._prune_logs()
         atexit.register(self.stop_all)
 
-    def set_event_callback(self, callback: Optional[EventCallback]) -> None:
-        """Replace the callback used for lifecycle event delivery."""
-        self.event_callback = callback
-
     def start(
         self,
         command: str,
-        workdir: Union[str, Path] = ".",
-        name: Optional[str] = None,
+        workdir: str | Path = ".",
+        name: str | None = None,
         port: int = 0,
         health_path: str = "/",
         startup_timeout: float = 20,
-        conversation_id: Optional[str] = None,
-        message_id: Optional[str] = None,
-        entry_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        conversation_id: str | None = None,
+        message_id: str | None = None,
+        entry_path: str | None = None,
+    ) -> dict[str, Any]:
         """Start a server, wait until it accepts HTTP connections, and retain it."""
         preview_id = uuid.uuid4().hex
         conversation_id = str(conversation_id or "")
@@ -294,9 +292,9 @@ class PreviewManager:
 
     def status(
         self,
-        preview_id: Optional[str] = None,
-        conversation_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        preview_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
         """Return one preview or all previews belonging to a conversation."""
         if preview_id:
             with self._lock:
@@ -330,7 +328,7 @@ class PreviewManager:
             "previews": [self._snapshot(record) for record in records],
         }
 
-    def stop(self, preview_id: str, reason: str = "user") -> Dict[str, Any]:
+    def stop(self, preview_id: str, reason: str = "user") -> dict[str, Any]:
         """Stop one preview and its complete process group."""
         if not preview_id:
             return {
@@ -357,7 +355,7 @@ class PreviewManager:
         self._mark_stopped(record)
         return self._snapshot(record)
 
-    def stop_conversation(self, conversation_id: str) -> Dict[str, Any]:
+    def stop_conversation(self, conversation_id: str) -> dict[str, Any]:
         """Stop every active preview owned by a conversation."""
         conversation_id = str(conversation_id or "")
         with self._lock:
@@ -377,7 +375,7 @@ class PreviewManager:
             "stopped": results,
         }
 
-    def clear_conversation(self, conversation_id: str) -> Dict[str, Any]:
+    def clear_conversation(self, conversation_id: str) -> dict[str, Any]:
         """Stop and forget every preview owned by a cleared conversation."""
         conversation_id = str(conversation_id or "")
         stopped = self.stop_conversation(conversation_id)
@@ -390,16 +388,14 @@ class PreviewManager:
             for record in records:
                 self._previews.pop(record.preview_id, None)
         for record in records:
-            try:
+            with suppress(OSError):
                 record.log_path.unlink(missing_ok=True)
-            except OSError:
-                pass
         return {
             **stopped,
             "cleared": [record.preview_id for record in records],
         }
 
-    def stop_all(self) -> Dict[str, Any]:
+    def stop_all(self) -> dict[str, Any]:
         """Stop all processes. Safe to call repeatedly during application exit."""
         with self._lock:
             preview_ids = [
@@ -413,14 +409,14 @@ class PreviewManager:
         ]
         return {"success": True, "stopped": results}
 
-    def _resolve_path(self, path: Union[str, Path]) -> Path:
+    def _resolve_path(self, path: str | Path) -> Path:
         """Resolve relative paths from the task root and accept absolute folders."""
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
             candidate = self.project_root / candidate
         return candidate.resolve()
 
-    def _resolve_workdir(self, workdir: Union[str, Path]) -> Path:
+    def _resolve_workdir(self, workdir: str | Path) -> Path:
         path = self._resolve_path(workdir or ".")
         if not path.is_dir():
             raise ValueError(f"Preview workdir does not exist: {path}")
@@ -428,7 +424,7 @@ class PreviewManager:
 
     @classmethod
     def _resolve_entry_path(
-        cls, workdir: Path, entry_path: Optional[str]
+        cls, workdir: Path, entry_path: str | None
     ) -> str:
         """Resolve an explicit page target or a useful static-site default."""
         raw_path = str(entry_path or "").strip()
@@ -549,7 +545,7 @@ class PreviewManager:
         return _WINDOWS_PREVIEW_VARIABLE_PATTERN.sub(windows_variable, command)
 
     @classmethod
-    def _build_popen_options(cls) -> Dict[str, Any]:
+    def _build_popen_options(cls) -> dict[str, Any]:
         """Create an isolated process group using each platform's mechanism."""
         if not cls._is_windows():
             return {"start_new_session": True}
@@ -633,10 +629,9 @@ class PreviewManager:
             suffix = "".join(f" {shlex.quote(token)}" for token in remaining)
             return f'{match.group("prefix")} "$PORT" --bind "$HOST"{suffix}'
 
-        normalized = _PYTHON_HTTP_SERVER_PATTERN.sub(
+        return _PYTHON_HTTP_SERVER_PATTERN.sub(
             normalize_python_http_server, command
         )
-        return normalized
 
     @staticmethod
     def _validate_health_path(health_path: str) -> str:
@@ -654,7 +649,7 @@ class PreviewManager:
         workdir: Path,
         conversation_id: str,
         requested_port: int,
-    ) -> Optional[_PreviewProcess]:
+    ) -> _PreviewProcess | None:
         with self._lock:
             records = list(self._previews.values())
         for record in records:
@@ -664,9 +659,10 @@ class PreviewManager:
                 and record.conversation_id == conversation_id
                 and record.status in {"starting", "ready"}
                 and (requested_port == 0 or record.port == requested_port)
+                and record.process is not None
+                and record.process.poll() is None
             ):
-                if record.process is not None and record.process.poll() is None:
-                    return record
+                return record
         return None
 
     def _select_port(self, requested_port: int) -> int:
@@ -705,7 +701,7 @@ class PreviewManager:
             marker in upper_key for marker in _SENSITIVE_ENV_MARKERS
         )
 
-    def _build_environment(self, port: int, url: str) -> Dict[str, str]:
+    def _build_environment(self, port: int, url: str) -> dict[str, str]:
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -883,8 +879,8 @@ class PreviewManager:
     def _discover_process_group_http_endpoint(
         self,
         record: _PreviewProcess,
-        endpoints: Optional[Set[ListenerEndpoint]] = None,
-    ) -> Optional[ListenerEndpoint]:
+        endpoints: set[ListenerEndpoint] | None = None,
+    ) -> ListenerEndpoint | None:
         """Find one loopback HTTP endpoint owned by this preview process group."""
         if endpoints is None:
             endpoints, unsafe_listener = self._process_group_listener_endpoints(record)
@@ -920,7 +916,7 @@ class PreviewManager:
 
     def _process_group_listener_endpoints(
         self, record: _PreviewProcess
-    ) -> Tuple[Optional[Set[ListenerEndpoint]], bool]:
+    ) -> tuple[set[ListenerEndpoint] | None, bool]:
         """Return this process group's loopback endpoints and unsafe bind state."""
         process = record.process
         if process is None or process.poll() is not None:
@@ -958,7 +954,7 @@ class PreviewManager:
         except (OSError, subprocess.SubprocessError):
             return None, False
 
-        endpoints: Set[ListenerEndpoint] = set()
+        endpoints: set[ListenerEndpoint] = set()
         for line in result.stdout.splitlines():
             if not line.startswith("n"):
                 continue
@@ -976,7 +972,7 @@ class PreviewManager:
 
     def _windows_listener_endpoints(
         self, record: _PreviewProcess
-    ) -> Tuple[Optional[Set[ListenerEndpoint]], bool]:
+    ) -> tuple[set[ListenerEndpoint] | None, bool]:
         """Inspect Windows launcher descendants for TCP listeners via psutil."""
         if psutil is None:
             return None, True
@@ -1000,7 +996,7 @@ class PreviewManager:
         if not processes:
             return None, True
 
-        endpoints: Set[ListenerEndpoint] = set()
+        endpoints: set[ListenerEndpoint] = set()
         for owned_process in processes:
             try:
                 pid = int(owned_process.pid)
@@ -1072,10 +1068,8 @@ class PreviewManager:
         except (OSError, ValueError):
             return
         finally:
-            try:
+            with suppress(OSError, ValueError):
                 process.stdout.close()
-            except (OSError, ValueError):
-                pass
 
     def _terminate_process(self, record: _PreviewProcess) -> None:
         process = record.process
@@ -1089,36 +1083,26 @@ class PreviewManager:
         try:
             os.killpg(process_group, signal.SIGTERM)
         except (OSError, ProcessLookupError):
-            try:
+            with suppress(OSError):
                 process.terminate()
-            except OSError:
-                pass
 
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline and self._process_group_exists(process_group):
-            try:
+            with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=0.05)
-            except subprocess.TimeoutExpired:
-                pass
             time.sleep(0.05)
         if not self._process_group_exists(process_group):
-            try:
+            with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=0.1)
-            except subprocess.TimeoutExpired:
-                pass
             return
 
         try:
             os.killpg(process_group, signal.SIGKILL)
         except (OSError, ProcessLookupError):
-            try:
+            with suppress(OSError):
                 process.kill()
-            except OSError:
-                pass
-        try:
+        with suppress(subprocess.TimeoutExpired):
             process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            pass
 
     def _terminate_windows_process_tree(self, record: _PreviewProcess) -> None:
         """Stop the cmd.exe launcher and every preview child on Windows."""
@@ -1152,17 +1136,13 @@ class PreviewManager:
                 taskkill_available = False
                 break
         if not taskkill_available and process.poll() is None:
-            try:
+            with suppress(OSError):
                 process.kill()
-            except OSError:
-                pass
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            try:
+            with suppress(OSError):
                 process.kill()
-            except OSError:
-                pass
 
     @staticmethod
     def _process_group_exists(process_group: int) -> bool:
@@ -1213,11 +1193,11 @@ class PreviewManager:
 
     def _snapshot(
         self, record: _PreviewProcess, include_log: bool = False
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         with self._lock:
             process = record.process
-            result: Dict[str, Any] = {
-                "success": record.status not in {"error"},
+            result: dict[str, Any] = {
+                "success": record.status != "error",
                 "preview_id": record.preview_id,
                 "status": record.status,
                 "name": record.name,
@@ -1261,11 +1241,9 @@ class PreviewManager:
             payload["log_tail"] = bytes(record.log_tail).decode(
                 "utf-8", errors="replace"
             )
-        try:
+        # A UI callback failure must never orphan the managed process.
+        with suppress(Exception):
             callback(payload)
-        except Exception:
-            # A UI callback failure must never orphan the managed process.
-            pass
 
     def _emit_error_payload(
         self,
@@ -1296,10 +1274,8 @@ class PreviewManager:
             "log_tail": "",
             "event_at_ms": int(time.time() * 1000),
         }
-        try:
+        with suppress(Exception):
             callback(payload)
-        except Exception:
-            pass
 
     def _prune_logs(self) -> None:
         try:

@@ -10,19 +10,18 @@ import re
 import shutil
 import sqlite3
 import threading
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from agent.core.embedding_provider import (
     BaseEmbeddingProvider,
-    cosine_similarity,
     create_embedding_provider,
     l2_distance,
 )
 from agent.core.env_utils import env_float, env_int
-
 
 MEMORY_CONTEXT_OPEN_TAG = "<memory-context>"
 MEMORY_CONTEXT_CLOSE_TAG = "</memory-context>"
@@ -94,7 +93,7 @@ class MemorySearchResult:
     score: float
     snippet: str
     source: str
-    created_at: Optional[int] = None
+    created_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,7 +124,7 @@ class MemoryStore:
         root_dir: str | Path,
         workspace_path: str | Path,
         *,
-        embedding_provider: Optional[BaseEmbeddingProvider] = None,
+        embedding_provider: BaseEmbeddingProvider | None = None,
         enabled: bool = True,
         include_global: bool = True,
     ) -> None:
@@ -257,7 +256,7 @@ class MemoryStore:
         query: str,
         *,
         limit: int = INITIAL_SEARCH_LIMIT,
-        min_score: Optional[float] = None,
+        min_score: float | None = None,
     ) -> list[MemorySearchResult]:
         """Run Grok's FTS5 BM25 + optional vector KNN hybrid search."""
         if not self.enabled or not str(query or "").strip() or limit <= 0:
@@ -272,7 +271,7 @@ class MemoryStore:
                     max_results=int(limit),
                     min_score=self.min_score if min_score is None else float(min_score),
                 )
-                now = int(datetime.now(timezone.utc).timestamp())
+                now = int(datetime.now(UTC).timestamp())
                 connection.executemany(
                     "UPDATE chunks SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
                     [(now, result.chunk_id) for result in results],
@@ -335,7 +334,7 @@ class MemoryStore:
                 score = self.vector_weight * vector_score
             base_scores[chunk_id] = score
 
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         ranked: list[tuple[float, MemorySearchResult]] = []
         for chunk_id, base_score in base_scores.items():
             row = connection.execute(
@@ -565,7 +564,7 @@ class MemoryStore:
         if not items:
             return ""
         parts = [MEMORY_CONTEXT_OPEN_TAG, "## Relevant Memory from Past Sessions", ""]
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         for index, result in enumerate(items, 1):
             snippet = result.snippet[:SNIPPET_MAX_CHARS]
             if len(result.snippet) > SNIPPET_MAX_CHARS:
@@ -673,7 +672,7 @@ class MemoryStore:
         return normalized[start:]
 
     @staticmethod
-    def _normalize_message(message: Any) -> Optional[dict[str, str]]:
+    def _normalize_message(message: Any) -> dict[str, str] | None:
         if isinstance(message, dict):
             role = str(message.get("role", ""))
             content = message.get("content", "")
@@ -697,13 +696,13 @@ class MemoryStore:
     def write_daily_log(
         self, *, trigger: str, session_id: str, content: str, append: bool
     ) -> Path:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date = datetime.now(UTC).strftime("%Y-%m-%d")
         slug = re.sub(r"[^a-z0-9]+", "-", trigger.lower()).strip("-") or "flush"
         sid8 = re.sub(r"[^a-zA-Z0-9]", "", session_id)[:8] or "session"
         path = self.sessions_dir / f"{date}-{slug}-{sid8}.md"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         if append and path.exists():
-            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            timestamp = datetime.now(UTC).strftime("%H:%M:%S UTC")
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(f"\n\n---\n\n<!-- flush {timestamp} -->\n\n{content}")
         else:
@@ -891,7 +890,7 @@ class MemoryStore:
                         str(chunk_id),
                         json.dumps(vector, separators=(",", ":")),
                     )
-                    for (chunk_id, _text), vector in zip(rows, vectors)
+                    for (chunk_id, _text), vector in zip(rows, vectors, strict=True)
                 ],
             )
             connection.execute(
@@ -1013,7 +1012,7 @@ class MemoryStore:
                 embeddings = self.embedding_provider.embed_batch(changed_texts)
             except Exception:
                 embeddings = []
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         seen: set[str] = set()
         embedding_index = 0
         for chunk_id, chunk, digest, changed in prepared:
@@ -1221,7 +1220,7 @@ class MemoryStore:
         return chunks
 
     @staticmethod
-    def _header_level(line: str) -> Optional[int]:
+    def _header_level(line: str) -> int | None:
         stripped = line.lstrip()
         match = re.match(r"^(#+)(?:\s|$)", stripped)
         return len(match.group(1)) if match else None

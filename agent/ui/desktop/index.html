@@ -6,7 +6,7 @@
     <title>JCodex</title>
     <link rel="icon" type="image/svg+xml" href="assets/kylin-agent-mark-light.svg" id="appFavicon">
     <link rel="stylesheet" href="vendor/katex/katex.min.css">
-    <link rel="stylesheet" href="styles.css?v=20260813-78">
+    <link rel="stylesheet" href="styles.css?v=cde36b720a">
 </head>
 <body class="theme-light">
     <a class="skip-link" href="#messageInput">跳转到输入框</a>
@@ -117,7 +117,7 @@
                     <section class="sidebar-panel sidebar-tools-section" id="sidebarPanelFiles" data-sidebar-panel-content="files" role="tabpanel" aria-labelledby="sidebarFilesTab" hidden>
                 <div class="sidebar-panel-heading">
                     <div class="section-title" id="sidebarFilesTitle">文件</div>
-                    <button class="sidebar-panel-action" type="button" onclick="refreshAllWorkspace()" title="刷新文件" aria-label="刷新文件">
+                    <button class="sidebar-panel-action" type="button" id="workspaceRefreshAll" title="刷新文件" aria-label="刷新文件">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                     </button>
                 </div>
@@ -128,7 +128,7 @@
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                             </svg>
                             <span>output</span>
-                            <button class="btn-refresh" type="button" onclick="refreshWorkspace('output')" title="刷新 output" aria-label="刷新 output">
+                            <button class="btn-refresh" type="button" id="workspaceRefreshOutput" title="刷新 output" aria-label="刷新 output">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -143,7 +143,7 @@
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                             </svg>
                             <span>temp</span>
-                            <button class="btn-refresh" type="button" onclick="refreshWorkspace('temp')" title="刷新 temp" aria-label="刷新 temp">
+                            <button class="btn-refresh" type="button" id="workspaceRefreshTemp" title="刷新 temp" aria-label="刷新 temp">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -158,7 +158,7 @@
                     <section class="sidebar-panel" id="sidebarPanelMemory" data-sidebar-panel-content="memory" role="tabpanel" aria-labelledby="sidebarMemoryTab" hidden>
                 <div class="sidebar-panel-heading">
                     <div class="section-title" id="sidebarMemoryTitle">记忆</div>
-                    <button class="sidebar-panel-action" type="button" onclick="refreshMemory()" title="刷新记忆" aria-label="刷新记忆">
+                    <button class="sidebar-panel-action" type="button" id="memoryRefresh" title="刷新记忆" aria-label="刷新记忆">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                     </button>
                 </div>
@@ -169,7 +169,7 @@
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                             </svg>
                             <span>Memory</span>
-                            <button class="btn-refresh" onclick="event.stopPropagation(); refreshMemory()" title="Refresh">
+                            <button class="btn-refresh" id="memoryFilesRefresh" title="Refresh">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -177,7 +177,7 @@
                             </button>
                         </div>
                         <div class="file-list" id="memoryFiles">
-                            <div class="file-item" onclick="openMemoryFile('execution_history')">
+                            <div class="file-item" data-memory-file="execution_history">
                                 <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                                     <polyline points="14 2 14 8 20 8"/>
@@ -186,7 +186,7 @@
                                 </svg>
                                 <span class="file-name">execution_history.md</span>
                             </div>
-                            <div class="file-item" onclick="openMemoryFile('accumulated_compression')">
+                            <div class="file-item" data-memory-file="accumulated_compression">
                                 <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                                     <polyline points="14 2 14 8 20 8"/>
@@ -195,7 +195,7 @@
                                 </svg>
                                 <span class="file-name">accumulated_compression.md</span>
                             </div>
-                            <div class="file-item" onclick="openMemoryFile('memory_context')">
+                            <div class="file-item" data-memory-file="memory_context">
                                 <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                                     <polyline points="14 2 14 8 20 8"/>
@@ -215,15 +215,15 @@
                     <div class="section-title" id="sidebarSkillsTitle">技能</div>
                     <div class="sidebar-panel-actions">
                         <input class="skill-folder-input" id="skillFolderInput" type="file" webkitdirectory directory multiple hidden aria-label="选择技能文件夹">
-                        <button class="sidebar-panel-action" id="addSkillButton" type="button" onclick="addSkill()" title="导入技能文件夹" aria-label="导入技能文件夹">
+                        <button class="sidebar-panel-action" id="addSkillButton" type="button" title="导入技能文件夹" aria-label="导入技能文件夹">
                             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
                         </button>
-                        <button class="sidebar-panel-action" type="button" onclick="refreshSkills()" title="刷新技能" aria-label="刷新技能">
+                        <button class="sidebar-panel-action" type="button" id="skillsRefresh" title="刷新技能" aria-label="刷新技能">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                         </button>
                     </div>
                 </div>
-                <button class="skill-store-entry" id="skillStoreEntry" type="button" onclick="openSkillStore()" aria-haspopup="dialog" aria-controls="skillStoreModal">
+                <button class="skill-store-entry" id="skillStoreEntry" type="button" aria-haspopup="dialog" aria-controls="skillStoreModal">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
                         <path d="M3 9l2-5h14l2 5"/><path d="M5 13v7h14v-7"/><path d="M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0"/>
                     </svg>
@@ -238,7 +238,7 @@
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                             </svg>
                             <span>Skills</span>
-                            <button class="btn-refresh" onclick="refreshSkills()" title="Refresh">
+                            <button class="btn-refresh" id="skillsFolderRefresh" title="Refresh">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -257,15 +257,15 @@
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                                 <span>运行设置</span><span class="sidebar-action-hint">›</span>
                             </button>
-                            <button class="sidebar-action-item" id="dataBtn" type="button" onclick="openDataIntegration()">
+                            <button class="sidebar-action-item" id="dataBtn" type="button">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
                                 <span>数据</span><span class="sidebar-action-hint">›</span>
                             </button>
-                            <button class="sidebar-action-item" id="archiveBtn" type="button" onclick="openArchiveModal()">
+                            <button class="sidebar-action-item" id="archiveBtn" type="button">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>
                                 <span>归档任务</span><span class="sidebar-action-hint">›</span>
                             </button>
-                            <button class="sidebar-action-item" id="scheduledBtn" type="button" onclick="openScheduledTasksModal()">
+                            <button class="sidebar-action-item" id="scheduledBtn" type="button">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
                                 <span>定时任务</span><span class="sidebar-action-hint">›</span>
                             </button>
@@ -704,7 +704,7 @@
         <div class="settings-modal-content skill-store-modal-content">
             <div class="settings-modal-header">
                 <span id="skillStoreModalTitle">技能商店</span>
-                <button class="btn-icon" type="button" onclick="closeSkillStore()" aria-label="关闭技能商店">
+                <button class="btn-icon" type="button" id="closeSkillStoreButton" aria-label="关闭技能商店">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
                 </button>
             </div>
@@ -714,10 +714,10 @@
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
                         <input id="skillStoreSearch" type="search" placeholder="搜索技能" autocomplete="off">
                     </label>
-                    <button class="skill-store-tool-button" type="button" onclick="openSkillStoreFolder()" title="打开商店目录" aria-label="打开商店目录">
+                    <button class="skill-store-tool-button" type="button" id="openSkillStoreFolderButton" title="打开商店目录" aria-label="打开商店目录">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
                     </button>
-                    <button class="skill-store-tool-button" id="skillStoreRefresh" type="button" onclick="refreshSkillStore()" title="刷新技能商店" aria-label="刷新技能商店">
+                    <button class="skill-store-tool-button" id="skillStoreRefresh" type="button" title="刷新技能商店" aria-label="刷新技能商店">
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                     </button>
                 </div>
@@ -731,7 +731,7 @@
         <div class="file-modal-content">
             <div class="file-modal-header">
                 <span class="file-modal-title" id="fileModalTitle">file.txt</span>
-                <button class="btn-icon" onclick="closeFileModal()" aria-label="关闭文件预览">
+                <button class="btn-icon" id="closeFileModalButton" aria-label="关闭文件预览">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -747,7 +747,7 @@
         <div class="settings-modal-content">
             <div class="settings-modal-header">
                 <span id="settingsModalTitle">运行设置</span>
-                <button class="btn-icon" onclick="closeSettingsModal()" aria-label="关闭运行设置">
+                <button class="btn-icon" id="closeSettingsHeaderButton" aria-label="关闭运行设置">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -758,14 +758,14 @@
                     <label class="settings-label">API 配置</label>
                     <div class="settings-inline-actions">
                         <div class="api-config-dropdown">
-                            <button type="button" class="api-config-trigger" id="configSelectTrigger" onclick="toggleApiConfigMenu()" aria-haspopup="listbox" aria-expanded="false" title="选择已保存的 API 配置">
+                            <button type="button" class="api-config-trigger" id="configSelectTrigger" aria-haspopup="listbox" aria-expanded="false" title="选择已保存的 API 配置">
                                 <span class="api-config-trigger-label" id="configSelectLabel">选择已保存配置…</span>
                                 <svg class="api-config-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
                             </button>
                             <div class="api-config-menu" id="configSelectMenu" role="listbox" hidden></div>
                         </div>
-                        <button class="btn-small" onclick="saveCurrentConfig()" title="保存当前设置">另存配置</button>
-                        <button class="btn-small btn-danger" onclick="deleteCurrentConfig()" title="删除选中配置">删除</button>
+                        <button class="btn-small" id="saveCurrentConfigButton" title="保存当前设置">另存配置</button>
+                        <button class="btn-small btn-danger" id="deleteCurrentConfigButton" title="删除选中配置">删除</button>
                     </div>
                 </div>
                 <div class="settings-divider"></div>
@@ -781,7 +781,7 @@
                     <label class="settings-label" for="settingApiModel">模型</label>
                     <div class="settings-model-row">
                         <input type="text" class="settings-input" id="settingApiModel" placeholder="deepseek-v4-pro">
-                        <button type="button" class="btn-small" id="localModelButton" onclick="openLocalModelPicker()" title="查询本地运行的模型服务">本地模型</button>
+                        <button type="button" class="btn-small" id="localModelButton" title="查询本地运行的模型服务">本地模型</button>
                     </div>
                     <div class="local-model-menu" id="localModelMenu" hidden></div>
                 </div>
@@ -813,7 +813,7 @@
                     <div class="settings-group">
                         <label class="settings-label" for="settingContextWindow">最大上下文长度 <span class="settings-optional">（Token）</span></label>
                         <div class="settings-slider-row">
-                            <input type="range" id="settingContextWindow" min="0" max="3" step="1" value="1" oninput="updateContextWindowLabel(); previewContextWindow()">
+                            <input type="range" id="settingContextWindow" min="0" max="3" step="1" value="1">
                             <span class="settings-slider-value" id="settingContextWindowValue">256K</span>
                         </div>
                         <div class="settings-slider-labels">
@@ -839,8 +839,8 @@
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closeSettingsModal()">取消</button>
-                <button class="btn-save" id="saveSettingsButton" onclick="saveSettings()">保存</button>
+                <button class="btn-cancel" id="closeSettingsButton">取消</button>
+                <button class="btn-save" id="saveSettingsButton">保存</button>
             </div>
         </div>
     </div>
@@ -850,7 +850,7 @@
         <div class="settings-modal-content" style="max-width: 700px;">
             <div class="settings-modal-header">
                 <span>归档任务</span>
-                <button class="btn-icon" onclick="closeArchiveModal()" aria-label="关闭归档任务">
+                <button class="btn-icon" id="closeArchiveButton" aria-label="关闭归档任务">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -867,8 +867,8 @@
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closeArchiveModal()">关闭</button>
-                <button class="btn-save" onclick="refreshArchivedConversations()">刷新</button>
+                <button class="btn-cancel" id="archiveCloseButton">关闭</button>
+                <button class="btn-save" id="archiveRefreshButton">刷新</button>
             </div>
         </div>
     </div>
@@ -878,7 +878,7 @@
         <div class="settings-modal-content" style="max-width: 700px;">
             <div class="settings-modal-header">
                 <span>定时任务</span>
-                <button class="btn-icon" onclick="closeScheduledTasksModal()" aria-label="关闭定时任务">
+                <button class="btn-icon" id="closeScheduledTasksButton" aria-label="关闭定时任务">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -895,8 +895,8 @@
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closeScheduledTasksModal()">关闭</button>
-                <button class="btn-save" id="scheduledTasksRefresh" onclick="loadScheduledTasks()">刷新</button>
+                <button class="btn-cancel" id="scheduledTasksCloseButton">关闭</button>
+                <button class="btn-save" id="scheduledTasksRefresh">刷新</button>
             </div>
         </div>
     </div>
@@ -906,7 +906,7 @@
         <div class="custom-dialog-content input-dialog-content">
             <div class="custom-dialog-header">
                 <span id="inputDialogTitle">输入</span>
-                <button class="btn-icon" onclick="closeInputDialog()" aria-label="关闭输入对话框">
+                <button class="btn-icon" id="closeInputDialogButton" aria-label="关闭输入对话框">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -916,8 +916,8 @@
                 <input type="text" id="inputDialogInput" class="settings-input" placeholder="" autofocus>
             </div>
             <div class="custom-dialog-footer">
-                <button class="btn-cancel" onclick="closeInputDialog()">取消</button>
-                <button class="btn-save" onclick="confirmInputDialog()">确定</button>
+                <button class="btn-cancel" id="inputDialogCancelButton">取消</button>
+                <button class="btn-save" id="inputDialogConfirmButton">确定</button>
             </div>
         </div>
     </div>
@@ -961,7 +961,7 @@
         <div class="settings-modal-content" style="max-width: 700px;">
             <div class="settings-modal-header">
                 <span>数据整合</span>
-                <button class="btn-icon" onclick="closeDataModal()" aria-label="关闭数据整合">
+                <button class="btn-icon" id="closeDataButton" aria-label="关闭数据整合">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -1004,14 +1004,14 @@
                     <div style="display: flex; gap: 8px;">
                         <input type="text" class="settings-input" id="configTypeInput" placeholder="配置类型（如：system）" style="flex: 1;">
                         <input type="text" class="settings-input" id="configDataInput" placeholder="配置数据 JSON" style="flex: 2;">
-                        <button class="btn-small" onclick="ingestConfig()">注入</button>
+                        <button class="btn-small" id="ingestConfigButton">注入</button>
                     </div>
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closeDataModal()">关闭</button>
-                <button class="btn-cancel" onclick="clearAllData()">清空数据</button>
-                <button class="btn-save" onclick="refreshDataStats()">刷新</button>
+                <button class="btn-cancel" id="dataCloseButton">关闭</button>
+                <button class="btn-cancel" id="clearAllDataButton">清空数据</button>
+                <button class="btn-save" id="refreshDataStatsButton">刷新</button>
             </div>
         </div>
     </div>
@@ -1021,7 +1021,7 @@
         <div class="settings-modal-content" style="max-width: 700px;">
             <div class="settings-modal-header">
                 <span>偏好记忆</span>
-                <button class="btn-icon" onclick="closePrefModal()" aria-label="关闭偏好记忆">
+                <button class="btn-icon" id="closePrefButton" aria-label="关闭偏好记忆">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -1031,12 +1031,12 @@
                 <div class="settings-group">
                     <label class="settings-label">偏好分类</label>
                     <div class="pref-tabs">
-                        <button class="pref-tab active" onclick="showPrefCategory('operation_habit')">操作习惯</button>
-                        <button class="pref-tab" onclick="showPrefCategory('output_style')">输出风格</button>
-                        <button class="pref-tab" onclick="showPrefCategory('security_strategy')">安全策略</button>
-                        <button class="pref-tab" onclick="showPrefCategory('ai_behavior')">AI行为</button>
-                        <button class="pref-tab" onclick="showPrefCategory('workflow')">工作流</button>
-                        <button class="pref-tab" onclick="showPrefCategory('custom')">自定义</button>
+                        <button class="pref-tab active" data-pref-category="operation_habit">操作习惯</button>
+                        <button class="pref-tab" data-pref-category="output_style">输出风格</button>
+                        <button class="pref-tab" data-pref-category="security_strategy">安全策略</button>
+                        <button class="pref-tab" data-pref-category="ai_behavior">AI行为</button>
+                        <button class="pref-tab" data-pref-category="workflow">工作流</button>
+                        <button class="pref-tab" data-pref-category="custom">自定义</button>
                     </div>
                 </div>
                 <div class="settings-divider"></div>
@@ -1064,7 +1064,7 @@
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <input type="text" class="settings-input" id="prefValueInput" placeholder="偏好值" style="flex: 2;">
-                        <button class="btn-small" onclick="addPreference()">添加/更新</button>
+                        <button class="btn-small" id="addPreferenceButton">添加/更新</button>
                     </div>
                 </div>
                 <div class="settings-divider"></div>
@@ -1074,14 +1074,14 @@
                         <div class="pref-snapshot-item">暂无可用快照</div>
                     </div>
                     <div style="margin-top: 8px;">
-                        <button class="btn-small" onclick="createPrefSnapshot()">创建快照</button>
+                        <button class="btn-small" id="createPrefSnapshotButton">创建快照</button>
                     </div>
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closePrefModal()">关闭</button>
-                <button class="btn-cancel" onclick="clearAllPreferences()">清空偏好</button>
-                <button class="btn-save" onclick="refreshPreferences()">刷新</button>
+                <button class="btn-cancel" id="prefCloseButton">关闭</button>
+                <button class="btn-cancel" id="clearAllPreferencesButton">清空偏好</button>
+                <button class="btn-save" id="refreshPreferencesButton">刷新</button>
             </div>
         </div>
     </div>
@@ -1091,7 +1091,7 @@
         <div class="settings-modal-content" style="max-width: 800px;">
             <div class="settings-modal-header">
                 <span>知识库</span>
-                <button class="btn-icon" onclick="closeKnowledgeModal()" aria-label="关闭知识库">
+                <button class="btn-icon" id="closeKnowledgeButton" aria-label="关闭知识库">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -1132,7 +1132,7 @@
                             <option value="fact">事实</option>
                             <option value="rule">规则</option>
                         </select>
-                        <button class="btn-small" onclick="searchKnowledge()">搜索</button>
+                        <button class="btn-small" id="searchKnowledgeButton">搜索</button>
                     </div>
                     <div class="kb-results" id="kbResults">
                         <div class="kb-item">输入搜索词或浏览下方知识</div>
@@ -1148,7 +1148,7 @@
                 <div class="settings-divider"></div>
                 <div class="settings-group">
                     <label class="settings-label">从完整记忆提取知识</label>
-                    <button class="btn-save" id="extractKnowledgeButton" onclick="extractKnowledgeFromMemory(this)">AI提取记忆知识</button>
+                    <button class="btn-save" id="extractKnowledgeButton">AI提取记忆知识</button>
                     <div class="kb-results" id="kbExtractResult" style="margin-top: 8px;">
                         <div class="kb-item">点击按钮后，系统会自动从完整记忆中抽取可复用知识</div>
                     </div>
@@ -1162,8 +1162,8 @@
                 </div>
             </div>
             <div class="settings-modal-footer">
-                <button class="btn-cancel" onclick="closeKnowledgeModal()">关闭</button>
-                <button class="btn-save" onclick="refreshKnowledgeBase()">刷新</button>
+                <button class="btn-cancel" id="knowledgeCloseButton">关闭</button>
+                <button class="btn-save" id="refreshKnowledgeButton">刷新</button>
             </div>
         </div>
     </div>
@@ -1185,7 +1185,7 @@
         <div class="custom-dialog-content" style="max-width: 360px;">
             <div class="custom-dialog-header">
                 <span>确认</span>
-                <button class="btn-icon" onclick="closeConfirmDialog()" aria-label="关闭确认对话框">
+                <button class="btn-icon" id="closeConfirmDialogButton" aria-label="关闭确认对话框">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -1195,14 +1195,27 @@
                 <p id="confirmDialogMessage" style="color: var(--text-secondary); line-height: 1.5;"></p>
             </div>
             <div class="custom-dialog-footer">
-                <button class="btn-cancel" onclick="closeConfirmDialog()">取消</button>
-                <button class="btn-save" onclick="confirmConfirmDialog()">确定</button>
+                <button class="btn-cancel" id="confirmDialogCancelButton">取消</button>
+                <button class="btn-save" id="confirmDialogConfirmButton">确定</button>
             </div>
         </div>
     </div>
 
     <script src="/eel.js"></script>
     <script src="vendor/katex/katex.min.js"></script>
-    <script src="app.js?v=20260813-78"></script>
+    <script src="app.js?v=7592048573"></script>
+    <script src="js/data.js?v=7b9f594d98"></script>
+    <script src="js/preferences.js?v=7eb4eebec3"></script>
+    <script src="js/knowledge.js?v=7b44897a20"></script>
+    <script src="js/workspace.js?v=d0a6450a62"></script>
+    <script src="js/settings.js?v=daa2e9690f"></script>
+    <script src="js/skills.js?v=24c599a39c"></script>
+    <script src="js/memory.js?v=4de5d3d047"></script>
+    <script src="js/review.js?v=1f0c2f3372"></script>
+    <script src="js/split-pane.js?v=3dc9f52b77"></script>
+    <script src="js/layout.js?v=8ddd9ab7fc"></script>
+    <script src="js/agent-detail.js?v=28d87e7130"></script>
+    <script src="js/dialogs.js?v=885d478f4f"></script>
+    <script src="js/quick-commands.js?v=aabaa51788"></script>
 </body>
 </html>

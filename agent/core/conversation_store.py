@@ -1,13 +1,14 @@
 """Persistent desktop conversations with isolated per-task memory."""
 
+import builtins
 import json
 import shutil
 import threading
 import uuid
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 _IMAGE_ATTACHMENT_SUFFIXES = {
     "image/png": ".png",
@@ -27,7 +28,7 @@ class ConversationStore:
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     def _ensure_index(self) -> None:
         with self._lock:
@@ -88,8 +89,8 @@ class ConversationStore:
                 self._write_index(index)
 
     def _merge_empty_untitled(
-        self, items: List[Dict[str, Any]], active_id: Optional[str]
-    ) -> List[Dict[str, Any]]:
+        self, items: list[dict[str, Any]], active_id: str | None
+    ) -> list[dict[str, Any]]:
         """Collapse duplicate auto-created empty ``新任务`` conversations.
 
         Only conversations that were never used (no messages, no project, not a
@@ -120,12 +121,10 @@ class ConversationStore:
             if str(item.get("id", "")) != keep_id
         }
         for conversation_id in removed_ids:
-            try:
+            with suppress(ValueError):
                 shutil.rmtree(
                     self._conversation_dir(conversation_id), ignore_errors=True
                 )
-            except ValueError:
-                pass
         return [
             item for item in items if str(item.get("id", "")) not in removed_ids
         ]
@@ -148,12 +147,12 @@ class ConversationStore:
         )
         temp_path.replace(path)
 
-    def _read_index(self) -> Dict[str, Any]:
+    def _read_index(self) -> dict[str, Any]:
         return self._read_json(
             self.index_file, {"active_id": None, "conversations": []}
         )
 
-    def _write_index(self, index: Dict[str, Any]) -> None:
+    def _write_index(self, index: dict[str, Any]) -> None:
         self._write_json(self.index_file, index)
 
     def _conversation_dir(self, conversation_id: str) -> Path:
@@ -214,7 +213,7 @@ class ConversationStore:
 
     def list_image_attachments(
         self, conversation_id: str, limit: int = 24
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Return recent conversation images with store-derived canonical paths.
 
         Paths embedded in old messages or memory are never trusted here.  The
@@ -230,7 +229,7 @@ class ConversationStore:
 
         with self._lock:
             conversation = self._load_required(conversation_id)
-            images: List[Dict[str, Any]] = []
+            images: list[dict[str, Any]] = []
             seen_asset_ids = set()
             for event in reversed(conversation.get("messages", [])):
                 if event.get("type") != "user":
@@ -295,15 +294,15 @@ class ConversationStore:
     def _new_conversation(
         self,
         title: str,
-        project_id: Optional[str] = None,
-        memory_scope_id: Optional[str] = None,
+        project_id: str | None = None,
+        memory_scope_id: str | None = None,
         is_split_task: bool = False,
-        parent_conversation_id: Optional[str] = None,
-        short_term_memory_id: Optional[str] = None,
-        split_conversation_id: Optional[str] = None,
+        parent_conversation_id: str | None = None,
+        short_term_memory_id: str | None = None,
+        split_conversation_id: str | None = None,
         split_open: bool = False,
         split_pane_width: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         now = self._now()
         conversation = {
             "id": str(uuid.uuid4()),
@@ -340,7 +339,7 @@ class ConversationStore:
         return (title or "新任务")[:60]
 
     @staticmethod
-    def _clean_project_id(project_id: Optional[str]) -> Optional[str]:
+    def _clean_project_id(project_id: str | None) -> str | None:
         value = str(project_id or "").strip()
         if not value:
             return None
@@ -349,7 +348,7 @@ class ConversationStore:
         return value
 
     @staticmethod
-    def _clean_memory_scope_id(memory_scope_id: Optional[str]) -> Optional[str]:
+    def _clean_memory_scope_id(memory_scope_id: str | None) -> str | None:
         """Validate the opaque identifier used by split ordinary tasks."""
         value = str(memory_scope_id or "").strip()
         if not value:
@@ -359,7 +358,7 @@ class ConversationStore:
         return value
 
     @staticmethod
-    def _clean_conversation_id(conversation_id: Optional[str]) -> Optional[str]:
+    def _clean_conversation_id(conversation_id: str | None) -> str | None:
         value = str(conversation_id or "").strip()
         if not value:
             return None
@@ -376,7 +375,7 @@ class ConversationStore:
         return max(0, min(width, 4000))
 
     @classmethod
-    def _normalize_split_state(cls, conversation: Dict[str, Any]) -> None:
+    def _normalize_split_state(cls, conversation: dict[str, Any]) -> None:
         """Migrate split tasks created before the explicit internal-task flag."""
         conversation_id = str(conversation.get("id", "") or "")
         memory_scope_id = cls._clean_memory_scope_id(
@@ -426,7 +425,7 @@ class ConversationStore:
             conversation["split_open"] = False
             conversation["split_pane_width"] = 0
 
-    def _ensure_split_memory_fork(self, conversation: Dict[str, Any]) -> bool:
+    def _ensure_split_memory_fork(self, conversation: dict[str, Any]) -> bool:
         """Detach a legacy split task from its parent's live memory directory."""
         if not conversation.get("is_split_task"):
             return False
@@ -458,7 +457,7 @@ class ConversationStore:
             return 0
 
     @classmethod
-    def _normalize_completion_state(cls, conversation: Dict[str, Any]) -> None:
+    def _normalize_completion_state(cls, conversation: dict[str, Any]) -> None:
         """Populate completion fields for both current and legacy conversations."""
         completed_id = cls._message_id(
             conversation.get("last_completed_message_id", 0)
@@ -486,7 +485,7 @@ class ConversationStore:
         conversation["last_read_message_id"] = read_id
 
     @staticmethod
-    def _metadata(conversation: Dict[str, Any]) -> Dict[str, Any]:
+    def _metadata(conversation: dict[str, Any]) -> dict[str, Any]:
         ConversationStore._normalize_split_state(conversation)
         ConversationStore._normalize_completion_state(conversation)
         return {
@@ -524,7 +523,7 @@ class ConversationStore:
             "last_read_message_id": conversation["last_read_message_id"],
         }
 
-    def _load_required(self, conversation_id: str) -> Dict[str, Any]:
+    def _load_required(self, conversation_id: str) -> dict[str, Any]:
         conversation = self._read_json(self._conversation_file(conversation_id), None)
         if not isinstance(conversation, dict):
             raise ValueError("Conversation not found")
@@ -537,7 +536,7 @@ class ConversationStore:
         return conversation
 
     @staticmethod
-    def _index_sort_time(item: Dict[str, Any]) -> str:
+    def _index_sort_time(item: dict[str, Any]) -> str:
         """Return the recency key for sidebar ordering.
 
         Only the user's latest message reorders a task; background assistant,
@@ -552,7 +551,7 @@ class ConversationStore:
             or ""
         )
 
-    def _update_index_metadata(self, conversation: Dict[str, Any]) -> None:
+    def _update_index_metadata(self, conversation: dict[str, Any]) -> None:
         index = self._read_index()
         metadata = self._metadata(conversation)
         items = [
@@ -567,7 +566,7 @@ class ConversationStore:
             index["active_id"] = conversation["id"]
         self._write_index(index)
 
-    def list(self) -> Dict[str, Any]:
+    def list(self) -> dict[str, Any]:
         with self._lock:
             index = self._read_index()
             items = list(index.get("conversations", []))
@@ -577,9 +576,9 @@ class ConversationStore:
     def create(
         self,
         title: str = "新任务",
-        project_id: Optional[str] = None,
-        memory_scope_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        project_id: str | None = None,
+        memory_scope_id: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             conversation = self._new_conversation(
                 title, project_id, memory_scope_id
@@ -591,7 +590,7 @@ class ConversationStore:
             self._write_index(index)
             return conversation
 
-    def create_split(self, source_conversation_id: str) -> Dict[str, Any]:
+    def create_split(self, source_conversation_id: str) -> dict[str, Any]:
         """Create or reopen a child task forked from current short-term context."""
         with self._lock:
             source = self._load_required(source_conversation_id)
@@ -677,7 +676,7 @@ class ConversationStore:
             self._write_index(index)
             return child
 
-    def get_split_state(self, source_conversation_id: str) -> Dict[str, Any]:
+    def get_split_state(self, source_conversation_id: str) -> dict[str, Any]:
         """Return the persisted split pane state for one primary task."""
         with self._lock:
             source = self._load_required(source_conversation_id)
@@ -706,9 +705,9 @@ class ConversationStore:
         self,
         source_conversation_id: str,
         *,
-        is_open: Optional[bool] = None,
-        width: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        is_open: bool | None = None,
+        width: int | None = None,
+    ) -> dict[str, Any]:
         """Persist pane visibility and width without changing task ordering."""
         with self._lock:
             source = self._load_required(source_conversation_id)
@@ -724,37 +723,11 @@ class ConversationStore:
             self._update_index_metadata(source)
             return self.get_split_state(source["id"])
 
-    def has_other_memory_scope_member(self, conversation_id: str) -> bool:
-        """Whether another ordinary task shares this task's memory group."""
-        with self._lock:
-            conversation = self._load_required(conversation_id)
-            scope_id = self._clean_memory_scope_id(
-                conversation.get("memory_scope_id")
-            )
-            if not scope_id:
-                return False
-            for item in self._read_index().get("conversations", []):
-                other_id = str(item.get("id", ""))
-                if other_id == conversation_id:
-                    continue
-                if self._clean_memory_scope_id(item.get("memory_scope_id")) == scope_id:
-                    return True
-            return False
-
-    def shared_memory_dir(self, memory_scope_id: str) -> Path:
-        scope_id = self._clean_memory_scope_id(memory_scope_id)
-        if not scope_id:
-            raise ValueError("Memory scope id is required")
-        path = (self.root_dir / "shared_memory" / scope_id).resolve()
-        if (self.root_dir / "shared_memory").resolve() not in path.parents:
-            raise ValueError("Invalid memory scope path")
-        return path
-
-    def load(self, conversation_id: str) -> Dict[str, Any]:
+    def load(self, conversation_id: str) -> dict[str, Any]:
         with self._lock:
             return self._load_required(conversation_id)
 
-    def set_active(self, conversation_id: str) -> Dict[str, Any]:
+    def set_active(self, conversation_id: str) -> dict[str, Any]:
         with self._lock:
             conversation = self._load_required(conversation_id)
             index = self._read_index()
@@ -762,7 +735,7 @@ class ConversationStore:
             self._write_index(index)
             return conversation
 
-    def rename(self, conversation_id: str, title: str) -> Dict[str, Any]:
+    def rename(self, conversation_id: str, title: str) -> dict[str, Any]:
         with self._lock:
             conversation = self._load_required(conversation_id)
             conversation["title"] = self._clean_title(title)
@@ -771,7 +744,7 @@ class ConversationStore:
             self._update_index_metadata(conversation)
             return conversation
 
-    def archive(self, conversation_id: str) -> Dict[str, Any]:
+    def archive(self, conversation_id: str) -> dict[str, Any]:
         """Mark a conversation as archived so it leaves the ordinary sidebar."""
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -781,7 +754,7 @@ class ConversationStore:
             self._update_index_metadata(conversation)
             return conversation
 
-    def restore(self, conversation_id: str) -> Dict[str, Any]:
+    def restore(self, conversation_id: str) -> dict[str, Any]:
         """Clear the archived flag and bring a conversation back to the sidebar."""
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -792,8 +765,8 @@ class ConversationStore:
             return conversation
 
     def set_project(
-        self, conversation_id: str, project_id: Optional[str]
-    ) -> Dict[str, Any]:
+        self, conversation_id: str, project_id: str | None
+    ) -> dict[str, Any]:
         """Move a task into a project or back to the ordinary task list."""
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -803,7 +776,7 @@ class ConversationStore:
             self._update_index_metadata(conversation)
             return conversation
 
-    def detach_project(self, project_id: str) -> List[str]:
+    def detach_project(self, project_id: str) -> builtins.list[str]:
         """Move every task in a deleted project back to the ordinary task list."""
         target_id = self._clean_project_id(project_id)
         if not target_id:
@@ -833,7 +806,7 @@ class ConversationStore:
             self._write_index(index)
             return detached
 
-    def delete(self, conversation_id: str) -> Dict[str, Any]:
+    def delete(self, conversation_id: str) -> dict[str, Any]:
         with self._lock:
             conversation = self._load_required(conversation_id)
             index = self._read_index()
@@ -883,7 +856,7 @@ class ConversationStore:
                 "deleted_conversation_ids": sorted(delete_ids),
             }
 
-    def related_conversation_ids(self, conversation_id: str) -> List[str]:
+    def related_conversation_ids(self, conversation_id: str) -> builtins.list[str]:
         """Return a task and any internal split children deleted with it."""
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -898,7 +871,7 @@ class ConversationStore:
                 )
             return sorted(related_ids)
 
-    def clear(self, conversation_id: str) -> Dict[str, Any]:
+    def clear(self, conversation_id: str) -> dict[str, Any]:
         with self._lock:
             conversation = self._load_required(conversation_id)
             conversation["messages"] = []
@@ -918,8 +891,8 @@ class ConversationStore:
         self,
         conversation_id: str,
         message_id: int,
-        unread: Optional[bool] = True,
-    ) -> Dict[str, Any]:
+        unread: bool | None = True,
+    ) -> dict[str, Any]:
         """Persist that a task finished and whether its result is still unread."""
         normalized_message_id = self._message_id(message_id)
         if normalized_message_id <= 0:
@@ -945,7 +918,7 @@ class ConversationStore:
             self._update_index_metadata(conversation)
             return conversation
 
-    def mark_read(self, conversation_id: str) -> Dict[str, Any]:
+    def mark_read(self, conversation_id: str) -> dict[str, Any]:
         """Acknowledge the latest completed result for one conversation."""
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -959,8 +932,8 @@ class ConversationStore:
             return conversation
 
     def append_message(
-        self, conversation_id: str, message: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, conversation_id: str, message: dict[str, Any]
+    ) -> dict[str, Any]:
         with self._lock:
             conversation = self._load_required(conversation_id)
             event = dict(message)
@@ -977,8 +950,8 @@ class ConversationStore:
             return event
 
     def upsert_plan_snapshot(
-        self, conversation_id: str, message: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, conversation_id: str, message: dict[str, Any]
+    ) -> dict[str, Any]:
         """Persist only the latest plan snapshot for one task message."""
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -1006,7 +979,7 @@ class ConversationStore:
                     return dict(latest)
 
             retained = []
-            insert_at: Optional[int] = None
+            insert_at: int | None = None
             for existing in conversation.setdefault("messages", []):
                 same_snapshot = (
                     existing.get("type") == "plan_update"
@@ -1031,8 +1004,8 @@ class ConversationStore:
             return event
 
     def upsert_agent_team_snapshot(
-        self, conversation_id: str, message: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, conversation_id: str, message: dict[str, Any]
+    ) -> dict[str, Any]:
         """Persist only the latest bounded multi-agent snapshot for one run.
 
         Live child activity arrives as complete, versioned snapshots. Replacing
@@ -1068,7 +1041,7 @@ class ConversationStore:
                     return dict(latest)
 
             retained = []
-            insert_at: Optional[int] = None
+            insert_at: int | None = None
             for existing in conversation.setdefault("messages", []):
                 same_snapshot = (
                     existing.get("type") == "agent_team"
@@ -1099,7 +1072,7 @@ class ConversationStore:
         message_id: int,
         state: str,
         message: str = "",
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Persist a plan's run outcome without changing any step status."""
         terminal_state = str(state or "").strip().lower()
         if terminal_state not in {"complete", "error", "stopped"}:
@@ -1128,7 +1101,7 @@ class ConversationStore:
             return dict(plan_event)
 
     def update_user_attachments(
-        self, conversation_id: str, message_id: int, attachments: List[Dict[str, Any]]
+        self, conversation_id: str, message_id: int, attachments: builtins.list[dict[str, Any]]
     ) -> None:
         with self._lock:
             conversation = self._load_required(conversation_id)
@@ -1154,5 +1127,5 @@ class ConversationStore:
             ) or conversation["id"]
             return self.memory_dir(scope_id)
 
-    def active_id(self) -> Optional[str]:
+    def active_id(self) -> str | None:
         return self._read_index().get("active_id")

@@ -2,9 +2,8 @@
 
 import os
 import shutil
-from typing import List, Tuple, Optional
 from pathlib import Path
-import subprocess
+from typing import ClassVar
 
 
 class FileTool:
@@ -13,7 +12,7 @@ class FileTool:
     DEFAULT_READ_LIMIT = 1000
     MAX_READ_TOKENS = 25_000
 
-    IMAGE_EXTENSIONS = {
+    IMAGE_EXTENSIONS: ClassVar[set[str]] = {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff",
         ".heic", ".heif", ".avif", ".ico", ".jfif", ".apng", ".psd",
         ".dng", ".cr2", ".nef", ".arw", ".raw", ".exr",
@@ -34,8 +33,8 @@ class FileTool:
 
     @staticmethod
     def read_file(
-        path: str, offset: Optional[int] = None, limit: Optional[int] = None
-    ) -> Tuple[bool, str]:
+        path: str, offset: int | None = None, limit: int | None = None
+    ) -> tuple[bool, str]:
         """Read file contents with Grok Build-compatible pagination.
 
         Non-skill reads are capped at 1000 lines. The complete selected window
@@ -78,7 +77,7 @@ class FileTool:
             if offset < 1:
                 offset = 1
 
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
 
             total_lines = len(lines)
@@ -130,10 +129,10 @@ class FileTool:
         except FileNotFoundError:
             return False, f"File not found: {path}"
         except Exception as e:
-            return False, f"Error reading file: {str(e)}"
+            return False, f"Error reading file: {e!s}"
 
     @staticmethod
-    def list_directory(path: str) -> Tuple[bool, str]:
+    def list_directory(path: str) -> tuple[bool, str]:
         """List directory contents"""
         try:
             dir_path = Path(FileTool.expand_path(path)).resolve()
@@ -155,7 +154,7 @@ class FileTool:
 
             output_parts = [
                 f"<path>{dir_path}</path>",
-                f"<type>directory</type>",
+                "<type>directory</type>",
                 "<entries>",
                 "\n".join(entries),
                 f"\n({len(entries)} entries)",
@@ -165,10 +164,10 @@ class FileTool:
             return True, "\n".join(output_parts)
 
         except Exception as e:
-            return False, f"Error listing directory: {str(e)}"
+            return False, f"Error listing directory: {e!s}"
 
     @staticmethod
-    def write_file(path: str, content: str, append: bool = False) -> Tuple[bool, str]:
+    def write_file(path: str, content: str, append: bool = False) -> tuple[bool, str]:
         """Write content to file"""
         try:
             file_path = Path(FileTool.expand_path(path)).resolve()
@@ -183,10 +182,10 @@ class FileTool:
             return True, f"File {'appended' if append else 'written'}: {path}"
 
         except Exception as e:
-            return False, f"Error writing file: {str(e)}"
+            return False, f"Error writing file: {e!s}"
 
     @staticmethod
-    def list_files(path: str = ".", recursive: bool = False) -> Tuple[bool, List[str]]:
+    def list_files(path: str = ".", recursive: bool = False) -> tuple[bool, list[str]]:
         """List files in directory"""
         try:
             dir_path = Path(FileTool.expand_path(path)).resolve()
@@ -202,10 +201,10 @@ class FileTool:
             return True, sorted(files)
 
         except Exception as e:
-            return False, [f"Error listing files: {str(e)}"]
+            return False, [f"Error listing files: {e!s}"]
 
     @staticmethod
-    def delete_file(path: str) -> Tuple[bool, str]:
+    def delete_file(path: str) -> tuple[bool, str]:
         """Delete a file"""
         try:
             file_path = Path(FileTool.expand_path(path)).resolve()
@@ -220,10 +219,10 @@ class FileTool:
             return True, f"File deleted: {path}"
 
         except Exception as e:
-            return False, f"Error deleting file: {str(e)}"
+            return False, f"Error deleting file: {e!s}"
 
     @staticmethod
-    def delete_directory(path: str) -> Tuple[bool, str]:
+    def delete_directory(path: str) -> tuple[bool, str]:
         """Delete a directory"""
         try:
             dir_path = Path(FileTool.expand_path(path)).resolve()
@@ -238,26 +237,10 @@ class FileTool:
             return True, f"Directory deleted: {path}"
 
         except Exception as e:
-            return False, f"Error deleting directory: {str(e)}"
+            return False, f"Error deleting directory: {e!s}"
 
     @staticmethod
-    def create_directory(path: str) -> Tuple[bool, str]:
-        """Create a directory"""
-        try:
-            dir_path = Path(FileTool.expand_path(path)).resolve()
-            dir_path.mkdir(parents=True, exist_ok=True)
-            return True, f"Directory created: {path}"
-
-        except Exception as e:
-            return False, f"Error creating directory: {str(e)}"
-
-    @staticmethod
-    def file_exists(path: str) -> bool:
-        """Check if file exists"""
-        return Path(FileTool.expand_path(path)).exists()
-
-    @staticmethod
-    def get_file_info(path: str) -> Tuple[bool, dict]:
+    def get_file_info(path: str) -> tuple[bool, dict]:
         """Get file information"""
         try:
             file_path = Path(FileTool.expand_path(path)).resolve()

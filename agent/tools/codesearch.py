@@ -1,9 +1,10 @@
 """CodeSearch tool - Search and get relevant context for programming tasks using Exa Code API"""
 
 import os
-import requests
-from typing import Dict, Any, Optional
 from dataclasses import dataclass
+from typing import Any
+
+import requests
 
 
 @dataclass
@@ -20,7 +21,7 @@ class CodeSearchTool:
         self.api_key = os.getenv("EXA_API_KEY")
         self.default_tokens = 5000
 
-    def execute(self, query: str, tokens_num: Optional[int] = None) -> CodeSearchResult:
+    def execute(self, query: str, tokens_num: int | None = None) -> CodeSearchResult:
         """Execute code search
 
         Args:
@@ -83,14 +84,14 @@ class CodeSearchTool:
 
         except requests.exceptions.RequestException as e:
             return CodeSearchResult(
-                success=False, results="", error=f"API request failed: {str(e)}"
+                success=False, results="", error=f"API request failed: {e!s}"
             )
         except Exception as e:
-            return CodeSearchResult(success=False, results="", error=f"Error: {str(e)}")
+            return CodeSearchResult(success=False, results="", error=f"Error: {e!s}")
 
 
 # Tool definition for OpenAI function calling
-def get_codesearch_tool_definition() -> Dict[str, Any]:
+def get_codesearch_tool_definition() -> dict[str, Any]:
     """Get tool definition in OpenAI function calling format"""
     return {
         "type": "function",
@@ -115,7 +116,7 @@ def get_codesearch_tool_definition() -> Dict[str, Any]:
     }
 
 
-def execute_codesearch(params: Dict[str, Any]) -> str:
+def execute_codesearch(params: dict[str, Any]) -> str:
     """Execute codesearch tool"""
     tool = CodeSearchTool()
     query = params.get("query", "")
@@ -129,5 +130,4 @@ def execute_codesearch(params: Dict[str, Any]) -> str:
 
     if result.success:
         return result.results
-    else:
-        return f"Error: {result.error}"
+    return f"Error: {result.error}"

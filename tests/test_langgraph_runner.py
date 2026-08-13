@@ -3,6 +3,7 @@
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk
+from pydantic import Field
 
 from agent.core.langgraph_runner import LangGraphRunner
 
@@ -21,7 +22,7 @@ def tool_definition(name: str) -> dict:
 class ScriptedModel(BaseChatModel):
     script: list[list[AIMessageChunk]]
     turn: int = 0
-    seen_messages: list[list] = []
+    seen_messages: list[list] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:

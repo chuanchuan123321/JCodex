@@ -62,7 +62,10 @@ def test_terminal_prompt_resolves_the_plan_instruction(tmp_path) -> None:
     )
 
     assert "{plan_mode_instruction}" not in prompt
-    assert "call `todo_write` before substantive execution" in prompt
+    assert "Plan Mode is off for this task." in prompt
+    assert "{multi_agent_mode_instruction}" not in prompt
+    assert "Multi-Agent Mode is off for this task." in prompt
+    assert "{platform_instruction}" not in prompt
     assert "{runtime_mode_instruction}" not in prompt
     assert "running locally, not through a gateway" in prompt
 

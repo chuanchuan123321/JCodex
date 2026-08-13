@@ -1,13 +1,15 @@
 """AI Agent Core Engine - Native function calling support"""
 
-import os
 import json
-import requests
+import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable, Union
-from dataclasses import dataclass, field
-from dotenv import load_dotenv
+from typing import Any
 from urllib.parse import urlparse
+
+import requests
+from dotenv import load_dotenv
 
 from agent.core.env_utils import env_float, env_int
 
@@ -16,30 +18,13 @@ load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 @dataclass
-class Message:
-    """Message data structure"""
-
-    role: str  # "user" or "assistant"
-    content: Any
-
-
-@dataclass
 class ToolCall:
     """Represents a tool call from the LLM"""
 
     id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
     index: int = 0
-
-
-@dataclass
-class AssistantMessage:
-    """Assistant message with optional tool calls"""
-
-    role: str = "assistant"
-    content: str = ""
-    tool_calls: List[ToolCall] = field(default_factory=list)
 
 
 class AIEngine:
@@ -66,7 +51,7 @@ class AIEngine:
         """Pick the chat-completions path for the current provider."""
         return "/v4/chat/completions" if "bigmodel.cn" in api_base_url else "/v1/chat/completions"
 
-    def __init__(self, config_name: Optional[str] = None):
+    def __init__(self, config_name: str | None = None):
         # 尝试从配置管理器加载配置
         try:
             from agent.core.config_manager import ConfigManager
@@ -102,9 +87,9 @@ class AIEngine:
         if not self.api_key and not self.is_local_base_url(self.api_base_url):
             raise ValueError("API_KEY not found in environment variables")
 
-        self.conversation_history: List[Dict[str, Any]] = []
+        self.conversation_history: list[dict[str, Any]] = []
 
-    def _apply_reasoning_params(self, payload: Dict[str, Any]) -> None:
+    def _apply_reasoning_params(self, payload: dict[str, Any]) -> None:
         """DeepSeek 系列模型：按配置注入推理强度参数（其余模型不注入）。"""
         effort = (self.reasoning_effort or "").strip()
         model = (self.model or "").lower()
@@ -115,19 +100,19 @@ class AIEngine:
 
     def _post_chat_completion(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        timeout: Optional[float] = None,
-        max_retries: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> dict[str, Any]:
         """Send a chat-completions request using the current model settings."""
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
@@ -192,7 +177,7 @@ class AIEngine:
             except requests.exceptions.RequestException as e:
                 if attempt < retries - 1:
                     print(
-                        f"[API] 请求失败，{retry_delay}秒后重试 ({attempt + 1}/{retries}): {str(e)}"
+                        f"[API] 请求失败，{retry_delay}秒后重试 ({attempt + 1}/{retries}): {e!s}"
                     )
                     import time
 
@@ -200,20 +185,27 @@ class AIEngine:
                     retry_delay *= 2
                 else:
                     return {
-                        "content": f"API Error: {str(e)}",
+                        "content": f"API Error: {e!s}",
                         "tool_calls": [],
                         "finish_reason": "error",
                     }
 
+        # Unreachable: every retry attempt returns above.
+        return {
+            "content": "API Error: request failed",
+            "tool_calls": [],
+            "finish_reason": "error",
+        }
+
     def _post_chat_completion_stream(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        on_content: Optional[Callable[[str], Optional[bool]]] = None,
-        on_tool_delta: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        on_content: Callable[[str], bool | None] | None = None,
+        on_tool_delta: Callable[[dict[str, Any]], bool | None] | None = None,
+    ) -> dict[str, Any]:
         """Send a streaming chat request and assemble the final message."""
         headers = {
             "Content-Type": "application/json",
@@ -221,7 +213,7 @@ class AIEngine:
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
@@ -238,8 +230,8 @@ class AIEngine:
         retry_delay = 5
         for attempt in range(max_retries):
             emitted_content = False
-            content_parts: List[str] = []
-            streamed_tools: Dict[int, Dict[str, str]] = {}
+            content_parts: list[str] = []
+            streamed_tools: dict[int, dict[str, str]] = {}
             finish_reason = "stop"
             reasoning_open = False
             try:
@@ -418,7 +410,7 @@ class AIEngine:
                 tool_calls = []
                 for index in sorted(streamed_tools):
                     item = streamed_tools[index]
-                    arguments: Dict[str, Any] = {}
+                    arguments: dict[str, Any] = {}
                     if item["arguments"]:
                         try:
                             arguments = json.loads(item["arguments"])
@@ -440,7 +432,7 @@ class AIEngine:
             except requests.exceptions.RequestException as exc:
                 if emitted_content or attempt >= max_retries - 1:
                     return {
-                        "content": f"API Error: {str(exc)}",
+                        "content": f"API Error: {exc!s}",
                         "tool_calls": [],
                         "finish_reason": "error",
                     }
@@ -449,20 +441,30 @@ class AIEngine:
                 time.sleep(retry_delay)
                 retry_delay *= 2
 
+        # Unreachable: every retry attempt returns above.
+        return {
+            "content": "API Error: stream failed",
+            "tool_calls": [],
+            "finish_reason": "error",
+        }
+
     def call_messages(
         self,
-        messages: List[Dict[str, Any]],
-        system_prompt: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        timeout: Optional[float] = None,
-        max_retries: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+        system_prompt: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> dict[str, Any]:
         """Call the chat API without mutating the conversation history."""
         request_messages = list(messages)
         if system_prompt:
-            request_messages = [{"role": "system", "content": system_prompt}] + request_messages
+            request_messages = [
+                {"role": "system", "content": system_prompt},
+                *request_messages,
+            ]
         return self._post_chat_completion(
             request_messages,
             tools=tools,
@@ -470,16 +472,6 @@ class AIEngine:
             temperature=temperature,
             timeout=timeout,
             max_retries=max_retries,
-        )
-
-    def add_message(self, role: str, content: Any) -> None:
-        """Add message to conversation history"""
-        self.conversation_history.append({"role": role, "content": content})
-
-    def add_tool_message(self, tool_call_id: str, content: str) -> None:
-        """Add tool result message to conversation"""
-        self.conversation_history.append(
-            {"role": "tool", "tool_call_id": tool_call_id, "content": content}
         )
 
     def clear_history(self) -> None:
@@ -503,182 +495,7 @@ class AIEngine:
                         after = after[:max_length] + "... [内容已截断以节省上下文]"
                     msg["content"] = before + prefix + after
 
-    def get_history(self) -> List[Dict[str, Any]]:
+    def get_history(self) -> list[dict[str, Any]]:
         """Get conversation history in API format"""
         return self.conversation_history
 
-    def call_api(
-        self,
-        user_message: Union[str, List[Dict[str, Any]]],
-        system_prompt: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """Call AI API and get response with native tool support
-
-        Returns:
-            {
-                "content": str,           # Text response
-                "tool_calls": [],          # List of ToolCall objects
-                "finish_reason": str,     # "stop", "tool_calls", or "length"
-            }
-        """
-        # Add user message
-        self.conversation_history.append({"role": "user", "content": user_message})
-        messages = self.get_history()
-
-        # Add system prompt if provided
-        if system_prompt:
-            messages = [{"role": "system", "content": system_prompt}] + messages
-        result = self._post_chat_completion(
-            messages,
-            tools=tools,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-
-        if result["finish_reason"] == "error":
-            error_msg = result["content"]
-            self.conversation_history.append({"role": "assistant", "content": error_msg})
-            return result
-
-        content = result["content"]
-        tool_calls = result["tool_calls"]
-        finish_reason = result["finish_reason"]
-
-        assistant_msg: Dict[str, Any] = {
-            "role": "assistant",
-            "content": content,
-        }
-        if tool_calls:
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                    },
-                }
-                for tc in tool_calls
-            ]
-        self.conversation_history.append(assistant_msg)
-
-        return {
-            "content": content,
-            "tool_calls": tool_calls,
-            "finish_reason": finish_reason,
-        }
-
-    def call_api_stream(
-        self,
-        user_message: Union[str, List[Dict[str, Any]]],
-        system_prompt: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        on_content: Optional[Callable[[str], Optional[bool]]] = None,
-        on_tool_delta: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None,
-    ) -> Dict[str, Any]:
-        """Call the chat API while forwarding text deltas to a callback."""
-        self.conversation_history.append({"role": "user", "content": user_message})
-        messages = self.get_history()
-        if system_prompt:
-            messages = [{"role": "system", "content": system_prompt}] + messages
-
-        result = self._post_chat_completion_stream(
-            messages,
-            tools=tools,
-            on_content=on_content,
-            on_tool_delta=on_tool_delta,
-        )
-        if result["finish_reason"] == "cancelled":
-            return result
-        if result["finish_reason"] == "error":
-            self.conversation_history.append(
-                {"role": "assistant", "content": result["content"]}
-            )
-            return result
-
-        assistant_msg: Dict[str, Any] = {
-            "role": "assistant",
-            "content": result["content"],
-        }
-        if result["tool_calls"]:
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": json.dumps(
-                            tool_call.arguments, ensure_ascii=False
-                        ),
-                    },
-                }
-                for tool_call in result["tool_calls"]
-            ]
-        self.conversation_history.append(assistant_msg)
-        return result
-
-    def process_with_tools_stream(
-        self,
-        user_message: Union[str, List[Dict[str, Any]]],
-        system_prompt: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        on_content: Optional[Callable[[str], Optional[bool]]] = None,
-        on_tool_delta: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None,
-    ) -> Dict[str, Any]:
-        """Process one model turn and expose text as it arrives."""
-        result = self.call_api_stream(
-            user_message,
-            system_prompt=system_prompt,
-            tools=tools,
-            on_content=on_content,
-            on_tool_delta=on_tool_delta,
-        )
-        return {
-            "type": "tool_call" if result["tool_calls"] else "response",
-            "content": result["content"],
-            "tool_calls": result["tool_calls"],
-            "finish_reason": result["finish_reason"],
-        }
-
-    def process_with_tools(
-        self,
-        user_message: Union[str, List[Dict[str, Any]]],
-        system_prompt: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        """Process message with tools - handles tool calls automatically
-
-        Args:
-            user_message: User input
-            system_prompt: System prompt
-            tools: Tool definitions in OpenAI format
-
-        Returns:
-            {
-                "type": "response" | "tool_call",
-                "content": str,           # Final text response
-                "tool_calls": [],         # Tool calls to execute
-                "tool_results": [],       # Tool execution results (if auto-execute)
-            }
-        """
-        result = self.call_api(user_message, system_prompt, tools)
-
-        # Check if there are tool calls
-        if result["tool_calls"]:
-            return {
-                "type": "tool_call",
-                "content": result["content"],
-                "tool_calls": result["tool_calls"],
-                "finish_reason": result["finish_reason"],
-            }
-
-        # No tool calls, return content
-        return {
-            "type": "response",
-            "content": result["content"],
-            "tool_calls": [],
-            "finish_reason": result["finish_reason"],
-        }

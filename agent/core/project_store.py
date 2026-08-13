@@ -4,10 +4,9 @@ import json
 import subprocess
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 PROJECT_CONTEXT_FILES = (
     "AGENTS.md",
@@ -33,10 +32,10 @@ class ProjectStore:
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     @staticmethod
-    def _clean_name(name: str, root_path: Optional[Path] = None) -> str:
+    def _clean_name(name: str, root_path: Path | None = None) -> str:
         fallback = root_path.name if root_path else "新项目"
         value = " ".join(str(name or fallback).split()).strip()
         return (value or fallback)[:80]
@@ -64,7 +63,7 @@ class ProjectStore:
             raise ValueError("项目路径必须是目录")
         return path
 
-    def _read_index(self) -> Dict[str, Any]:
+    def _read_index(self) -> dict[str, Any]:
         try:
             value = json.loads(self.index_file.read_text(encoding="utf-8"))
             if isinstance(value, dict) and isinstance(value.get("projects"), list):
@@ -73,7 +72,7 @@ class ProjectStore:
             pass
         return {"projects": []}
 
-    def _write_index(self, value: Dict[str, Any]) -> None:
+    def _write_index(self, value: dict[str, Any]) -> None:
         self.index_file.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.index_file.with_name(
             f"{self.index_file.name}.{uuid.uuid4().hex}.tmp"
@@ -84,7 +83,7 @@ class ProjectStore:
         temp_path.replace(self.index_file)
 
     @staticmethod
-    def _metadata(project: Dict[str, Any]) -> Dict[str, Any]:
+    def _metadata(project: dict[str, Any]) -> dict[str, Any]:
         root_path = str(project.get("root_path", ""))
         return {
             "id": str(project.get("id", "")),
@@ -96,7 +95,7 @@ class ProjectStore:
             "available": bool(root_path and Path(root_path).is_dir()),
         }
 
-    def list(self) -> Dict[str, List[Dict[str, Any]]]:
+    def list(self) -> dict[str, list[dict[str, Any]]]:
         """Return all bound projects ordered by recent metadata updates."""
         with self._lock:
             projects = [
@@ -107,7 +106,7 @@ class ProjectStore:
             projects.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
             return {"projects": projects}
 
-    def load(self, project_id: str) -> Dict[str, Any]:
+    def load(self, project_id: str) -> dict[str, Any]:
         """Load one project binding."""
         target_id = self._validate_id(project_id)
         with self._lock:
@@ -118,7 +117,7 @@ class ProjectStore:
 
     def create(
         self, name: str, root_path: str, instructions: str = ""
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Bind an existing local directory as a project."""
         root = self._validate_root(root_path)
         with self._lock:
@@ -144,10 +143,10 @@ class ProjectStore:
         self,
         project_id: str,
         *,
-        name: Optional[str] = None,
-        root_path: Optional[str] = None,
-        instructions: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        name: str | None = None,
+        root_path: str | None = None,
+        instructions: str | None = None,
+    ) -> dict[str, Any]:
         """Update project metadata while preserving its task relationships."""
         target_id = self._validate_id(project_id)
         with self._lock:
@@ -182,7 +181,7 @@ class ProjectStore:
             self._write_index(index)
             return self._metadata(project)
 
-    def delete(self, project_id: str) -> Dict[str, Any]:
+    def delete(self, project_id: str) -> dict[str, Any]:
         """Delete only the binding; the local project directory is untouched."""
         target_id = self._validate_id(project_id)
         with self._lock:
@@ -198,7 +197,7 @@ class ProjectStore:
             self._write_index(index)
             return {"success": True}
 
-    def inspect(self, project_id: str) -> Dict[str, Any]:
+    def inspect(self, project_id: str) -> dict[str, Any]:
         """Return lightweight filesystem and Git state for one project."""
         project = self.load(project_id)
         root = Path(project["root_path"])
@@ -215,7 +214,7 @@ class ProjectStore:
         }
 
     @staticmethod
-    def _git_status(root: Path) -> Dict[str, Any]:
+    def _git_status(root: Path) -> dict[str, Any]:
         try:
             result = subprocess.run(
                 ["git", "-C", str(root), "status", "--short", "--branch"],

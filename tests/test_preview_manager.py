@@ -4,12 +4,11 @@ import json
 import os as native_os
 import socket
 from types import SimpleNamespace
-from pathlib import Path
 
 import pytest
 
-from agent.core.extended_tool_executor import ExtendedToolExecutor
 import agent.tools.preview as preview_module
+from agent.core.extended_tool_executor import ExtendedToolExecutor
 from agent.tools.preview import PreviewManager
 
 

@@ -1,17 +1,15 @@
 """Skills system for 麒麟OS-Agent - modular capability extensions"""
 
 import os
-import json
-from pathlib import Path
-from typing import Optional, List, Dict
 import re
 import subprocess
+from pathlib import Path
 
 
 class SkillsLoader:
     """Load and manage skills from workspace and builtin directories"""
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Optional[Path] = None):
+    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
         """
         Initialize SkillsLoader
 
@@ -30,7 +28,7 @@ class SkillsLoader:
         # Create workspace skills directory if it doesn't exist
         self.workspace_skills.mkdir(parents=True, exist_ok=True)
 
-    def list_skills(self, filter_unavailable: bool = True) -> List[Dict[str, str]]:
+    def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
         List all available skills
 
@@ -80,7 +78,7 @@ class SkillsLoader:
 
         return list(skills.values())
 
-    def load_skill(self, name: str) -> Optional[str]:
+    def load_skill(self, name: str) -> str | None:
         """
         Load skill content by name, including scripts information
 
@@ -112,24 +110,6 @@ class SkillsLoader:
 
         return None
 
-    def load_skills_for_context(self, skill_names: List[str]) -> str:
-        """
-        Load multiple skills for AI context
-
-        Args:
-            skill_names: List of skill names to load
-
-        Returns:
-            Formatted skill content for context
-        """
-        contents = []
-        for name in skill_names:
-            content = self.load_skill(name)
-            if content:
-                contents.append(f"## {name.upper()} Skill\n\n{content}")
-
-        return "\n\n---\n\n".join(contents)
-
     def build_skills_summary(self) -> str:
         """
         Build summary of all available skills in XML format (like nanobot)
@@ -144,7 +124,7 @@ class SkillsLoader:
             available = self._check_skill_available(skill)
             status = "available" if available else "unavailable"
 
-            summary += f"  <skill>\n"
+            summary += "  <skill>\n"
             summary += f"    <name>{skill['name']}</name>\n"
             summary += (
                 f"    <description>{skill.get('description', 'N/A')}</description>\n"
@@ -157,28 +137,15 @@ class SkillsLoader:
             if missing:
                 summary += f"    <missing>{', '.join(missing)}</missing>\n"
 
-            summary += f"  </skill>\n"
+            summary += "  </skill>\n"
 
         summary += "</skills>"
         return summary
 
-    def get_always_skills(self) -> List[str]:
-        """
-        Get skills marked as always=true
-
-        Returns:
-            List of always-loaded skill names
-        """
-        always_skills = []
-        for skill in self.list_skills(filter_unavailable=False):
-            if skill.get("always") == "true":
-                always_skills.append(skill["name"])
-        return always_skills
-
-    def _parse_skill_metadata(self, skill_file: Path) -> Optional[Dict]:
+    def _parse_skill_metadata(self, skill_file: Path) -> dict | None:
         """Parse YAML frontmatter from SKILL.md"""
         try:
-            with open(skill_file, "r", encoding="utf-8") as f:
+            with open(skill_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Extract frontmatter
@@ -203,7 +170,7 @@ class SkillsLoader:
     def _extract_skill_content(self, skill_file: Path) -> str:
         """Extract content without frontmatter"""
         try:
-            with open(skill_file, "r", encoding="utf-8") as f:
+            with open(skill_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Remove frontmatter
@@ -256,7 +223,7 @@ class SkillsLoader:
 
         return "\n".join(info)
 
-    def _find_skill_dir(self, skill_name: str) -> Optional[Path]:
+    def _find_skill_dir(self, skill_name: str) -> Path | None:
         """
         Find skill directory by name
 
@@ -278,7 +245,7 @@ class SkillsLoader:
 
         return None
 
-    def _check_skill_available(self, skill: Dict) -> bool:
+    def _check_skill_available(self, skill: dict) -> bool:
         """Check if skill dependencies are available"""
         # Check CLI tools
         requires_bins = skill.get("requires_bins", "").split(",")
@@ -296,7 +263,7 @@ class SkillsLoader:
 
         return True
 
-    def _get_missing_requirements(self, skill: Dict) -> List[str]:
+    def _get_missing_requirements(self, skill: dict) -> list[str]:
         """Get list of missing requirements"""
         missing = []
 

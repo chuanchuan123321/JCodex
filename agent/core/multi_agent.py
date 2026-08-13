@@ -10,10 +10,10 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Optional
-
+from datetime import UTC, datetime
+from typing import Any
 
 MAX_TEAM_AGENTS = 4
 MULTI_AGENT_TOOL_NAMES = frozenset(
@@ -31,13 +31,13 @@ MULTI_AGENT_TOOL_NAMES = frozenset(
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _MESSAGE_KINDS = frozenset({"message", "question", "decision", "handoff", "blocker", "artifact"})
 
-ActivityCallback = Callable[[object, str, Optional[Mapping[str, Any]]], None]
+ActivityCallback = Callable[[object, str, Mapping[str, Any] | None], None]
 UpdateCallback = Callable[[dict[str, Any]], None]
 WorkerCallback = Callable[..., Any]
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _clean_text(value: object, *, limit: int, fallback: str = "") -> str:
@@ -76,7 +76,7 @@ class _AgentRecord:
     error: str = ""
     activity_sequence: int = 0
     message_sequence: int = 0
-    thread: Optional[threading.Thread] = None
+    thread: threading.Thread | None = None
 
 
 class MultiAgentTeam:
@@ -97,7 +97,7 @@ class MultiAgentTeam:
         self,
         worker: WorkerCallback,
         *,
-        on_update: Optional[UpdateCallback] = None,
+        on_update: UpdateCallback | None = None,
         max_agents: int = MAX_TEAM_AGENTS,
         max_activities: int = 80,
         max_messages: int = 40,
@@ -147,9 +147,9 @@ class MultiAgentTeam:
         task: str,
         context: str = "",
         write_access: bool = False,
-        write_paths: Optional[Sequence[str]] = None,
+        write_paths: Sequence[str] | None = None,
         workdir: str = "",
-        depends_on: Optional[Sequence[str]] = None,
+        depends_on: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Create one agent and start its worker in a daemon thread."""
         normalized_name = _clean_text(name, limit=80)
@@ -217,7 +217,7 @@ class MultiAgentTeam:
         *,
         sender_agent_id: str = "",
         kind: str = "message",
-        references: Optional[Sequence[str]] = None,
+        references: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Append a public message and deliver it to a running agent's inbox."""
         content = str(message or "").strip()[:20000]
@@ -305,8 +305,8 @@ class MultiAgentTeam:
         sender_agent_id: str,
         title: str,
         summary: str,
-        paths: Optional[Sequence[str]] = None,
-        recipient_agent_ids: Optional[Sequence[str]] = None,
+        paths: Sequence[str] | None = None,
+        recipient_agent_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Publish a bounded, explicit handoff artifact to the team blackboard."""
         normalized_title = _clean_text(title, limit=160)
@@ -416,8 +416,8 @@ class MultiAgentTeam:
 
     def wait_agents(
         self,
-        agent_ids: Optional[Sequence[str]] = None,
-        timeout: Optional[float] = None,
+        agent_ids: Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Wait until the selected agents are terminal or the timeout expires."""
         normalized_ids = self._normalize_agent_ids(agent_ids)
@@ -500,8 +500,8 @@ class MultiAgentTeam:
         return snapshot
 
     def receive_message(
-        self, agent_id: str, timeout: Optional[float] = None
-    ) -> Optional[str]:
+        self, agent_id: str, timeout: float | None = None
+    ) -> str | None:
         """Receive one inbox message, primarily for custom worker adapters."""
         with self._lock:
             inbox = self._require_agent_locked(agent_id).inbox
@@ -512,38 +512,37 @@ class MultiAgentTeam:
 
     def _run_worker(self, agent_id: str) -> None:
         while True:
-            with self._update_lock:
-                with self._condition:
-                    record = self._require_agent_locked(agent_id)
-                    if record.cancel_event.is_set():
-                        record.status = "cancelled"
-                        record.completed_at = _now()
-                        snapshot = self._commit_locked()
-                        cancelled_before_start = True
-                        ready_to_start = False
-                    elif self._dependencies_terminal_locked(record.depends_on):
-                        record.status = "running"
-                        record.started_at = _now()
+            with self._update_lock, self._condition:
+                record = self._require_agent_locked(agent_id)
+                if record.cancel_event.is_set():
+                    record.status = "cancelled"
+                    record.completed_at = _now()
+                    snapshot = self._commit_locked()
+                    cancelled_before_start = True
+                    ready_to_start = False
+                elif self._dependencies_terminal_locked(record.depends_on):
+                    record.status = "running"
+                    record.started_at = _now()
+                    self._append_activity_locked(
+                        record, "Agent started", "status", None
+                    )
+                    snapshot = self._commit_locked()
+                    cancelled_before_start = False
+                    ready_to_start = True
+                else:
+                    if record.status != "waiting":
+                        record.status = "waiting"
                         self._append_activity_locked(
-                            record, "Agent started", "status", None
+                            record,
+                            "等待依赖的子智能体完成",
+                            "status",
+                            {"depends_on": list(record.depends_on)},
                         )
                         snapshot = self._commit_locked()
-                        cancelled_before_start = False
-                        ready_to_start = True
                     else:
-                        if record.status != "waiting":
-                            record.status = "waiting"
-                            self._append_activity_locked(
-                                record,
-                                "等待依赖的子智能体完成",
-                                "status",
-                                {"depends_on": list(record.depends_on)},
-                            )
-                            snapshot = self._commit_locked()
-                        else:
-                            snapshot = None
-                        cancelled_before_start = False
-                        ready_to_start = False
+                        snapshot = None
+                    cancelled_before_start = False
+                    ready_to_start = False
             if snapshot is not None:
                 self._notify(snapshot)
             if cancelled_before_start or ready_to_start:
@@ -559,7 +558,7 @@ class MultiAgentTeam:
         def activity(
             content: object,
             kind: str = "progress",
-            metadata: Optional[Mapping[str, Any]] = None,
+            metadata: Mapping[str, Any] | None = None,
         ) -> None:
             self._record_activity(agent_id, content, kind, metadata)
 
@@ -607,7 +606,7 @@ class MultiAgentTeam:
         agent_id: str,
         content: object,
         kind: str,
-        metadata: Optional[Mapping[str, Any]],
+        metadata: Mapping[str, Any] | None,
     ) -> None:
         with self._update_lock:
             with self._condition:
@@ -623,7 +622,7 @@ class MultiAgentTeam:
         record: _AgentRecord,
         content: object,
         kind: str,
-        metadata: Optional[Mapping[str, Any]],
+        metadata: Mapping[str, Any] | None,
     ) -> None:
         text = str(content or "").strip()
         if not text:
@@ -668,11 +667,9 @@ class MultiAgentTeam:
     def _notify(self, snapshot: dict[str, Any]) -> None:
         if self.on_update is None:
             return
-        try:
+        # UI/persistence callbacks must not terminate agent workers.
+        with suppress(Exception):
             self.on_update(_json_safe(snapshot))
-        except Exception:
-            # UI/persistence callbacks must not terminate agent workers.
-            pass
 
     def _snapshot_locked(self) -> dict[str, Any]:
         agents = [
@@ -732,7 +729,7 @@ class MultiAgentTeam:
         }
 
     @staticmethod
-    def _normalize_references(values: Optional[Sequence[str]]) -> list[str]:
+    def _normalize_references(values: Sequence[str] | None) -> list[str]:
         references: list[str] = []
         for raw_value in values or ():
             value = str(raw_value or "").strip()
@@ -843,7 +840,7 @@ class MultiAgentTeam:
 
     @staticmethod
     def _normalize_agent_ids(
-        agent_ids: Optional[Sequence[str]],
+        agent_ids: Sequence[str] | None,
     ) -> tuple[str, ...]:
         if agent_ids is None:
             return ()

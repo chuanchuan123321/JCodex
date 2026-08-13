@@ -11,14 +11,14 @@ Features:
 - History rollback
 """
 
-import json
 import hashlib
-import os
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+import json
+from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from agent.core.ai_engine import AIEngine
 
@@ -32,14 +32,12 @@ class PreferenceCategory(Enum):
     WORKFLOW = "workflow"
     CUSTOM = "custom"
 
-
 class ConflictResolution(Enum):
     """Conflict resolution strategies."""
     NEWEST_WINS = "newest_wins"
     OLDEST_WINS = "oldest_wins"
     MANUAL = "manual"
     MERGE = "merge"
-
 
 @dataclass
 class PreferenceEntry:
@@ -53,11 +51,11 @@ class PreferenceEntry:
     updated_at: datetime = field(default_factory=datetime.now)
     source: str = "system"  # system, user, ai_inference
     confidence: float = 1.0
-    tags: Set[str] = field(default_factory=set)
-    history: List[Dict[str, Any]] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: set[str] = field(default_factory=set)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "category": self.category.value,
@@ -74,8 +72,8 @@ class PreferenceEntry:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> 'PreferenceEntry':
-        entry = PreferenceEntry(
+    def from_dict(data: dict[str, Any]) -> 'PreferenceEntry':
+        return PreferenceEntry(
             id=data["id"],
             category=PreferenceCategory(data["category"]),
             key=data["key"],
@@ -89,17 +87,14 @@ class PreferenceEntry:
             history=data.get("history", []),
             metadata=data.get("metadata", {})
         )
-        return entry
-
 
 @dataclass
 class PreferenceSnapshot:
     """Point-in-time snapshot of all preferences."""
     snapshot_id: str
     timestamp: datetime
-    entries: List[PreferenceEntry]
+    entries: list[PreferenceEntry]
     description: str = ""
-
 
 class PreferenceManager:
     """Main preference manager class."""
@@ -108,7 +103,7 @@ class PreferenceManager:
     CURRENT_FILE = "preferences_current.json"
     SNAPSHOTS_DIR = "snapshots"
 
-    def __init__(self, preference_dir: Optional[Path] = None):
+    def __init__(self, preference_dir: Path | None = None):
         if preference_dir is None:
             preference_dir = Path(__file__).parent.parent.parent / "workspace" / "preferences"
         self.preference_dir = preference_dir
@@ -121,8 +116,8 @@ class PreferenceManager:
         self.snapshots_dir.mkdir(exist_ok=True)
 
         # In-memory cache
-        self._preferences: Dict[str, PreferenceEntry] = {}
-        self._version_history: Dict[str, List[Dict[str, Any]]] = {}
+        self._preferences: dict[str, PreferenceEntry] = {}
+        self._version_history: dict[str, list[dict[str, Any]]] = {}
 
         # Load existing preferences
         self._load_preferences()
@@ -134,7 +129,7 @@ class PreferenceManager:
 
         if self.current_file.exists():
             try:
-                with open(self.current_file, 'r', encoding='utf-8') as f:
+                with open(self.current_file, encoding='utf-8') as f:
                     data = json.load(f)
                     for entry_data in data.get("entries", []):
                         entry = PreferenceEntry.from_dict(entry_data)
@@ -144,7 +139,7 @@ class PreferenceManager:
 
         if self.version_file.exists():
             try:
-                with open(self.version_file, 'r', encoding='utf-8') as f:
+                with open(self.version_file, encoding='utf-8') as f:
                     data = json.load(f)
                     # 确保是dict类型，否则初始化为空dict
                     self._version_history = data if isinstance(data, dict) else {}
@@ -172,8 +167,8 @@ class PreferenceManager:
 
     def set_preference(self, category: PreferenceCategory, key: str, value: Any,
                       source: str = "system", confidence: float = 1.0,
-                      tags: Optional[Set[str]] = None,
-                      metadata: Optional[Dict[str, Any]] = None,
+                      tags: set[str] | None = None,
+                      metadata: dict[str, Any] | None = None,
                       resolution: ConflictResolution = ConflictResolution.NEWEST_WINS) -> PreferenceEntry:
         """Set a preference value with conflict resolution."""
         # Check for existing preference
@@ -181,10 +176,9 @@ class PreferenceManager:
 
         if existing:
             return self._update_preference(existing, value, source, confidence, resolution)
-        else:
-            return self._create_preference(category, key, value, source, confidence, tags, metadata)
+        return self._create_preference(category, key, value, source, confidence, tags, metadata)
 
-    def _find_preference(self, category: PreferenceCategory, key: str) -> Optional[PreferenceEntry]:
+    def _find_preference(self, category: PreferenceCategory, key: str) -> PreferenceEntry | None:
         """Find existing preference by category and key."""
         for entry in self._preferences.values():
             if entry.category == category and entry.key == key:
@@ -193,7 +187,7 @@ class PreferenceManager:
 
     def _create_preference(self, category: PreferenceCategory, key: str, value: Any,
                           source: str, confidence: float,
-                          tags: Optional[Set[str]], metadata: Optional[Dict[str, Any]]) -> PreferenceEntry:
+                          tags: set[str] | None, metadata: dict[str, Any] | None) -> PreferenceEntry:
         """Create new preference entry."""
         entry = PreferenceEntry(
             id=self._generate_id(category, key),
@@ -257,30 +251,13 @@ class PreferenceManager:
         self._save_preferences()
         return existing
 
-    def get_preference(self, category: PreferenceCategory, key: str) -> Optional[Any]:
-        """Get preference value."""
-        entry = self._find_preference(category, key)
-        return entry.value if entry else None
-
-    def get_all_by_category(self, category: PreferenceCategory) -> Dict[str, Any]:
+    def get_all_by_category(self, category: PreferenceCategory) -> dict[str, Any]:
         """Get all preferences in a category."""
         return {
             entry.key: entry.value
             for entry in self._preferences.values()
             if entry.category == category
         }
-
-    def get_operation_habits(self) -> Dict[str, Any]:
-        """Get operation habit preferences."""
-        return self.get_all_by_category(PreferenceCategory.OPERATION_HABIT)
-
-    def get_output_style(self) -> Dict[str, Any]:
-        """Get output style preferences."""
-        return self.get_all_by_category(PreferenceCategory.OUTPUT_STYLE)
-
-    def get_security_strategies(self) -> Dict[str, Any]:
-        """Get security strategy preferences."""
-        return self.get_all_by_category(PreferenceCategory.SECURITY_STRATEGY)
 
     def delete_preference(self, category: PreferenceCategory, key: str) -> bool:
         """Delete a preference."""
@@ -347,7 +324,7 @@ class PreferenceManager:
             return False
 
         try:
-            with open(snapshot_file, 'r', encoding='utf-8') as f:
+            with open(snapshot_file, encoding='utf-8') as f:
                 data = json.load(f)
 
             # Clear current preferences
@@ -375,12 +352,12 @@ class PreferenceManager:
         except Exception:
             return False
 
-    def list_snapshots(self) -> List[Dict[str, Any]]:
+    def list_snapshots(self) -> list[dict[str, Any]]:
         """List all available snapshots."""
         snapshots = []
         for f in self.snapshots_dir.glob("*.json"):
             try:
-                with open(f, 'r', encoding='utf-8') as fp:
+                with open(f, encoding='utf-8') as fp:
                     data = json.load(fp)
                     snapshots.append({
                         "snapshot_id": data.get("snapshot_id"),
@@ -393,74 +370,14 @@ class PreferenceManager:
 
         return sorted(snapshots, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-    def get_preference_history(self, category: PreferenceCategory, key: str) -> List[Dict[str, Any]]:
-        """Get version history for a preference."""
-        entry = self._find_preference(category, key)
-        if not entry:
-            return []
-
-        history = entry.history.copy()
-        history.append({
-            "version": entry.version,
-            "value": entry.value,
-            "timestamp": entry.updated_at.isoformat(),
-            "source": entry.source
-        })
-
-        return history
-
-    def infer_preference_from_behavior(self, behavior_data: Dict[str, Any]) -> List[PreferenceEntry]:
-        """Infer preferences from user behavior data."""
-        inferred = []
-
-        # Extract operation patterns
-        if "tool_usage" in behavior_data:
-            habits = behavior_data["tool_usage"]
-            for tool, count in habits.items():
-                if count > 5:  # Frequently used tool
-                    entry = self.set_preference(
-                        PreferenceCategory.OPERATION_HABIT,
-                        f"frequent_tool_{tool}",
-                        {"tool": tool, "count": count, "frequency": "high"},
-                        source="ai_inference",
-                        confidence=0.7
-                    )
-                    inferred.append(entry)
-
-        # Extract output format preferences
-        if "output_formats" in behavior_data:
-            formats = behavior_data["output_formats"]
-            entry = self.set_preference(
-                PreferenceCategory.OUTPUT_STYLE,
-                "preferred_formats",
-                formats,
-                source="ai_inference",
-                confidence=0.6
-            )
-            inferred.append(entry)
-
-        # Extract security patterns
-        if "security_actions" in behavior_data:
-            actions = behavior_data["security_actions"]
-            entry = self.set_preference(
-                PreferenceCategory.SECURITY_STRATEGY,
-                "security_behavior",
-                actions,
-                source="ai_inference",
-                confidence=0.8
-            )
-            inferred.append(entry)
-
-        return inferred
-
-    def get_all_preferences(self) -> Dict[str, Any]:
+    def get_all_preferences(self) -> dict[str, Any]:
         """Get all preferences grouped by category."""
         result = {}
         for category in PreferenceCategory:
             result[category.value] = self.get_all_by_category(category)
         return result
 
-    def get_preferences_for_prompt(self) -> Dict[str, List[Dict[str, Any]]]:
+    def get_preferences_for_prompt(self) -> dict[str, list[dict[str, Any]]]:
         """Get preferences with full details for prompt generation."""
         result = {}
         for category in PreferenceCategory:
@@ -477,45 +394,13 @@ class PreferenceManager:
             result[category.value] = entries
         return result
 
-    def export_preferences(self, format: str = "json") -> str:
-        """Export preferences to string."""
-        if format == "json":
-            return json.dumps(self.get_all_preferences(), ensure_ascii=False, indent=2)
-        elif format == "env":
-            lines = []
-            for entry in self._preferences.values():
-                key = f"PREF_{entry.category.value.upper()}_{entry.key.upper()}"
-                lines.append(f"{key}={entry.value}")
-            return '\n'.join(lines)
-        return ""
-
-    def import_preferences(self, data: str, format: str = "json") -> int:
-        """Import preferences from string."""
-        count = 0
-        if format == "json":
-            try:
-                prefs = json.loads(data)
-                for category_str, entries in prefs.items():
-                    try:
-                        category = PreferenceCategory(category_str)
-                        if isinstance(entries, dict):
-                            for key, value in entries.items():
-                                self.set_preference(category, key, value, source="import")
-                                count += 1
-                    except ValueError:
-                        continue
-            except json.JSONDecodeError:
-                pass
-        return count
-
-    def extract_preferences_from_data(self, data_entries: List[Dict[str, Any]],
-                                       api_base_url: str = None, api_key: str = None,
-                                       model: str = "deepseek-v4-pro") -> Dict[str, Any]:
+    def extract_preferences_from_data(self, data_entries: list[dict[str, Any]],
+                                       api_base_url: str | None = None, api_key: str | None = None,
+                                       model: str = "deepseek-v4-pro") -> dict[str, Any]:
         """从数据条目中AI提取偏好"""
         import traceback
-        import sys
         print("[PREFERENCE_MANAGER] extract_preferences_from_data 开始执行")
-        print(f"[PREFERENCE_MANAGER] 函数栈:")
+        print("[PREFERENCE_MANAGER] 函数栈:")
         for line in traceback.format_stack()[-5:]:
             print(f"  {line.strip()}")
         print(f"[PREFERENCE_MANAGER] data_entries类型: {type(data_entries)}, 长度: {len(data_entries) if data_entries else 0}")
@@ -566,10 +451,8 @@ class PreferenceManager:
 
             # 改进的JSON提取 - 尝试多种方式
             extracted_data = None
-            try:
+            with suppress(json.JSONDecodeError):
                 extracted_data = json.loads(ai_content_clean)
-            except json.JSONDecodeError:
-                pass
 
             # 方法2: 尝试用正则匹配第一个完整的JSON对象
             if extracted_data is None:
@@ -585,10 +468,8 @@ class PreferenceManager:
                         print(f"[PREFERENCE_MANAGER] JSON解析失败: {e}, 尝试修复...")
                         # 修复多余的反斜杠
                         json_str_fixed = json_str.replace('\\', '\\\\')
-                        try:
+                        with suppress(json.JSONDecodeError):
                             extracted_data = json.loads(json_str_fixed)
-                        except json.JSONDecodeError:
-                            pass
 
             if extracted_data is None:
                 return {"success": False, "message": f"无法解析AI返回为JSON。内容:\n{ai_content_clean[:500]}", "extracted_count": 0}
@@ -617,7 +498,7 @@ class PreferenceManager:
                     conf = pref.get("confidence", 0.8)
                     self.set_preference(PreferenceCategory(cat), key, val, source="ai_inference", confidence=conf)
                     saved_count += 1
-                except:
+                except Exception:
                     continue
 
             return {
@@ -629,7 +510,7 @@ class PreferenceManager:
 
         except Exception as e:
             import traceback
-            return {"success": False, "message": f"提取失败: {str(e)}\nAI返回:\n{ai_content if 'ai_content' in dir() else 'N/A'}\n堆栈:\n{traceback.format_exc()[:500]}", "extracted_count": 0}
+            return {"success": False, "message": f"提取失败: {e!s}\nAI返回:\n{ai_content if 'ai_content' in dir() else 'N/A'}\n堆栈:\n{traceback.format_exc()[:500]}", "extracted_count": 0}
 
     def generate_prompt_context(self) -> str:
         """生成偏好上下文，用于导入到prompt中

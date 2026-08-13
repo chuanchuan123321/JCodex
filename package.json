@@ -1,0 +1,19 @@
+{
+  "name": "jcodex-desktop",
+  "version": "1.3.0",
+  "private": true,
+  "description": "JCodex desktop frontend tooling (lint + behavioral tests)",
+  "scripts": {
+    "test:frontend": "node tests/frontend/smoke.mjs",
+    "lint:js": "eslint agent/ui/desktop/js",
+    "format:check": "prettier --check agent/ui/desktop/js",
+    "version:frontend": "node scripts/fingerprint-frontend.mjs",
+    "version:frontend:check": "node scripts/fingerprint-frontend.mjs --check"
+  },
+  "devDependencies": {
+    "eslint": "^10.8.1",
+    "jsdom": "^25.0.1",
+    "prettier": "^3.9.6"
+  },
+  "type": "module"
+}

@@ -14,8 +14,8 @@ from agent.ui.desktop import main as desktop
 
 def _use_tmp_workspace(monkeypatch, tmp_path) -> None:
     """Isolate both runtime roots so tests never touch the real repo/data dir."""
-    monkeypatch.setattr(desktop, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(desktop, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(desktop.constants, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(desktop.constants, "DATA_ROOT", tmp_path)
 
 
 def _data_url(content: bytes, mime_type: str = "text/plain") -> str:
@@ -48,7 +48,7 @@ def test_workspace_listing_supports_nested_relative_paths(monkeypatch, tmp_path:
             "name": "result.csv",
             "path": "reports/2026/result.csv",
             "type": "file",
-            "size": len("value\n1\n".encode("utf-8")),
+            "size": len(b"value\n1\n"),
             "modified": nested_file.stat().st_mtime,
         }
     ]
@@ -70,29 +70,29 @@ def test_chat_media_resolver_allows_output_media_and_rejects_escapes(
     outside_path.write_bytes(b"private")
     _use_tmp_workspace(monkeypatch, tmp_path)
 
-    assert desktop._resolve_chat_media_file(str(image_path)) == (
+    assert desktop.helpers._resolve_chat_media_file(str(image_path)) == (
         image_path,
         "image/png",
     )
-    assert desktop._resolve_chat_media_file("workspace/temp/preview.mp4") == (
+    assert desktop.helpers._resolve_chat_media_file("workspace/temp/preview.mp4") == (
         video_path,
         "video/mp4",
     )
     # 绝对路径允许指向工作区之外，相对路径逃逸仍被拒绝
-    assert desktop._resolve_chat_media_file(str(outside_path)) == (
+    assert desktop.helpers._resolve_chat_media_file(str(outside_path)) == (
         outside_path,
         "image/png",
     )
     with pytest.raises(ValueError, match="outside the active task"):
-        desktop._resolve_chat_media_file("../../private.png")
+        desktop.helpers._resolve_chat_media_file("../../private.png")
     with pytest.raises(ValueError, match="Only local media paths"):
-        desktop._resolve_chat_media_file("data:image/png;base64,AAAA")
+        desktop.helpers._resolve_chat_media_file("data:image/png;base64,AAAA")
 
 
 def test_large_base64_media_is_redacted_before_persistence() -> None:
     payload = "data:image/png;base64," + ("A" * 512)
 
-    redacted = desktop._redact_embedded_media_data(f"before {payload} after")
+    redacted = desktop.helpers._redact_embedded_media_data(f"before {payload} after")
 
     assert redacted == (
         "before [已省略 Base64 媒体数据，请改用文件路径或 HTTP(S) 地址] after"
@@ -168,7 +168,7 @@ def test_desktop_skill_list_uses_explicit_builtin_names(
             f"---\nname: {name}\ndescription: {name} description\n---\n",
             encoding="utf-8",
         )
-    for name in (desktop.BUILTIN_SKILL_NAMES - {"python"}) | {"custom-skill"}:
+    for name in (desktop.constants.BUILTIN_SKILL_NAMES - {"python"}) | {"custom-skill"}:
         skill_dir = workspace_skills / name
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -180,7 +180,7 @@ def test_desktop_skill_list_uses_explicit_builtin_names(
 
     assert {
         name for name, skill in listed.items() if skill["builtin"]
-    } == desktop.BUILTIN_SKILL_NAMES
+    } == desktop.constants.BUILTIN_SKILL_NAMES
     assert listed["web"]["builtin"] is False
     assert listed["custom-skill"]["builtin"] is False
     store_names = {skill["name"] for skill in desktop.list_skill_store()}
@@ -289,7 +289,7 @@ def test_project_folder_picker_rejects_duplicate_requests(monkeypatch) -> None:
         "_run_native_project_folder_picker",
         lambda: "/Users/test/project",
     )
-    assert desktop._project_folder_picker_lock.acquire(blocking=False)
+    assert desktop.runtime._project_folder_picker_lock.acquire(blocking=False)
     try:
         assert desktop.select_project_folder() == {
             "success": False,
@@ -297,7 +297,7 @@ def test_project_folder_picker_rejects_duplicate_requests(monkeypatch) -> None:
             "path": "",
         }
     finally:
-        desktop._project_folder_picker_lock.release()
+        desktop.runtime._project_folder_picker_lock.release()
 
 
 def test_project_folder_picker_runs_modal_dialog_outside_eel_thread(
@@ -372,7 +372,6 @@ def test_saving_local_api_config_allows_empty_api_key(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    manager = ConfigManager()
 
     result = desktop.save_api_config(
         "本地8080", "http://127.0.0.1:8080", "", "qwen"
@@ -384,6 +383,7 @@ def test_saving_local_api_config_allows_empty_api_key(
         "api_base_url": "http://127.0.0.1:8080",
         "api_key": "",
         "api_model": "qwen",
+        "reasoning_effort": "high",
     }
 
 
@@ -396,12 +396,10 @@ def test_set_active_config_applies_runtime_and_persists(
     assert manager.add_config("second", "https://second.test", "key-2", "model-2")
 
     written = []
-    monkeypatch.setattr(
-        desktop,
-        "_write_env_file",
+    monkeypatch.setattr(desktop.helpers, "_write_env_file",
         lambda env_file, settings: written.append(settings),
     )
-    monkeypatch.setattr(desktop, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(desktop.rpc_settings, "load_dotenv", lambda *args, **kwargs: None)
 
     rebuilt = []
 
@@ -415,16 +413,16 @@ def test_set_active_config_applies_runtime_and_persists(
     os_agent_engine = SimpleNamespace()
     os_agent = _FakeExecutor(os_agent_engine)
     os_agent._name = "os_agent"
-    monkeypatch.setattr(desktop, "os_agent", os_agent)
+    monkeypatch.setattr(desktop.runtime, "os_agent", os_agent)
 
     conversation_engine = SimpleNamespace()
     conversation_executor = _FakeExecutor(conversation_engine)
     conversation_executor._name = "conversation"
-    desktop.conversation_executors["switch-test"] = conversation_executor
+    desktop.runtime.conversation_executors["switch-test"] = conversation_executor
     try:
         result = desktop.set_active_config("second")
     finally:
-        desktop.conversation_executors.pop("switch-test", None)
+        desktop.runtime.conversation_executors.pop("switch-test", None)
 
     assert result["success"] is True
     assert result["active"] == "second"
@@ -438,6 +436,7 @@ def test_set_active_config_applies_runtime_and_persists(
             "api_base_url": "https://second.test",
             "api_key": "key-2",
             "api_model": "model-2",
+            "reasoning_effort": "high",
         }
     ]
     assert "os_agent" in rebuilt

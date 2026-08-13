@@ -1,9 +1,8 @@
 """Edit tool - Smart file editing with multiple matching strategies"""
 
-import os
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Generator
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -59,7 +58,7 @@ class EditTool:
                 )
 
             # Read current content
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, encoding="utf-8") as f:
                 content = f.read()
 
             content = normalize_line_endings(content)
@@ -98,11 +97,11 @@ class EditTool:
             )
 
         except Exception as e:
-            return EditResult(success=False, message=f"Error: {str(e)}")
+            return EditResult(success=False, message=f"Error: {e!s}")
 
     def _replace(
         self, content: str, old_string: str, new_string: str, replace_all: bool
-    ) -> Optional[str]:
+    ) -> str | None:
         """Try multiple replacement strategies"""
 
         # Strategy 1: Simple exact match
@@ -132,7 +131,7 @@ class EditTool:
 
     def _line_trimmed_replace(
         self, content: str, old_string: str, new_string: str, replace_all: bool
-    ) -> Optional[str]:
+    ) -> str | None:
         """Try matching with trimmed lines"""
         old_lines = old_string.split("\n")
         content_lines = content.split("\n")
@@ -157,9 +156,10 @@ class EditTool:
 
     def _whitespace_normalized_replace(
         self, content: str, old_string: str, new_string: str, replace_all: bool
-    ) -> Optional[str]:
+    ) -> str | None:
         """Try matching with normalized whitespace"""
-        normalize = lambda t: " ".join(t.split())
+        def normalize(t: str) -> str:
+            return " ".join(t.split())
 
         normalized_old = normalize(old_string)
 
@@ -209,7 +209,7 @@ class EditTool:
 
 
 # Tool definition for OpenAI function calling
-def get_edit_tool_definition() -> Dict[str, Any]:
+def get_edit_tool_definition() -> dict[str, Any]:
     """Get tool definition in OpenAI function calling format"""
     return {
         "type": "function",
@@ -242,7 +242,7 @@ def get_edit_tool_definition() -> Dict[str, Any]:
     }
 
 
-def execute_edit(params: Dict[str, Any]) -> str:
+def execute_edit(params: dict[str, Any]) -> str:
     """Execute edit tool"""
     tool = EditTool()
     file_path = params.get("filePath", "")
@@ -264,5 +264,4 @@ def execute_edit(params: Dict[str, Any]) -> str:
         if result.diff:
             output += f"\n\nDiff:\n{result.diff}"
         return output
-    else:
-        return f"Error: {result.message}"
+    return f"Error: {result.message}"

@@ -156,7 +156,6 @@ def main():
     sys.argv = ["chat.py", "desktop"]
 
     import chat  # noqa: F401  (executes chat.py top-level init)
-
     from agent.ui.desktop import main as desktop_main
 
     desktop_main.main()

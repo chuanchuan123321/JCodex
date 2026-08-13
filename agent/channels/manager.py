@@ -1,9 +1,8 @@
 """Channel manager for coordinating chat channels."""
 
 import asyncio
-from typing import Any
+from contextlib import suppress
 
-from agent.bus.events import OutboundMessage
 from agent.bus.queue import MessageBus
 from agent.channels.base import BaseChannel
 from agent.config.schema import Config
@@ -67,10 +66,8 @@ class ChannelManager:
         # Stop dispatcher
         if self._dispatch_task:
             self._dispatch_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._dispatch_task
-            except asyncio.CancelledError:
-                pass
 
         # Stop all channels
         for name, channel in self.channels.items():
@@ -99,23 +96,7 @@ class ChannelManager:
                 else:
                     print(f"⚠️  Unknown channel: {msg.channel}")
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
-
-    def get_channel(self, name: str) -> BaseChannel | None:
-        """Get a channel by name."""
-        return self.channels.get(name)
-
-    def get_status(self) -> dict[str, Any]:
-        """Get status of all channels."""
-        return {
-            name: {"enabled": True, "running": channel.is_running}
-            for name, channel in self.channels.items()
-        }
-
-    @property
-    def enabled_channels(self) -> list[str]:
-        """Get list of enabled channel names."""
-        return list(self.channels.keys())

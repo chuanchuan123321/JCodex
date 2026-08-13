@@ -7,13 +7,13 @@ import json
 import os
 import re
 import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any
 
 from langchain_core.messages import BaseMessage
 
 from agent.core.env_utils import env_int
-
 
 SummarySampler = Callable[[str], str]
 ProgressCallback = Callable[[str, str], None]
@@ -92,8 +92,8 @@ class _PrefireCache:
 
 @dataclass
 class _PrefireState:
-    thread: Optional[threading.Thread] = None
-    cache: Optional[_PrefireCache] = None
+    thread: threading.Thread | None = None
+    cache: _PrefireCache | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -106,7 +106,7 @@ class ContextCompactor:
 
     @staticmethod
     def policy_from_runtime(
-        max_tokens: int, _legacy_compress_at: Optional[int] = None
+        max_tokens: int, _legacy_compress_at: int | None = None
     ) -> ContextPolicy:
         """Resolve Grok's percentage-based compaction policy."""
         context_window = max(1, env_int("CONTEXT_WINDOW", max_tokens or 30_000))
@@ -130,7 +130,7 @@ class ContextCompactor:
         )
 
     def refresh_policy(
-        self, max_tokens: int, _legacy_compress_at: Optional[int] = None
+        self, max_tokens: int, _legacy_compress_at: int | None = None
     ) -> None:
         """Apply settings changed at runtime and invalidate speculative state."""
         self.policy = self.policy_from_runtime(max_tokens)
@@ -295,7 +295,7 @@ class ContextCompactor:
         with self._prefire.lock:
             self._prefire.cache = None
 
-    def _take_valid_prefire(self, snapshot: ContextSnapshot) -> Optional[_PrefireCache]:
+    def _take_valid_prefire(self, snapshot: ContextSnapshot) -> _PrefireCache | None:
         with self._prefire.lock:
             thread = self._prefire.thread
         if thread and thread.is_alive():
@@ -323,7 +323,7 @@ class ContextCompactor:
         match = re.search(r"<summary>([\s\S]*?)</summary>", result, re.IGNORECASE)
         if match:
             result = "Summary:\n" + match.group(1).strip()
-        result = re.sub(r"</?(?:summary|analysis|summary_request)>", "", result, flags=re.I)
+        result = re.sub(r"</?(?:summary|analysis|summary_request)>", "", result, flags=re.IGNORECASE)
         result = re.sub(r"\n{3,}", "\n\n", result)
         return result.strip()
 
@@ -432,7 +432,7 @@ class ContextCompactor:
     def _build_summary_prompt(
         transcript: str,
         *,
-        two_pass_note: Optional[str],
+        two_pass_note: str | None,
         pass_one: bool = False,
     ) -> str:
         if pass_one:
@@ -476,8 +476,8 @@ identifiers, commands, paths, configuration values, and unresolved errors when r
         self,
         snapshot: ContextSnapshot,
         sampler: SummarySampler,
-        progress: Optional[ProgressCallback] = None,
-        cancelled: Optional[Callable[[], bool]] = None,
+        progress: ProgressCallback | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CompactionOutput:
         """Run full replacement with two-pass reuse, retries, and input degradation."""
         report = progress or (lambda _stage, _content: None)

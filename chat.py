@@ -1,64 +1,85 @@
 #!/usr/bin/env python3
 """JCodex - intelligent coding and system automation assistant."""
 
+import asyncio
+import itertools
+import json
+import locale
+import os
+import platform
+import shutil
 import sys
+import threading
+import time
 import uuid
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, ClassVar
+
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
 
 # 添加项目根目录到 sys.path
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # 修复macOS终端UTF-8输入问题
-import os
-import locale
-
 os.environ["PYTHONIOENCODING"] = "utf-8"
-try:
-    locale.setlocale(locale.LC_ALL, "")
-except (locale.Error, OSError):
+with suppress(locale.Error, OSError):
     # Some Windows locales are not installed; fall back to the default.
-    pass
+    locale.setlocale(locale.LC_ALL, "")
 
 DATA_ROOT = Path(os.getenv("JCODEX_DATA_DIR", "") or PROJECT_ROOT).expanduser().resolve()
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
 # 加载环境变量
-from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
-
 load_dotenv(DATA_ROOT / ".env", override=True)
 if not (DATA_ROOT / ".env").exists():
     load_dotenv(PROJECT_ROOT / ".env", override=True)
 
-from agent.core.ai_engine import AIEngine
-from agent.core.context_compactor import ContextCompactor
-from agent.core.extended_tool_executor import (
+# agent 包依赖上方 sys.path 引导，必须保持在其后导入
+from agent.bus.events import OutboundMessage  # noqa: E402
+from agent.bus.queue import MessageBus  # noqa: E402
+from agent.channels.manager import ChannelManager  # noqa: E402
+from agent.config.loader import load_config  # noqa: E402
+from agent.core.ai_engine import AIEngine  # noqa: E402
+from agent.core.context_compactor import ContextCompactor  # noqa: E402
+from agent.core.env_utils import env_int  # noqa: E402
+from agent.core.extended_tool_executor import (  # noqa: E402
     ExtendedToolExecutor,
     strip_disabled_vision_prompt,
 )
-from agent.core.langchain_model import AIEngineChatModel
-from agent.core.langgraph_runner import (
+from agent.core.langchain_model import AIEngineChatModel  # noqa: E402
+from agent.core.langgraph_runner import (  # noqa: E402
     LangGraphRunner,
     RunResult,
     create_checkpoint_saver,
 )
-from agent.core.skills import SkillsLoader
-from agent.core.memory_store import MemoryStore
-from agent.core.memory_manager import MemoryManager
-from agent.core.env_utils import env_float, env_int
-from agent.core.tool_loop_guard import ToolLoopGuard
-from agent.bus.queue import MessageBus
-from agent.bus.events import OutboundMessage
-from agent.channels.manager import ChannelManager
-from agent.config.loader import load_config
-import json
-import asyncio
-import itertools
-import shutil
-import threading
-import time
+from agent.core.memory_manager import MemoryManager  # noqa: E402
+from agent.core.memory_store import MemoryStore  # noqa: E402
+from agent.core.prompt_helpers import (  # noqa: E402
+    _multi_agent_mode_instruction,
+    _plan_mode_instruction,
+    _platform_instruction,
+)
+from agent.core.skills import SkillsLoader  # noqa: E402
+from agent.core.tool_loop_guard import ToolLoopGuard  # noqa: E402
+
+# Keep references to fire-and-forget asyncio tasks so they are not
+# garbage-collected before completion.
+_FIRE_AND_FORGET_TASKS: set[asyncio.Task] = set()
+
+
+def _discard_fire_and_forget_task(task: asyncio.Task) -> None:
+    _FIRE_AND_FORGET_TASKS.discard(task)
+
+
+def _fire_and_forget(awaitable) -> asyncio.Task:
+    task = asyncio.ensure_future(awaitable)
+    _FIRE_AND_FORGET_TASKS.add(task)
+    task.add_done_callback(_discard_fire_and_forget_task)
+    return task
 
 
 def _supports_ansi() -> bool:
@@ -190,7 +211,9 @@ class Symbols:
     BOTTOM_LEFT = "╰"
     BOTTOM_RIGHT = "╯"
     # Spinner variants
-    SPINNER_CHARS = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    SPINNER_CHARS: ClassVar[list[str]] = [
+        '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'
+    ]
 
 
 class Box:
@@ -241,7 +264,7 @@ class ProgressBar:
 class Toast:
     """Toast notification system"""
 
-    _messages: list = []
+    _messages: ClassVar[list] = []
 
     @classmethod
     def show(cls, message: str, variant: str = "info", duration: float = 3.0):
@@ -335,7 +358,7 @@ class NaturalTaskExecutor:
         self.max_web_searches = MAX_WEB_SEARCHES  # 从环境变量读取
         self.max_steps = MAX_STEPS  # 从环境变量读取
         self.max_tokens = env_int("MAX_TOKENS", 50000)
-        self.context_window = env_int("CONTEXT_WINDOW", 128000)
+        self.context_window = env_int("CONTEXT_WINDOW", 256000)
         self.context_compactor = ContextCompactor(
             ContextCompactor.policy_from_runtime(self.context_window, None)
         )
@@ -365,8 +388,8 @@ class NaturalTaskExecutor:
         self._gateway_pending: dict[str, dict[str, Any]] = {}
         self._gateway_active: dict[str, dict[str, Any]] = {}
         self._gateway_tasks: dict[str, Any] = {}
-        self._active_graph_runtime: Optional[dict[str, Any]] = None
-        self._active_cancel_event: Optional[threading.Event] = None
+        self._active_graph_runtime: dict[str, Any] | None = None
+        self._active_cancel_event: threading.Event | None = None
         self._compression_lock = threading.Lock()
 
     def _estimate_tokens(self, text: str) -> int:
@@ -400,69 +423,16 @@ class NaturalTaskExecutor:
         total_tokens = chinese_tokens + english_tokens + other_tokens
         return max(total_tokens, 1)
 
-    def _compress_and_notify(self, event_loop=None):
-        """在后台线程中执行压缩并通知用户"""
-        try:
-            # 压缩前估算token数（包括累积压缩摘要和执行历史）
-            tokens_before = 0
-            if self.accumulated_compression:
-                tokens_before += self._estimate_tokens(self.accumulated_compression)
-            if self.execution_history:
-                history_text = "\n".join(self.execution_history)
-                tokens_before += self._estimate_tokens(history_text)
-
-            start_spinner("正在自动整理近期记忆", show_elapsed=True)
-            try:
-                self._compress_current_task_manual()
-            finally:
-                stop_spinner()
-            print(
-                f"{Colors.GREEN}{Symbols.CHECK} {Colors.BOLD}自动压缩完成{Colors.RESET} "
-                f"{Colors.DIM}· 已整理约 {tokens_before} tokens{Colors.RESET}"
-            )
-
-            # 在网关模式下向飞书发送通知
-            if (
-                event_loop
-                and self.is_gateway_mode
-                and self.bus
-                and self.current_channel
-                and self.current_chat_id
-            ):
-                try:
-                    msg = f"✅ 任务历史已自动压缩 (清除了 {tokens_before} tokens)"
-                    coro = self._send_to_channel(msg)
-                    asyncio.run_coroutine_threadsafe(coro, event_loop)
-                except Exception:
-                    pass
-        except Exception as e:
-            Toast.error(f"自动压缩失败: {e}")
-
-    def _compress_current_task_async_wrapper(self):
-        """异步包装器，在子线程中执行压缩"""
-        try:
-            self._compress_current_task_manual()
-        except Exception as e:
-            Toast.error(f"压缩失败: {e}")
-            # 在网关模式下发送错误消息
-            if (
-                self.is_gateway_mode
-                and self.bus
-                and self.current_channel
-                and self.current_chat_id
-            ):
-                asyncio.ensure_future(self._send_to_channel(f"⚠️ 压缩失败: {str(e)}"))
-
     def execute_task(
         self,
         user_request: str,
         *,
-        thread_id: Optional[str] = None,
-        session_key: Optional[str] = None,
-        channel: Optional[str] = None,
-        chat_id: Optional[str] = None,
-        sender_id: Optional[str] = None,
-        interactive: Optional[bool] = None,
+        thread_id: str | None = None,
+        session_key: str | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        sender_id: str | None = None,
+        interactive: bool | None = None,
     ) -> RunResult | None:
         """Execute one isolated task through the shared LangGraph runtime."""
         # Check for clear command
@@ -628,27 +598,22 @@ class NaturalTaskExecutor:
                 "Feishu channel. Do not claim to send messages or files to a "
                 "gateway; provide local file paths in your response instead."
             ),
-            "plan_mode_instruction": (
-                "For multi-step work, call `todo_write` before substantive "
-                "execution to create a short structured plan. Use stable IDs, "
-                "set `merge: false` initially, and send only changed items with "
-                "`merge: true` afterward. Keep at most one item `in_progress`. "
-                "Update statuses after meaningful progress or "
-                "replanning; do not use it for trivial one-step requests or as a "
-                "substitute for user-visible work updates."
-            ),
+            "plan_mode_instruction": _plan_mode_instruction(False, "off"),
+            "multi_agent_mode_instruction": _multi_agent_mode_instruction(False),
+            "platform_instruction": _platform_instruction(),
             "project_context": (
                 "当前任务不属于桌面项目工作区，使用 JCodex 默认工作目录。"
             ),
             "file_write_boundary": (
-                "Protect the JCodex application source tree at "
-                "`{project_root}`: you may inspect it, but do not create, edit, "
-                "overwrite, append, move, rename, or delete files inside it "
-                "except under `{temp_path}` and `{output_path}`. This restriction "
-                "applies only to the JCodex source tree. Desktop, Documents, "
-                "Downloads, and other local paths explicitly placed in scope by "
-                "the user may be created, edited, moved, renamed, or deleted. "
-                "Normal approval rules still apply to mutating tools."
+                f"Protect the JCodex application source tree at `{project_root}` "
+                f"and its data workspace at `{workspace_path}`: you may inspect "
+                "them, but do not create, edit, overwrite, append, move, rename, "
+                f"or delete files inside them except under `{workspace_path / 'temp'}` "
+                f"and `{workspace_path / 'output'}`. This restriction applies only "
+                "to the JCodex source tree. Desktop, Documents, Downloads, dropped "
+                "reference folders, and other local paths explicitly placed in "
+                "scope by the user may be created, edited, moved, renamed, or "
+                "deleted. Normal approval rules still apply to mutating tools."
             ),
         }
         template = (project_root / "Agent.md").read_text(encoding="utf-8")
@@ -687,7 +652,7 @@ class NaturalTaskExecutor:
 
     def _graph_compression_check(
         self, state: dict[str, Any], memory_manager: MemoryManager
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Check the exact model prompt at a safe graph boundary."""
         snapshot = ContextCompactor.build_snapshot(
             state,
@@ -817,7 +782,7 @@ class NaturalTaskExecutor:
         ]
         return result
 
-    def _memory_for_session(self, session_key: Optional[str]) -> MemoryManager:
+    def _memory_for_session(self, session_key: str | None) -> MemoryManager:
         """Return persistent memory isolated to one gateway chat."""
         if not session_key:
             return self.memory_manager
@@ -826,13 +791,13 @@ class NaturalTaskExecutor:
         digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:20]
         return MemoryManager(str(DATA_ROOT / "Memory" / "gateway" / digest))
 
-    def _data_integrator_for_session(self, session_key: Optional[str]):
+    def _data_integrator_for_session(self, session_key: str | None):
         """Return analytics storage isolated to one gateway chat."""
         if not session_key:
             return self.data_integrator
-        from agent.core.data_integrator import DataIntegrator
-
         import hashlib
+
+        from agent.core.data_integrator import DataIntegrator
 
         digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:20]
         return DataIntegrator(
@@ -977,15 +942,13 @@ class NaturalTaskExecutor:
                 history_entry
             )
             memory_manager.append_execution_step(history_entry)
-            try:
+            with suppress(Exception):
                 data_integrator.ingest_tool_result(
                     tool_name=name,
                     params=params if isinstance(params, dict) else {},
                     result=result,
                     task_id=runtime.get("task_id"),
                 )
-            except Exception:
-                pass
             print(self._format_tool_result(name, result))
             return
         if event_type == "compression_start":
@@ -1031,7 +994,7 @@ class NaturalTaskExecutor:
 
     def _prompt_for_graph_interrupt(
         self, result: RunResult
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Collect a CLI answer for a graph interrupt and resume it."""
         if not result.pending:
             return None
@@ -1274,7 +1237,7 @@ class NaturalTaskExecutor:
     @staticmethod
     def _parse_gateway_question_answer(
         questions: list[dict[str, Any]], response: str
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Parse one text response into ordered question answers."""
         raw_groups = [item.strip() for item in response.split(";")]
         if len(questions) > 1 and len(raw_groups) != len(questions):
@@ -1284,7 +1247,7 @@ class NaturalTaskExecutor:
         answers = []
         supplements = []
         lines = []
-        for question, raw_group in zip(questions, raw_groups):
+        for question, raw_group in zip(questions, raw_groups, strict=False):
             labels = [
                 str(item.get("label", "")).strip()
                 for item in question.get("options", [])
@@ -1363,18 +1326,14 @@ class NaturalTaskExecutor:
                 None,
             )
             if callable(discard_plan):
-                try:
+                with suppress(Exception):
                     discard_plan(
                         runtime.get("session_key"),
                         runtime.get("run_id") or result.run_id,
                     )
-                except Exception:
-                    pass
             if deleted_checkpoint:
-                try:
+                with suppress(Exception):
                     self.langgraph_runner.vacuum_checkpoint_store()
-                except Exception:
-                    pass
         memory_manager = runtime.get("memory_manager", self.memory_manager)
         data_integrator = runtime.get("data_integrator", self.data_integrator)
         if result.status == "complete":
@@ -1423,395 +1382,6 @@ class NaturalTaskExecutor:
         else:
             coroutine.close()
 
-    def _execute_step(self, user_request: str, context: str):
-        """Execute a single step with natural description"""
-        # 检查是否应该停止任务
-        if self.should_stop or self._stop_event.is_set():
-            print(f"\n⏹️  {Colors.BOLD}任务已停止{Colors.RESET}\n")
-            self.should_stop = False
-            self._stop_event.clear()
-            self.data_integrator.end_task("已停止")
-            return
-
-        if self.step_count > self.max_steps:
-            print(f"\n{Colors.YELLOW}{Symbols.WARNING} {Colors.BOLD}已达到最大步数限制({self.max_steps})，任务停止{Colors.RESET}\n")
-            self.data_integrator.end_task("已停止")
-            return
-
-        # Get current time
-        from agent.tools.time_tool import TimeTool
-
-        current_time = TimeTool.get_current_time()
-
-        # Build skills context (two-layer strategy like nanobot)
-        # 1. Get all skills summary
-        skills_summary = self.skills_loader.build_skills_summary()
-
-        # 2. AI 根据需要主动调用 load_skill 来加载 skills
-
-        # 3. Get project paths
-        project_root = Path(__file__).parent
-        workspace_path = DATA_ROOT / "workspace"
-        builtin_skills_path = project_root / "agent" / "skills"
-        workspace_skills_path = workspace_path / "skills"
-        output_path = workspace_path / "output"
-        temp_path = workspace_path / "temp"
-        cache_path = workspace_path / "cache"
-        desktop_path = Path.home() / "Desktop"
-
-        # Build the prompt for this step
-        # 从 Agent.md 读取提示词模板
-        agent_md_path = Path(__file__).parent / "Agent.md"
-
-        # 读取 Agent.md 模板
-        with open(agent_md_path, "r", encoding="utf-8") as f:
-            agent_template = f.read()
-
-        # 分离系统提示词和用户消息部分
-        # 系统提示词：从开头到【用户任务】之前
-        # 用户消息：从【用户任务】开始
-        split_marker = "【User Task】"
-        split_idx = agent_template.find(split_marker)
-
-        if split_idx >= 0:
-            system_prompt_template = agent_template[:split_idx]
-            user_message_template = agent_template[split_idx:]
-        else:
-            # 如果找不到分割点，全部作为系统提示词
-            system_prompt_template = agent_template
-            user_message_template = ""
-
-        # 替换系统提示词中的变量
-        system_prompt = strip_disabled_vision_prompt(system_prompt_template)
-        system_prompt = system_prompt.replace("{step_count}", str(self.step_count))
-        system_prompt = system_prompt.replace("{max_steps}", str(self.max_steps))
-        system_prompt = system_prompt.replace(
-            "{step_count_minus_1}", str(self.step_count - 1)
-        )
-        system_prompt = system_prompt.replace(
-            "{steps_remaining}", str(self.max_steps - self.step_count + 1)
-        )
-        system_prompt = system_prompt.replace(
-            "{plan_mode_instruction}",
-            "For multi-step work, call `todo_write` before substantive "
-            "execution and keep the structured todo plan current.",
-        )
-        system_prompt = system_prompt.replace(
-            "{runtime_mode_instruction}",
-            "This task is running through an active gateway channel."
-            if self.is_gateway_mode
-            else "This task is running locally, not through a gateway or Feishu "
-            "channel. Do not claim to send messages or files to a gateway; "
-            "provide local file paths in your response instead.",
-        )
-        system_prompt = system_prompt.replace(
-            "{project_context}",
-            "当前任务不属于桌面项目工作区，使用 JCodex 默认工作目录。",
-        )
-        system_prompt = system_prompt.replace(
-            "{file_write_boundary}",
-            "Protect the JCodex application source tree at "
-            "`{project_root}`: you may inspect it, but do not create, edit, "
-            "overwrite, append, move, rename, or delete files inside it except "
-            "under `{temp_path}` and `{output_path}`. This restriction applies "
-            "only to the JCodex source tree. Desktop, Documents, Downloads, "
-            "and other local paths explicitly placed in scope by the user may "
-            "be created, edited, moved, renamed, or deleted. Normal approval "
-            "rules still apply to mutating tools.",
-        )
-        system_prompt = system_prompt.replace(
-            "{accumulated_compression}",
-            self.accumulated_compression
-            if self.accumulated_compression
-            else "这是第一个任务",
-        )
-
-        # 加载execution_history文件内容
-        execution_history_content = self.memory_manager.load_execution_history()
-        execution_history_text = (
-            "\n".join(execution_history_content)
-            if execution_history_content
-            else "还没有执行任何步骤"
-        )
-        system_prompt = system_prompt.replace(
-            "{execution_history}", execution_history_text
-        )
-
-        system_prompt = system_prompt.replace("{current_time}", current_time)
-        system_prompt = system_prompt.replace(
-            "{web_search_count}", str(self.web_search_count)
-        )
-        system_prompt = system_prompt.replace(
-            "{max_web_searches}", str(self.max_web_searches)
-        )
-        system_prompt = system_prompt.replace("{project_root}", str(project_root))
-        system_prompt = system_prompt.replace("{workspace_path}", str(workspace_path))
-        system_prompt = system_prompt.replace(
-            "{builtin_skills_path}", str(builtin_skills_path)
-        )
-        system_prompt = system_prompt.replace(
-            "{workspace_skills_path}", str(workspace_skills_path)
-        )
-        system_prompt = system_prompt.replace("{desktop_path}", str(desktop_path))
-        system_prompt = system_prompt.replace("{output_path}", str(output_path))
-        system_prompt = system_prompt.replace("{temp_path}", str(temp_path))
-        system_prompt = system_prompt.replace("{cache_path}", str(cache_path))
-        system_prompt = system_prompt.replace("{skills_summary}", skills_summary)
-
-        memory_context = self._memory_context_by_session.get("cli", "")
-        if not memory_context:
-            memory_context = self.memory_store.initial_context(user_request)
-            self._memory_context_by_session["cli"] = memory_context
-        system_prompt = self.memory_store.append_context(system_prompt, memory_context)
-
-        # 替换用户消息中的变量
-        user_message = user_message_template
-        user_message = user_message.replace("{user_request}", user_request)
-        user_message = user_message.replace("{context}", context)
-
-        # 获取工具定义
-        available_tools = self.tool_executor.get_available_tools(
-            include_gateway_tools=self.is_gateway_mode
-        )
-
-        # AI 思考时显示 spinner
-        start_spinner("AI思考中")
-
-        try:
-            result = self.ai_engine.process_with_tools(
-                user_message,
-                system_prompt=system_prompt,
-                tools=available_tools,
-            )
-        finally:
-            stop_spinner()
-
-        if self.should_stop or self._stop_event.is_set():
-            self.should_stop = False
-            self._stop_event.clear()
-            self.data_integrator.end_task("已停止")
-            Toast.warning("任务已停止")
-            return
-
-        # 检查是否有工具调用
-        if result.get("tool_calls"):
-            # 有工具调用 - 先显示思考内容（从 <think> 标签中提取）
-            thinking_content = result.get("content", "")
-            if thinking_content:
-                # 提取 <think>...</think> 标签之间的内容
-                import re
-                think_match = re.search(r'<think>([\s\S]*?)</think>', thinking_content)
-                if think_match:
-                    think_content = think_match.group(1).strip()
-                    # 移除response中的think标签，避免重复打印
-                    thinking_content_clean = re.sub(r'<think>[\s\S]*?</think>', '', thinking_content)
-                    if think_content:
-                        print(f"\n{Colors.DIM}{Symbols.THINKING} {Colors.BOLD}思考:{Colors.RESET}\n{Colors.DIM}{think_content}{Colors.RESET}\n")
-                        if (
-                            self.is_gateway_mode
-                            and self.bus
-                            and self.current_channel
-                            and self.current_chat_id
-                        ):
-                            asyncio.ensure_future(self._send_to_channel(f"💭 *思考:*\n{think_content}"))
-                    # 打印去除think标签后的内容
-                    if thinking_content_clean.strip():
-                        print(thinking_content_clean)
-
-            # 逐个处理工具调用
-            for tool_call in result["tool_calls"]:
-                tool_name = tool_call.name
-                params = tool_call.arguments
-
-                # 保存到记忆
-                import json
-
-                tool_json = json.dumps(
-                    {
-                        "tool": tool_name,
-                        "params": params,
-                    },
-                    ensure_ascii=False,
-                )
-                history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: "
-                is_web_search_tool = tool_name in {"web_search", "websearch"}
-
-                guard_decision = self.tool_loop_guard.before_call(tool_name, params)
-                if guard_decision["action"] != "execute":
-                    tool_result = guard_decision["result"]
-                    history_entry += tool_result
-                    print(
-                        f"\n{Colors.YELLOW}{Symbols.WARNING} "
-                        f"{tool_result}{Colors.RESET}\n"
-                    )
-                    self.execution_history.append(history_entry)
-                    self.memory_manager.append_execution_step(history_entry)
-                    continue
-
-                if is_web_search_tool and self.web_search_count >= self.max_web_searches:
-                    tool_result = f"⚠️ 已达到网络搜索限制({self.max_web_searches}次)"
-                    history_entry += tool_result
-                    print(f"\n{Colors.YELLOW}{Symbols.WARNING} {tool_result}{Colors.RESET}")
-                    self.execution_history.append(history_entry)
-                    self.memory_manager.append_execution_step(history_entry)
-                    continue
-
-                # 检查工具是否需要确认
-                requires_approval = self._is_tool_requires_approval(tool_name)
-
-                # 如果不是允许所有命令，且工具需要确认，则询问用户
-                if not self.allow_all_commands and requires_approval:
-                    if self.is_gateway_mode:
-                        # 网关模式：发送确认请求到飞书
-                        action_desc = self._get_action_description(tool_name, params)
-                        approval_msg = f"""⚠️ 【需要确认】
-
-AI 想要执行以下操作：
-{action_desc}
-
-请在飞书中回复：
-- "yes" 或 "y" - 执行此命令
-- "all" 或 "a" - 允许本任务所有命令
-- "no" 或 "n" - 取消此命令
-"""
-                        if self.bus and self.current_channel and self.current_chat_id:
-                            msg = OutboundMessage(
-                                channel=self.current_channel,
-                                chat_id=self.current_chat_id,
-                                content=approval_msg,
-                            )
-                            asyncio.ensure_future(self.bus.publish_outbound(msg))
-
-                        # 设置等待标志
-                        self.waiting_for_approval = True
-
-                        self.pending_decision = {
-                            "action": "execute_tool",
-                            "tool": tool_name,
-                            "params": params,
-                        }
-                        self.pending_user_request = user_request
-                        self.pending_context = context
-                        print(f"\n{Colors.YELLOW}{Symbols.WARNING} {Colors.BOLD}等待用户确认...{Colors.RESET}\n")
-                        return
-                    else:
-                        # CLI 模式
-                        print(f"\n{Colors.YELLOW}{Symbols.WARNING} {Colors.BOLD}AI 想要执行:{Colors.RESET} {tool_name}")
-                        action_desc = self._get_action_description(tool_name, params)
-                        print(f"{Colors.DIM}{Symbols.VERTICAL} 详情: {action_desc}{Colors.RESET}\n")
-                        approval = self._ask_for_approval()
-                        if approval == "no":
-                            tool_result = "用户拒绝执行此命令"
-                            print(f"\n{Colors.RED}{Symbols.CROSS} {tool_result}{Colors.RESET}\n")
-                            history_entry += tool_result
-                            self.execution_history.append(history_entry)
-                            self.memory_manager.append_execution_step(history_entry)
-                            self.step_count += 1
-                            context = self._build_context()
-                            self._execute_step(user_request, context)
-                            return
-                        elif approval == "all":
-                            self.allow_all_commands = True
-
-                # 执行工具
-                print(f"\n{Colors.CYAN}{Symbols.TOOL} {Colors.BOLD}执行工具: {tool_name}{Colors.RESET}")
-                stop_spinner()  # 先停止AI思考spinner
-                start_spinner(f"执行{tool_name}")
-
-                tool_result = self.tool_executor.execute(
-                    {"tool": tool_name, "params": params}
-                )
-                self.tool_loop_guard.record_result(
-                    tool_name,
-                    params,
-                    tool_result,
-                    guard_decision["signature"],
-                    guard_decision["kind"],
-                )
-                stop_spinner()
-
-                # 格式化输出结果（支持折叠长输出）
-                formatted_result = self._format_tool_result(tool_name, tool_result)
-                print(formatted_result)
-
-                # 自动记录到数据整合模块
-                self.data_integrator.ingest_tool_result(
-                    tool_name=tool_name,
-                    params=params,
-                    result=tool_result
-                )
-
-                history_entry += tool_result
-                self.execution_history.append(history_entry)
-                self.memory_manager.append_execution_step(history_entry)
-
-                # 网络搜索计数
-                if is_web_search_tool:
-                    self.web_search_count += 1
-
-            # 清空对话历史，继续下一步
-            self.ai_engine.clear_history()
-            context = self._build_context()
-            self._execute_step(user_request, context)
-            return
-
-        # 没有工具调用 - 最终响应
-        response = result.get("content", "")
-
-        # 提取并显示思考内容（从 <think> 标签中提取）
-        import re
-        think_match = re.search(r'<think>([\s\S]*?)</think>', response)
-        if think_match:
-            think_content = think_match.group(1).strip()
-            if think_content:
-                print(f"\n{Colors.DIM}{Symbols.THINKING} {Colors.BOLD}思考:{Colors.RESET}\n{Colors.DIM}{think_content}{Colors.RESET}\n")
-                if self.is_gateway_mode and self.bus and self.current_channel and self.current_chat_id:
-                    asyncio.ensure_future(self._send_to_channel(f"💭 *思考:*\n{think_content}"))
-
-        # 清空AI引擎的对话历史
-        self.ai_engine.clear_history()
-
-        # 显示AI的回答（移除think标签后打印）
-        response_clean = self.memory_manager.strip_reasoning(response)
-        print(response_clean)
-
-        # 提取自然语言部分（使用移除think标签后的内容）
-        natural_language = self._extract_natural_language(response_clean)
-
-        is_final = result.get("finish_reason") == "stop" and not result.get("tool_calls")
-
-        # 记录AI的自然语言响应到记忆文件
-        # 最终响应不保存中间响应，避免重复
-        if natural_language and not is_final:
-            self.memory_manager.append_execution_step(f"【AI响应】{natural_language}")
-
-        # 发送到飞书
-        if natural_language and self.is_gateway_mode:
-            asyncio.ensure_future(self._send_to_channel(f"🤖 {natural_language}"))
-
-        # 检查是否是最终响应
-        if is_final:
-            self.memory_manager.append_execution_step(f"【最终回应】{natural_language}")
-            print(f"\n{Colors.GREEN}{Symbols.CHECK} {Colors.BOLD}任务完成{Colors.RESET}\n")
-
-            # 结束任务记录
-            self.data_integrator.end_task("已完成")
-
-            # 发送最终响应到飞书
-            if response and self.is_gateway_mode:
-                asyncio.ensure_future(self._send_to_channel(f"✅ {response}"))
-
-            return
-
-        # 继续执行下一步
-        self.step_count += 1
-        context = self._build_context()
-        self._execute_step(user_request, context)
-
-    async def _execute_step_async(self, user_request: str, context: str):
-        """Async wrapper for _execute_step to avoid nested asyncio issues"""
-        self._execute_step(user_request, context)
-
     def _compress_current_task_manual(self) -> None:
         """Manually compress the current execution history into a summary"""
         if self.is_compressing:
@@ -1854,8 +1424,8 @@ AI 想要执行以下操作：
         memory_manager: MemoryManager,
         snapshot: dict[str, Any],
         *,
-        progress: Optional[Callable[[str, str], None]] = None,
-        cancelled: Optional[Callable[[], bool]] = None,
+        progress: Callable[[str, str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Compress one session without mutating another session's memory."""
         started_at = time.monotonic()
@@ -2012,280 +1582,6 @@ AI 想要执行以下操作：
             f"📁 存档位置: {result.get('archive_path', '')}\n"
         )
 
-    def _truncate_response(self, response: str, max_length: int = 50) -> str:
-        """截断长响应，超过max_length的部分用省略号表示"""
-        if len(response) <= max_length:
-            return response
-
-        # 找到第max_length个字符的位置
-        truncated = response[:max_length]
-
-        # 如果截断位置在JSON标记中间，需要特殊处理
-        if "===== JSON START =====" in response:
-            # 分别处理自然语言部分和JSON部分
-            parts = response.split("===== JSON START =====")
-            if len(parts) == 2:
-                natural_part = parts[0]
-                json_part = "===== JSON START =====" + parts[1]
-
-                # 截断自然语言部分
-                if len(natural_part) > max_length:
-                    natural_part = natural_part[:max_length] + "...\n"
-
-                # JSON部分保持原样（因为需要解析）
-                return natural_part + json_part
-
-        return truncated + "..."
-
-    def _extract_natural_language(self, response: str) -> str:
-        """从AI响应中提取自然语言部分"""
-        import re
-        try:
-            # 移除 <think>...</think> 内容
-            cleaned = re.sub(r'<think>[\s\S]*?</think>', '', response)
-
-            # 查找 JSON 标记
-            start_marker = "===== JSON START ====="
-            start_idx = cleaned.find(start_marker)
-
-            if start_idx > 0:
-                # 提取 JSON 标记之前的内容
-                natural_part = cleaned[:start_idx].strip()
-                # 移除 "接下来我要: " 前缀
-                if natural_part.startswith("接下来我要:"):
-                    natural_part = natural_part[len("接下来我要:") :].strip()
-                return natural_part
-            else:
-                # 如果没有 JSON 标记，返回整个响应
-                return cleaned.strip()
-        except Exception:
-            return ""
-
-    def _parse_json_response(self, response: str, max_retries: int = 2) -> dict:
-        """尝试解析JSON响应，失败时重试"""
-        import re
-
-        for attempt in range(max_retries):
-            try:
-                # 首先尝试使用分隔符提取JSON
-                start_marker = "===== JSON START ====="
-                end_marker = "===== JSON END ====="
-
-                start_idx = response.find(start_marker)
-                end_idx = response.find(end_marker)
-
-                if start_idx >= 0 and end_idx > start_idx:
-                    # 使用分隔符提取JSON
-                    json_str = response[start_idx + len(start_marker) : end_idx].strip()
-                else:
-                    # 备选方案：查找 { 和 }
-                    start_idx = response.find("{")
-                    end_idx = response.rfind("}") + 1
-
-                    if start_idx < 0 or end_idx <= start_idx:
-                        if attempt == max_retries - 1:
-                            print(f"⚠️  无法找到JSON对象")
-                        continue
-
-                    json_str = response[start_idx:end_idx]
-
-                # 尝试修复常见的JSON问题
-                json_str = json_str.replace("\n", " ")  # 移除换行符
-                json_str = json_str.replace("\r", "")  # 移除回车符
-
-                # 移除可能的代码块标记
-                if json_str.startswith("```"):
-                    json_str = json_str[3:]
-                if json_str.endswith("```"):
-                    json_str = json_str[:-3]
-                json_str = json_str.strip()
-
-                # 首先尝试直接解析
-                try:
-                    decision = json.loads(json_str)
-
-                    # 自动修复：如果action不是execute_tool或respond，尝试修复
-                    if decision.get("action") not in ["execute_tool", "respond"]:
-                        # 检查是否是工具名称被当作action
-                        possible_tool = decision.get("action")
-                        if "params" in decision:
-                            # 这看起来像是工具调用，修复为正确格式
-                            decision = {
-                                "action": "execute_tool",
-                                "tool": possible_tool,
-                                "params": decision.get("params", {}),
-                            }
-
-                    return decision
-                except json.JSONDecodeError as e:
-                    # 如果失败，尝试修复常见问题
-                    error_pos = e.pos if hasattr(e, "pos") else 0
-
-                    # 修复策略1：处理content字段中的未转义引号
-                    # 对于content字段中的HTML/长文本，需要特殊处理
-                    json_str = re.sub(
-                        r'("content"\s*:\s*")((?:[^"\\]|\\.)*?)(")',
-                        lambda m: m.group(1)
-                        + m.group(2).replace('"', '\\"')
-                        + m.group(3),
-                        json_str,
-                        flags=re.DOTALL,
-                    )
-
-                    try:
-                        decision = json.loads(json_str)
-
-                        # 自动修复：如果action不是execute_tool或respond，尝试修复
-                        if decision.get("action") not in ["execute_tool", "respond"]:
-                            possible_tool = decision.get("action")
-                            if "params" in decision:
-                                decision = {
-                                    "action": "execute_tool",
-                                    "tool": possible_tool,
-                                    "params": decision.get("params", {}),
-                                }
-
-                        return decision
-                    except json.JSONDecodeError:
-                        # 修复策略2：处理 HTML 内容中的引号
-                        json_str = re.sub(
-                            r'(?<=[a-zA-Z0-9])"(?=[a-zA-Z0-9=])', '\\"', json_str
-                        )
-
-                        try:
-                            decision = json.loads(json_str)
-
-                            # 自动修复：如果action不是execute_tool或respond，尝试修复
-                            if decision.get("action") not in [
-                                "execute_tool",
-                                "respond",
-                            ]:
-                                possible_tool = decision.get("action")
-                                if "params" in decision:
-                                    decision = {
-                                        "action": "execute_tool",
-                                        "tool": possible_tool,
-                                        "params": decision.get("params", {}),
-                                    }
-
-                            return decision
-                        except json.JSONDecodeError:
-                            # 修复策略3：尝试找到最后一个完整的JSON对象
-                            # 从后往前找，确保JSON是完整的
-                            for i in range(len(json_str) - 1, 0, -1):
-                                if json_str[i] == "}":
-                                    try:
-                                        decision = json.loads(json_str[: i + 1])
-
-                                        # 自动修复：如果action不是execute_tool或respond，尝试修复
-                                        if decision.get("action") not in [
-                                            "execute_tool",
-                                            "respond",
-                                        ]:
-                                            possible_tool = decision.get("action")
-                                            if "params" in decision:
-                                                decision = {
-                                                    "action": "execute_tool",
-                                                    "tool": possible_tool,
-                                                    "params": decision.get(
-                                                        "params", {}
-                                                    ),
-                                                }
-
-                                        return decision
-                                    except json.JSONDecodeError:
-                                        continue
-
-            except json.JSONDecodeError as e:
-                if attempt == max_retries - 1:
-                    print(f"⚠️  JSON解析错误: {str(e)}")
-                    print(f"原始响应: {response[:300]}...")
-                continue
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"⚠️  错误: {e}")
-                continue
-
-        return None
-
-    def _handle_tool_execution(self, decision: dict):
-        """Execute a tool"""
-        tool_name = decision.get("tool")
-        params = decision.get("params", {})
-
-        # 如果是网络搜索，检查是否超过限制
-        if tool_name in {"web_search", "websearch"}:
-            if self.web_search_count >= self.max_web_searches:
-                result = f"⚠️ 已达到网络搜索限制({self.max_web_searches}次)，请基于已有信息给出结论"
-                print(f"\n执行结果:\n{result}\n")
-                import json
-
-                tool_json = json.dumps(
-                    {"tool": tool_name, "params": params}, ensure_ascii=False
-                )
-                history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: {result}"
-                self.execution_history.append(history_entry)
-                # 保存到记忆文件
-                self.memory_manager.append_execution_step(history_entry)
-                return
-            self.web_search_count += 1
-
-        # 如果是发送文件，在网关模式下处理
-        if tool_name == "send_file":
-            file_path = params.get("path", "") or params.get("file_path", "")
-            if (
-                self.is_gateway_mode
-                and self.bus
-                and self.current_channel
-                and self.current_chat_id
-            ):
-                result = self._send_file_to_channel(file_path)
-            else:
-                result = "❌ send_file 工具仅在网关模式下可用"
-            print(f"\n执行结果:\n{result}\n")
-            import json
-
-            tool_json = json.dumps(
-                {"tool": tool_name, "params": params}, ensure_ascii=False
-            )
-            history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: {result}"
-            self.execution_history.append(history_entry)
-            # 保存到记忆文件
-            self.memory_manager.append_execution_step(history_entry)
-            return
-
-        # 如果是生成PDF，处理参数映射（支持 input/input_path 和 output/output_path 两种方式）
-        if tool_name == "generate_pdf":
-            params["input_path"] = params.get("input_path", "") or params.get(
-                "input", ""
-            )
-            params["output_path"] = params.get("output_path", "") or params.get(
-                "output", ""
-            )
-            # 移除旧参数，避免混淆
-            params.pop("input", None)
-            params.pop("output", None)
-
-        # Execute the tool
-        tool_call = {"tool": tool_name, "params": params}
-        result = self.tool_executor.execute(tool_call)
-
-        # 显示执行结果
-        print(f"\n执行结果:\n{result}\n")
-
-        # 完整保存到记忆（包含完整 JSON 请求）
-        import json
-
-        tool_json = json.dumps(
-            {"tool": tool_name, "params": params}, ensure_ascii=False
-        )
-        history_entry = f"执行 {tool_name}:\n{tool_json}\n结果: {result}"
-
-        self.execution_history.append(history_entry)
-
-        # 同步保存到记忆文件（确保下一步能读到）
-        self.memory_manager.append_execution_step(history_entry)
-
     def _ask_for_approval(self) -> str:
         """Ask user for approval to execute command with arrow keys"""
         options = ["yes", "all", "no"]
@@ -2310,65 +1606,54 @@ AI 想要执行以下操作：
                     sys.stdout.write("\r\033[K" + display)
                     sys.stdout.flush()
 
-                # 获取用户输入
-                import sys
-                import platform
-
                 # Windows 和 Unix 的不同处理方式
                 if platform.system() == "Windows" or not sys.stdin.isatty():
                     # 非交互输入不切换终端 raw 模式。
                     ch = input("yes/all/no: ").strip().lower()
                     if ch in {"y", "yes"}:
                         return "yes"
-                    elif ch in {"a", "all"}:
+                    if ch in {"a", "all"}:
                         return "all"
-                    elif ch in {"n", "no", "q", "quit"}:
+                    if ch in {"n", "no", "q", "quit"}:
                         return "no"
-                    else:
+                    return options[selected]
+                # Unix/Linux/macOS 上使用 termios 处理箭头键
+                import termios
+                import tty
+
+                # 保存终端设置
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+
+                try:
+                    tty.setraw(fd)
+                    ch = sys.stdin.read(1)
+
+                    if ch == "\x1b":  # ESC序列
+                        next1 = sys.stdin.read(1)
+                        if next1 == "[":
+                            next2 = sys.stdin.read(1)
+                            if next2 == "C":  # 右箭头
+                                selected = (selected + 1) % len(options)
+                            elif next2 == "D" or next2 == "A":  # 左箭头
+                                selected = (selected - 1) % len(options)
+                            elif next2 == "B":  # 下箭头
+                                selected = (selected + 1) % len(options)
+                    elif ch == "\r" or ch == "\n":  # 回车
+                        print()  # 换行
                         return options[selected]
-                else:
-                    # Unix/Linux/macOS 上使用 termios 处理箭头键
-                    import tty
-                    import termios
+                    elif ch.lower() == "y":  # 快捷键 y
+                        print()
+                        return "yes"
+                    elif ch.lower() == "a":  # 快捷键 a
+                        print()
+                        return "all"
+                    elif ch.lower() == "n" or ch == "q" or ch == "\x03":  # 快捷键 n
+                        print()
+                        return "no"
 
-                    # 保存终端设置
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-
-                    try:
-                        tty.setraw(fd)
-                        ch = sys.stdin.read(1)
-
-                        if ch == "\x1b":  # ESC序列
-                            next1 = sys.stdin.read(1)
-                            if next1 == "[":
-                                next2 = sys.stdin.read(1)
-                                if next2 == "C":  # 右箭头
-                                    selected = (selected + 1) % len(options)
-                                elif next2 == "D":  # 左箭头
-                                    selected = (selected - 1) % len(options)
-                                elif next2 == "A":  # 上箭头
-                                    selected = (selected - 1) % len(options)
-                                elif next2 == "B":  # 下箭头
-                                    selected = (selected + 1) % len(options)
-                        elif ch == "\r" or ch == "\n":  # 回车
-                            print()  # 换行
-                            return options[selected]
-                        elif ch.lower() == "y":  # 快捷键 y
-                            print()
-                            return "yes"
-                        elif ch.lower() == "a":  # 快捷键 a
-                            print()
-                            return "all"
-                        elif ch.lower() == "n":  # 快捷键 n
-                            print()
-                            return "no"
-                        elif ch == "q" or ch == "\x03":  # q 或 Ctrl+C
-                            print()
-                            return "no"
-
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                finally:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
             except KeyboardInterrupt:
                 Toast.warning("已取消")
@@ -2399,35 +1684,6 @@ AI 想要执行以下操作：
             "load_skill": f"加载 skill: {params.get('skill_name')}",
         }
         return descriptions.get(tool_name, f"执行 {tool_name}")
-
-    def _get_result_description(self, tool_name: str, result: str) -> str:
-        """Get natural description of the result"""
-        # Truncate long results
-        if len(result) > 500:
-            result_preview = result[:500] + "..."
-        else:
-            result_preview = result
-
-        result_stripped = result.lstrip()
-        is_error = (
-            result_stripped.startswith("Error:")
-            or result_stripped.startswith("错误:")
-            or result_stripped.startswith("Traceback")
-            or "\nTraceback (most recent call last):" in result
-            or result_stripped.startswith("✗ Failed")
-        )
-
-        if is_error:
-            return f"出现错误: {result_preview}"
-        elif (
-            "Success" in result
-            or "成功" in result
-            or "created" in result
-            or "已创建" in result
-        ):
-            return f"成功完成。{result_preview}"
-        else:
-            return f"得到结果: {result_preview}"
 
     def _format_tool_result(self, tool_name: str, result: str) -> str:
         """Format tool result with collapsible style for long output"""
@@ -2467,64 +1723,10 @@ AI 想要执行以下操作：
 """
         return f"\n{Box.draw(f'工具结果 {tool_name}', box_content, width=70)}\n"
 
-    def _build_context(self) -> str:
-        """Build context from memory files and accumulated compression"""
-
-        context_parts = []
-
-        # 添加累积的压缩摘要
-        if self.accumulated_compression:
-            context_parts.append("【之前的任务摘要】")
-            context_parts.append(self.accumulated_compression)
-            context_parts.append("")
-
-        # 从记忆文件加载当前执行历史
-        execution_history = self.memory_manager.load_execution_history()
-        if execution_history:
-            context_parts.append("【当前任务执行过程】")
-            for entry in execution_history:
-                context_parts.append(f"- {entry}")
-        else:
-            context_parts.append("还没有执行任何步骤。")
-
-        loop_notice = self.tool_loop_guard.context_notice()
-        if loop_notice:
-            context_parts.extend(["", loop_notice])
-
-        return "\n".join(context_parts)
-
     def _cleanup_large_results(self) -> None:
         """Clean up large results from web_search and read_url to reduce context size"""
         # 不再截断任何结果，保留完整内容
         pass
-
-    def _cleanup_temp_files(self) -> None:
-        """Automatically clean up temporary files after task completion"""
-        import shutil
-
-        workspace_path = DATA_ROOT / "workspace"
-        temp_path = workspace_path / "temp"
-
-        try:
-            if temp_path.exists():
-                # 列出要删除的文件
-                files_to_delete = list(temp_path.glob("*"))
-
-                if files_to_delete:
-                    print(f"\n🧹 清理临时文件...")
-                    for file in files_to_delete:
-                        try:
-                            if file.is_dir():
-                                shutil.rmtree(file)
-                                print(f"  ✓ 删除目录: {file.name}")
-                            else:
-                                file.unlink()
-                                print(f"  ✓ 删除文件: {file.name}")
-                        except Exception as e:
-                            print(f"  ⚠️  无法删除 {file.name}: {e}")
-                    print(f"✅ 临时文件清理完成\n")
-        except Exception as e:
-            print(f"⚠️  清理临时文件出错: {e}\n")
 
     def _clear_history(self) -> None:
         """Clear conversation history and execution history"""
@@ -2558,15 +1760,11 @@ AI 想要执行以下操作：
             None,
         )
         if callable(clear_plans):
-            try:
+            with suppress(Exception):
                 clear_plans()
-            except Exception:
-                pass
         if deleted_checkpoint:
-            try:
+            with suppress(Exception):
                 self.langgraph_runner.vacuum_checkpoint_store()
-            except Exception:
-                pass
         # Clear AI engine history
         self.ai_engine.clear_history()
 
@@ -2611,138 +1809,6 @@ AI 想要执行以下操作：
         """Compatibility no-op; LangGraph compacts synchronously at step boundaries."""
         self._monitor_running = False
 
-    def _stop_auto_compress_monitor(self) -> None:
-        """停止后台自动压缩监测线程"""
-        self._monitor_running = False
-
-    def _send_file_to_channel(self, file_path: str) -> str:
-        """Send file to channel via message bus."""
-        if not self.bus or not self.current_channel or not self.current_chat_id:
-            return "❌ 无法发送文件：消息总线未初始化"
-
-        try:
-            import os
-            from pathlib import Path
-
-            # Expand path
-            expanded_path = os.path.expanduser(file_path)
-
-            if not expanded_path.startswith("/"):
-                expanded_path = os.path.expanduser("~") + "/" + expanded_path
-
-            if not os.path.isfile(expanded_path):
-                # 提供更详细的错误信息
-                error_msg = f"❌ 文件不存在\n"
-                error_msg += f"   原始路径: {file_path}\n"
-                error_msg += f"   展开路径: {expanded_path}\n"
-                error_msg += f"   路径存在: {os.path.exists(expanded_path)}\n"
-
-                # 检查父目录
-                parent_dir = os.path.dirname(expanded_path)
-                if os.path.exists(parent_dir):
-                    error_msg += f"   父目录存在: ✓\n"
-                    error_msg += f"   父目录内容: {os.listdir(parent_dir)[:5]}"
-                else:
-                    error_msg += f"   父目录存在: ✗ ({parent_dir})"
-
-                return error_msg
-
-            file_size = os.path.getsize(expanded_path)
-            file_name = os.path.basename(expanded_path)
-
-            print(f"✅ 文件找到 - 名称: {file_name}, 大小: {file_size} bytes")
-
-            # Create OutboundMessage with file path
-            # The Feishu channel will detect it's a file and handle it
-            msg = OutboundMessage(
-                channel=self.current_channel,
-                chat_id=self.current_chat_id,
-                content=expanded_path,  # Pass the full file path
-            )
-
-            # Send asynchronously
-            asyncio.ensure_future(self.bus.publish_outbound(msg))
-
-            return f"✅ 文件已发送: {file_name} ({file_size} bytes)"
-        except Exception as e:
-            import traceback
-
-            error_trace = traceback.format_exc()
-            return f"❌ 发送文件出错:\n{error_trace}"
-
-    async def _send_to_channel(self, content: str) -> None:
-        """Send response to channel via message bus."""
-        # 如果正在压缩，不发送消息
-        if self.is_compressing:
-            return
-
-        if not self.bus or not self.current_channel or not self.current_chat_id:
-            return
-
-        try:
-            msg = OutboundMessage(
-                channel=self.current_channel,
-                chat_id=self.current_chat_id,
-                content=content,
-            )
-            await self.bus.publish_outbound(msg)
-        except Exception as e:
-            Toast.error(f"Error sending message to channel: {e}")
-
-
-def get_user_input(prompt: str = "你: ") -> str:
-    """Get user input with proper UTF-8 handling for macOS"""
-    try:
-        # 对于macOS，使用更简单的方法
-        import sys
-        import time
-
-        # 确保之前的输出被清除
-        time.sleep(0.05)
-        sys.stdout.write('\r' + ' ' * 50 + '\r')
-        sys.stdout.flush()
-        time.sleep(0.05)
-
-        sys.stdout.write(f"{Colors.YELLOW}{Symbols.USER} {Colors.BOLD}你: {Colors.RESET}")  # 黄色提示符
-        sys.stdout.flush()
-
-        # 直接读取，不使用readline
-        line = sys.stdin.readline()
-        if line:
-            return line.rstrip("\n\r")
-        return ""
-    except KeyboardInterrupt:
-        return "exit"
-    except EOFError:
-        return "exit"
-
-
-def _print_terminal_header() -> None:
-    """Print a compact welcome header that adapts to terminal width."""
-    width = shutil.get_terminal_size(fallback=(100, 24)).columns
-    if width >= 92:
-        ascii_art = """
-     ██╗ ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗
-     ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝
-     ██║██║     ██║   ██║██║  ██║█████╗   ╚███╔╝
-██   ██║██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗
-╚█████╔╝╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
- ╚════╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-"""
-        print(Colors.CYAN + ascii_art.rstrip() + Colors.RESET)
-    else:
-        print(f"\n{Colors.CYAN}{Colors.BOLD}JCodex{Colors.RESET}")
-
-    print(f"{Colors.BOLD}本地优先的 AI 编程、调研与系统自动化工作台{Colors.RESET}")
-    print(
-        f"{Colors.DIM}持久任务 · 项目记忆 · 工具执行 · 多智能体协作{Colors.RESET}"
-    )
-    print(
-        f"{Colors.DIM}/clear 清空当前会话  /compact 整理上下文  "
-        f"Ctrl+C 中断当前任务  exit 退出{Colors.RESET}\n"
-    )
-
-
 async def gateway_mode():
     """Run JCodex in gateway mode with multiple channels."""
     # Fix event loop issue for lark-oapi WebSocket client
@@ -2752,7 +1818,6 @@ async def gateway_mode():
         nest_asyncio.apply()
     except ImportError:
         Toast.warning("nest_asyncio not installed, some asyncio warnings may appear")
-        pass
 
     # Suppress asyncio warnings
     import warnings
@@ -2768,7 +1833,7 @@ async def gateway_mode():
     # Check if any channels are enabled
     if not config.channels.feishu.enabled:
         Toast.error("没有启用任何通道。请在配置文件中启用至少一个通道。")
-        print(f"📝 配置文件位置: ~/.os-agent/config.json")
+        print("📝 配置文件位置: ~/.os-agent/config.json")
         return
 
     # Create message bus
@@ -2795,7 +1860,7 @@ async def gateway_mode():
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
 
                 print(f"\n{'=' * 60}")
-                print(f"📨 【收到飞书消息】")
+                print("📨 【收到飞书消息】")
                 print(f"发送者: {msg.sender_id}")
                 print(f"内容: {msg.content}")
                 print(f"{'=' * 60}\n")
@@ -2826,10 +1891,8 @@ async def gateway_mode():
                             "cancel_event", threading.Event()
                         ).set()
                         executor.langgraph_runner.cancel(target["thread_id"])
-                        try:
+                        with suppress(Exception):
                             executor.langgraph_runner.delete_thread(target["thread_id"])
-                        except Exception:
-                            pass
                         if pending:
                             target["runtime"]["data_integrator"].end_task("已停止")
                     await bus.publish_outbound(
@@ -2860,10 +1923,8 @@ async def gateway_mode():
                         target["runtime"].get(
                             "cancel_event", threading.Event()
                         ).set()
-                        try:
+                        with suppress(Exception):
                             executor.langgraph_runner.delete_thread(target["thread_id"])
-                        except Exception:
-                            pass
                     executor._memory_for_session(session_key).clear_all()
                     executor._memory_context_by_session.pop(session_key, None)
                     await bus.publish_outbound(
@@ -2945,7 +2006,7 @@ async def gateway_mode():
                         )
                     continue
 
-                print(f"🤖 【AI 开始处理】\n")
+                print("🤖 【AI 开始处理】\n")
                 thread_id = f"{session_key}:{uuid.uuid4().hex}"
                 task = asyncio.create_task(
                     asyncio.to_thread(
@@ -2966,7 +2027,7 @@ async def gateway_mode():
 
                 task.add_done_callback(task_finished)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
@@ -2981,6 +2042,57 @@ async def gateway_mode():
     except KeyboardInterrupt:
         print("\n\n🛑 正在关闭...\n")
         await channel_manager.stop_all()
+
+
+def get_user_input(prompt: str = "你: ") -> str:
+    """Get user input with proper UTF-8 handling for macOS."""
+    try:
+        # 确保之前的输出被清除
+        time.sleep(0.05)
+        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.flush()
+        time.sleep(0.05)
+
+        sys.stdout.write(
+            f"{Colors.YELLOW}{Symbols.USER} {Colors.BOLD}你: {Colors.RESET}"
+        )
+        sys.stdout.flush()
+
+        # 直接读取，不使用 readline
+        line = sys.stdin.readline()
+        if line:
+            return line.rstrip("\n\r")
+        return ""
+    except KeyboardInterrupt:
+        return "exit"
+    except EOFError:
+        return "exit"
+
+
+def _print_terminal_header() -> None:
+    """Print a compact welcome header that adapts to terminal width."""
+    width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    if width >= 92:
+        ascii_art = """
+     ██╗ ██████╗ ██████╗ ██████╗ ███████╗██╗  ██╗
+     ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝
+     ██║██║     ██║   ██║██║  ██║█████╗   ╚███╔╝
+██   ██║██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗
+╚█████╔╝╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
+ ╚════╝  ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
+"""
+        print(Colors.CYAN + ascii_art.rstrip() + Colors.RESET)
+    else:
+        print(f"\n{Colors.CYAN}{Colors.BOLD}JCodex{Colors.RESET}")
+
+    print(f"{Colors.BOLD}本地优先的 AI 编程、调研与系统自动化工作台{Colors.RESET}")
+    print(
+        f"{Colors.DIM}持久任务 · 项目记忆 · 工具执行 · 多智能体协作{Colors.RESET}"
+    )
+    print(
+        f"{Colors.DIM}/clear 清空当前会话  /compact 整理上下文  "
+        f"Ctrl+C 中断当前任务  exit 退出{Colors.RESET}\n"
+    )
 
 
 def main():
@@ -3051,7 +2163,7 @@ def main():
                     current_tokens = executor._estimate_tokens(history_text)
                     print(f"📊 近期记忆: {current_tokens} tokens，正在压缩...\n")
                 else:
-                    print(f"⚠️  没有执行历史可以压缩\n")
+                    print("⚠️  没有执行历史可以压缩\n")
                 if all_history:
                     start_spinner("正在整理近期记忆并生成结构化摘要", show_elapsed=True)
                     try:
@@ -3087,12 +2199,10 @@ def main():
             if executor._active_cancel_event is not None:
                 executor._active_cancel_event.set()
             if executor._active_graph_runtime:
-                try:
+                with suppress(Exception):
                     executor.langgraph_runner.cancel(
                         executor._active_graph_runtime["thread_id"]
                     )
-                except Exception:
-                    pass
             Toast.warning("任务已中断")
             print("💡 你可以继续提问新的任务\n")
             stop_spinner()  # 停止 spinner 动画
@@ -3100,7 +2210,7 @@ def main():
             continue
         except Exception as e:
             stop_spinner()
-            Toast.error(f"错误: {str(e)}")
+            Toast.error(f"错误: {e!s}")
 
     return 0
 
