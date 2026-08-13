@@ -87,20 +87,77 @@ jobs:
           Compress-Archive -Path "electron/dist/JCodex-win32-x64" -DestinationPath $zip -Force
           Get-Item $zip | Select-Object FullName, Length
 
-      - name: Stage release files
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force "electron/dist/release-files" | Out-Null
-          Copy-Item "electron/dist/JCodex-windows-x64.zip" "electron/dist/release-files/"
-          Get-ChildItem "electron/dist/release-files" | Select-Object Name, Length
-
       - uses: actions/upload-artifact@v4
         with:
           name: JCodex-windows-x64
-          path: electron/dist/release-files
+          path: electron/dist/JCodex-windows-x64.zip
+
+  build-dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Restore bundled .env (vector retrieval config)
+        shell: bash
+        env:
+          BUNDLED_ENV: ${{ secrets.JCX_ENV }}
+        run: |
+          if [ -n "$BUNDLED_ENV" ]; then
+            printf '%s' "$BUNDLED_ENV" > .env
+            echo "bundled .env restored ($(wc -c < .env) bytes)"
+          else
+            touch .env
+            echo "JCX_ENV secret not set; bundling empty .env"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Electron tooling
+        working-directory: electron
+        run: npm ci
+
+      - name: Build DMG with package.sh
+        working-directory: electron
+        run: |
+          if ! command -v python3.11 >/dev/null 2>&1; then
+            ln -s "$(command -v python3)" /usr/local/bin/python3.11
+          fi
+          bash package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JCodex-macos-dmg
+          path: electron/dist/JCodex.dmg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-dmg]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: JCodex-windows-x64
+          path: windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: JCodex-macos-dmg
+          path: dmg
 
       - name: Delete existing v-tag release (overwrite)
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -117,7 +174,8 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: electron/dist/release-files/*
+          files: |
+            windows/*
+            dmg/*
