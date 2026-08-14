@@ -633,26 +633,38 @@ def _resolve_chat_media_file(
 ) -> tuple[Path, str]:
     """Resolve a local image or video path without following escapes.
 
-    Absolute paths may point anywhere on disk; relative paths must stay
-    inside the active task roots. Only image/video files are accepted.
+    Absolute paths may point anywhere on disk (including hidden folders);
+    relative paths must stay inside the active task roots. Only image/video
+    files are accepted.
     """
     source = str(raw_path or "").strip()
     if not source or "\x00" in source:
         raise ValueError("Media path is invalid")
-    if source.lower().startswith("file://"):
-        parsed = urlsplit(source)
-        if parsed.netloc not in {"", "localhost"}:
-            raise ValueError("Remote file URLs are not supported")
-        source = unquote(parsed.path)
-    elif re.match(r"^[a-z][a-z0-9+.-]*:", source, flags=re.IGNORECASE):
-        raise ValueError("Only local media paths are accepted by this endpoint")
+    # Markdown 里带空格的本地路径有时会被写成 %20 的 URL 编码形式，
+    # 这里解码后与原始路径都尝试解析，兼容两种写法。
+    decoded = unquote(source)
+    sources = [source]
+    if decoded and decoded != source:
+        sources.append(decoded)
 
     roots = _chat_media_roots(conversation_id)
-    requested = Path(source).expanduser()
-    requested_is_absolute = requested.is_absolute()
-    candidates = [requested] if requested_is_absolute else []
-    if not requested_is_absolute:
-        candidates.extend(root / requested for root in roots)
+    candidates = []
+    for src in sources:
+        if src.lower().startswith("file://"):
+            parsed = urlsplit(src)
+            if parsed.netloc not in {"", "localhost"}:
+                raise ValueError("Remote file URLs are not supported")
+            src = unquote(parsed.path)
+        elif re.match(r"^[a-z][a-z0-9+.-]*:", src, flags=re.IGNORECASE):
+            # Windows 盘符路径（C:\...）是本地路径，不是协议
+            if not re.match(r"^[a-zA-Z]:[\\/]", src):
+                raise ValueError("Only local media paths are accepted by this endpoint")
+        requested = Path(src).expanduser()
+        if requested.is_absolute():
+            candidates.append(requested)
+            continue
+        for root in roots:
+            candidates.append(root / requested)
         candidates.append(PROJECT_ROOT / requested)
 
     for candidate in candidates:
@@ -662,7 +674,7 @@ def _resolve_chat_media_file(
             continue
         if not resolved.is_file():
             continue
-        if not requested_is_absolute and not any(
+        if not candidate.is_absolute() and not any(
             resolved == root or root in resolved.parents for root in roots
         ):
             continue

@@ -9499,7 +9499,12 @@ function normalizeMarkdownMediaSource(escapedUrl) {
         }
     }
     if (/^(?:data|blob|javascript):/i.test(source)) return '';
-    if (/^[a-z][a-z0-9+.-]*:/i.test(source) && !/^file:\/\//i.test(source)) return '';
+    if (
+        /^[a-z][a-z0-9+.-]*:/i.test(source)
+        && !/^file:\/\//i.test(source)
+        // Windows 盘符（C:\...）是本地路径，不是协议
+        && !/^[a-zA-Z]:[\\/]/.test(source)
+    ) return '';
 
     const session = sessionStorage.getItem('minibot_eel_session') || '';
     if (!session) return '';
