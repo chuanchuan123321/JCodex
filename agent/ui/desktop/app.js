@@ -8719,6 +8719,7 @@ async function openChangeReviewEditor() {
             </div>`;
         diff.classList.add('change-review-editing');
         const textarea = diff.querySelector('.change-review-editor-input');
+        const gutter = diff.querySelector('.change-review-editor-gutter');
         textarea.value = content;
         refreshReviewEditorGutter(diff);
         textarea.addEventListener('input', () => refreshReviewEditorGutter(diff));
@@ -8728,12 +8729,19 @@ async function openChangeReviewEditor() {
         });
         fileHeader.querySelector('.change-review-edit-save').addEventListener('click', saveChangeReviewFile);
         fileHeader.querySelector('.change-review-edit-cancel').addEventListener('click', closeChangeReviewEditor);
-        textarea.scrollTop = 0;
-        textarea.scrollLeft = 0;
-        const gutter = diff.querySelector('.change-review-editor-gutter');
-        if (gutter) gutter.scrollTop = 0;
         textarea.focus();
         textarea.setSelectionRange(0, 0);
+        // focus/setSelectionRange 之后浏览器可能重新滚动（长文件时容易
+        // 停在底部），这里强制回顶，并用下一帧兜底（布局完成后
+        // scrollHeight 才稳定，直接赋值 scrollTop 才可靠）。
+        textarea.scrollTop = 0;
+        textarea.scrollLeft = 0;
+        if (gutter) gutter.scrollTop = 0;
+        requestAnimationFrame(() => {
+            textarea.scrollTop = 0;
+            textarea.scrollLeft = 0;
+            if (gutter) gutter.scrollTop = 0;
+        });
     } catch (error) {
         showToast(`读取失败：${error.message || error}`, 'error');
     }
