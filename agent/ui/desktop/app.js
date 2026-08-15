@@ -1613,6 +1613,12 @@ function closePlanProgress() {
 function renderPlanProgress(snapshot = null) {
     const root = document.getElementById('planProgress');
     if (!root) return;
+    // 计划模式关闭时不显示计划进度胶囊（含轮询/事件再次触发的情况）。
+    if (!planModeEnabled) {
+        root.hidden = true;
+        closePlanProgress();
+        return;
+    }
     const activeState = getActiveExecutionState();
     const messageId = Number(activeState?.messageId || currentMessageId || 0);
     const key = planProgressKey(activeConversationId, messageId);
@@ -5398,6 +5404,12 @@ function setPlanModeEnabled(enabled) {
     planModeEnabled = Boolean(enabled);
     localStorage.setItem('minibot-plan-mode-enabled', planModeEnabled ? 'true' : 'false');
     applyPlanModeToggleState(planModeEnabled);
+    if (!planModeEnabled) {
+        // 计划模式关闭：立即隐藏计划进度胶囊。
+        const planProgress = document.getElementById('planProgress');
+        if (planProgress) planProgress.hidden = true;
+        closePlanProgress();
+    }
     showToast(planModeEnabled ? '计划模式已开启' : '计划模式已关闭', 'info', 1600);
 }
 
