@@ -68,6 +68,14 @@ _SCOPED_MUTATION_TARGETS = {
     "generate_pdf": (("output_path",),),
 }
 
+# Mutations that patch existing content must only run against the version the
+# model actually read. Whole-file writes replace everything, so they carry no
+# stale concern of their own and are excluded here.
+_STALE_CHECKED_TARGETS = {
+    "edit": (("filePath", "file_path", "path"),),
+    "search_replace": (("filePath", "file_path", "path"),),
+}
+
 # Shell commands cannot be constrained reliably with path preflight checks: a
 # command can write through redirection, child processes, scripts, or utilities.
 _SCOPED_COMMAND_TOOLS = frozenset(
@@ -188,8 +196,9 @@ class ExtendedToolExecutor:
         self._task_reference_roots_lock = threading.RLock()
         self.memory_store = None
         # File version fingerprints (mtime_ns, size) recorded on each successful
-        # read, so a later edit/write can detect that the target changed since
-        # it was read and demand a re-read instead of mutating stale content.
+        # read, so a later edit can detect that the target changed since it was
+        # read and demand a re-read instead of patching stale content. Whole-file
+        # writes replace everything and are exempt from this check.
         self._read_versions: Dict[str, Tuple[int, int]] = {}
         self._background_tasks: Dict[str, Dict[str, Any]] = {}
         self._background_tasks_lock = threading.RLock()
@@ -1330,17 +1339,18 @@ class ExtendedToolExecutor:
     def _stale_mutation_error(
         self, tool_name: object, params: object
     ) -> str:
-        """Reject edits/writes whose target changed since the last read.
+        """Reject edits whose target changed since the last read.
 
         A successful read records the target's version fingerprint; if the
-        file changed on disk before a later mutation, the model is editing
+        file changed on disk before a later patch, the model is editing
         content it never actually saw, so the mutation fails and demands a
-        re-read instead of silently corrupting the new content.
+        re-read instead of silently corrupting the new content. Whole-file
+        writes replace everything and are exempt from this check.
         """
         if not getattr(self, "_read_versions", None):
             return ""
         normalized_name = str(tool_name or "").strip()
-        target_groups = _SCOPED_MUTATION_TARGETS.get(normalized_name)
+        target_groups = _STALE_CHECKED_TARGETS.get(normalized_name)
         if target_groups is None:
             return ""
         normalized_params = params if isinstance(params, dict) else {}

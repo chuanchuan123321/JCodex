@@ -4564,6 +4564,129 @@ def _modified_file_snapshot(
         return _ModifiedFileSnapshot(path, display_path, False, False, None, "")
 
 
+def _review_file_fingerprint(path: Path) -> str:
+    """Content fingerprint used to detect staleness before a review edit save."""
+    try:
+        size = path.stat().st_size
+        if size > MAX_MODIFIED_FILE_TEXT_BYTES:
+            return f"large:{size}:{path.stat().st_mtime_ns}"
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _resolve_review_path(raw_path: str) -> Optional[Path]:
+    """Resolve and contain a review edit target inside the project root."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    try:
+        candidate = Path(raw_path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    root = Path(PROJECT_ROOT).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+@eel.expose
+def read_review_file(path: str):
+    """Read the CURRENT content of a review file for editing, with its fingerprint.
+
+    The edit box always works from the latest on-disk content, never from the
+    review snapshot, so a stale snapshot can never be silently re-saved over
+    newer changes.
+    """
+    target = _resolve_review_path(path)
+    if target is None:
+        return {"success": False, "error": "无效或越界的文件路径"}
+    if not target.exists():
+        return {
+            "success": False,
+            "error": f"文件已不存在，无法编辑：{path}",
+            "deleted": True,
+        }
+    if not target.is_file():
+        return {"success": False, "error": f"路径不是普通文件：{path}"}
+    try:
+        size = target.stat().st_size
+        if size > MAX_MODIFIED_FILE_TEXT_BYTES:
+            return {"success": False, "error": "文件过大，无法在审核面板编辑"}
+        content = target.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return {"success": False, "error": "非 UTF-8 文件无法在审核面板编辑"}
+    except OSError as exc:
+        return {"success": False, "error": f"读取失败: {exc}"}
+    return {
+        "success": True,
+        "path": str(target),
+        "content": content,
+        "fingerprint": _review_file_fingerprint(target),
+    }
+
+
+@eel.expose
+def save_review_file(path: str, new_content: str, expected_fingerprint: str):
+    """Save a review-panel edit, refusing to overwrite stale or deleted files.
+
+    The review panel shows a snapshot; applying an edit is only safe when the
+    file on disk still matches what the user was shown. A missing file cannot
+    be saved (nothing to base the edit on), and a fingerprint mismatch means
+    the file changed since the edit box was opened — saving would clobber the
+    newer content, so it is rejected with an explicit message.
+    """
+    if not isinstance(new_content, str):
+        return {"success": False, "error": "编辑内容无效"}
+    target = _resolve_review_path(path)
+    if target is None:
+        return {"success": False, "error": "无效或越界的文件路径"}
+    if not target.exists():
+        return {
+            "success": False,
+            "error": f"文件已不存在，无法保存：{path}。请先创建或恢复该文件。",
+            "deleted": True,
+        }
+    if not target.is_file():
+        return {"success": False, "error": f"路径不是普通文件：{path}"}
+    current = _review_file_fingerprint(target)
+    if expected_fingerprint and current and current != expected_fingerprint:
+        return {
+            "success": False,
+            "stale": True,
+            "error": (
+                f"文件在编辑期间被外部修改（快照过期）：{path}。"
+                "你的改动基于旧版本，直接保存会覆盖新内容。"
+                "请重新打开编辑并基于最新内容修改。"
+            ),
+        }
+    try:
+        on_disk = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"success": False, "error": f"读取文件失败: {exc}"}
+    if on_disk == new_content:
+        # 内容没有变化：不重写文件，避免刷新 mtime 后把"未修改的保存"
+        # 误认作修改了最新一版（大文件指纹与编辑器的 stale 检查都依赖 mtime）。
+        return {
+            "success": True,
+            "path": str(target),
+            "fingerprint": current,
+            "unchanged": True,
+        }
+    try:
+        temp = target.with_name(f".{target.name}.review-tmp")
+        temp.write_text(new_content, encoding="utf-8")
+        os.replace(temp, target)
+    except OSError as exc:
+        return {"success": False, "error": f"保存失败: {exc}"}
+    return {
+        "success": True,
+        "path": str(target),
+        "fingerprint": _review_file_fingerprint(target),
+    }
+
+
 def _modified_file_event_key(
     event: dict, project_root: Path = PROJECT_ROOT
 ) -> str:

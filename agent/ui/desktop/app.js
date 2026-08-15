@@ -3869,6 +3869,9 @@ function initializeUI() {
     document.getElementById('changeReviewClose')?.addEventListener('click', () => {
         closeChangeReview();
     });
+    document.getElementById('changeReviewFileHeader')?.addEventListener('click', (event) => {
+        if (event.target.closest('.change-review-edit')) openChangeReviewEditor();
+    });
     document.getElementById('agentDetailClose')?.addEventListener('click', () => {
         closeAgentDetail();
     });
@@ -6118,7 +6121,30 @@ async function sendMessageWithText(
             Boolean(allowAll),
             mode
         )();
-        if (result?.status === 'busy' || result?.status === 'error') {
+        if (result?.status === 'busy') {
+            // 暂停/停止释放竞态：后端任务尚未真正释放（_begin_execution 仍
+            // 认为该对话有 running/waiting 任务）。不当作失败——移除刚显示
+            // 的气泡，把消息放回等待队列，任务释放后由队列自动重发。
+            if (renderTarget) removeThinking();
+            const bubble = document.querySelector(`.message.user[data-message-id="${messageId}"]`);
+            if (bubble) bubble.remove();
+            updateConversationExecutionState(targetConversationId, {running: false});
+            syncActiveConversationProcessingUI();
+            messageQueue.unshift({
+                conversationId: targetConversationId,
+                message,
+                attachments,
+                planMode: Boolean(planMode),
+                voiceMode: Boolean(voiceMode),
+                multiAgentMode: Boolean(multiAgentMode),
+                allowAll: Boolean(allowAll),
+                mode,
+            });
+            updateQueueDisplay();
+            setTimeout(dispatchNextQueuedMessage, 400);
+            return;
+        }
+        if (result?.status === 'error') {
             throw new Error(result.error || '任务提交失败');
         }
         updateConversationListItemState(targetConversationId, {
@@ -8610,6 +8636,7 @@ function renderChangeReviewDiff() {
     const fileHeader = document.getElementById('changeReviewFileHeader');
     const diff = document.getElementById('changeReviewDiff');
     if (!fileHeader || !diff || !activeChangeReview) return;
+    diff.classList.remove('change-review-editing');
     const file = activeChangeReview.files[activeChangeReview.selectedIndex];
     if (!file) {
         fileHeader.textContent = '';
@@ -8618,7 +8645,11 @@ function renderChangeReviewDiff() {
     }
     fileHeader.innerHTML = `
         <span title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
-        <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>`;
+        <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>
+        <button class="change-review-edit" type="button" title="编辑此文件（基于磁盘上的最新内容）">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+            <span>编辑</span>
+        </button>`;
     if (!file.reviewable || !file.hunks.length) {
         diff.innerHTML = `
             <div class="change-review-empty">
@@ -8654,6 +8685,102 @@ function selectChangeReviewFile(pathOrIndex) {
     activeChangeReview.selectedIndex = nextIndex;
     expandChangeReviewAncestors(activeChangeReview.files[nextIndex].path);
     renderChangeReviewFiles();
+    renderChangeReviewDiff();
+}
+
+let changeReviewEditState = null;
+
+async function openChangeReviewEditor() {
+    const fileHeader = document.getElementById('changeReviewFileHeader');
+    const diff = document.getElementById('changeReviewDiff');
+    if (!fileHeader || !diff || !activeChangeReview) return;
+    const file = activeChangeReview.files[activeChangeReview.selectedIndex];
+    if (!file) return;
+    try {
+        const result = await eel.read_review_file(file.path)();
+        if (!result || !result.success) {
+            showToast(result?.error || '无法读取文件', 'error');
+            return;
+        }
+        changeReviewEditState = {
+            path: file.path,
+            fingerprint: result.fingerprint,
+        };
+        const content = String(result.content || '');
+        fileHeader.innerHTML = `
+            <span title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
+            <span class="change-review-file-counts"><b>+${file.additions}</b><em>-${file.deletions}</em></span>
+            <button class="change-review-edit-action change-review-edit-save" type="button" title="保存修改">保存</button>
+            <button class="change-review-edit-action change-review-edit-cancel" type="button" title="取消编辑">取消</button>`;
+        diff.innerHTML = `
+            <div class="change-review-inline-editor">
+                <div class="change-review-editor-gutter" aria-hidden="true"></div>
+                <textarea class="change-review-editor-input" spellcheck="false"></textarea>
+            </div>`;
+        diff.classList.add('change-review-editing');
+        const textarea = diff.querySelector('.change-review-editor-input');
+        textarea.value = content;
+        refreshReviewEditorGutter(diff);
+        textarea.addEventListener('input', () => refreshReviewEditorGutter(diff));
+        textarea.addEventListener('scroll', () => {
+            const gutter = diff.querySelector('.change-review-editor-gutter');
+            if (gutter) gutter.scrollTop = textarea.scrollTop;
+        });
+        fileHeader.querySelector('.change-review-edit-save').addEventListener('click', saveChangeReviewFile);
+        fileHeader.querySelector('.change-review-edit-cancel').addEventListener('click', closeChangeReviewEditor);
+        textarea.scrollTop = 0;
+        textarea.scrollLeft = 0;
+        const gutter = diff.querySelector('.change-review-editor-gutter');
+        if (gutter) gutter.scrollTop = 0;
+        textarea.focus();
+        textarea.setSelectionRange(0, 0);
+    } catch (error) {
+        showToast(`读取失败：${error.message || error}`, 'error');
+    }
+}
+
+function refreshReviewEditorGutter(diff) {
+    const gutter = diff.querySelector('.change-review-editor-gutter');
+    const textarea = diff.querySelector('.change-review-editor-input');
+    if (!gutter || !textarea) return;
+    const count = Math.max(1, textarea.value.split('\n').length);
+    const fragment = [];
+    for (let index = 1; index <= count; index += 1) {
+        fragment.push(`<span>${index}</span>`);
+    }
+    gutter.innerHTML = fragment.join('');
+}
+
+async function saveChangeReviewFile() {
+    const fileHeader = document.getElementById('changeReviewFileHeader');
+    const diff = document.getElementById('changeReviewDiff');
+    if (!fileHeader || !diff || !changeReviewEditState) return;
+    const textarea = diff.querySelector('.change-review-editor-input');
+    if (!textarea) return;
+    const button = fileHeader.querySelector('.change-review-edit-save');
+    if (button) button.disabled = true;
+    try {
+        const result = await eel.save_review_file(
+            changeReviewEditState.path,
+            textarea.value,
+            changeReviewEditState.fingerprint || ''
+        )();
+        if (!result || !result.success) {
+            showToast(result?.error || '保存失败', 'error', result?.stale ? 6000 : 3000);
+            return;
+        }
+        showToast(result.unchanged ? '内容未变化，未写入' : '已保存', 'success');
+        changeReviewEditState = null;
+        renderChangeReviewDiff();
+    } catch (error) {
+        showToast(`保存失败：${error.message || error}`, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function closeChangeReviewEditor() {
+    changeReviewEditState = null;
     renderChangeReviewDiff();
 }
 

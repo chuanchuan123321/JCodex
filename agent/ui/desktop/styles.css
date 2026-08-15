@@ -12428,3 +12428,83 @@ button.access-toggle:hover {
 body.theme-dark button.access-toggle:hover {
     background: rgba(255, 255, 255, 0.14);
 }
+
+/* 审核面板内联编辑：与审核面板同款浅色代码风格 */
+.change-review-edit,
+.change-review-edit-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--codex-muted, var(--text-muted));
+    font-size: 12px;
+    cursor: pointer;
+    transition: background-color 140ms ease, color 140ms ease;
+}
+.change-review-edit:hover,
+.change-review-edit-action:hover {
+    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+    color: var(--accent-primary);
+}
+.change-review-edit:disabled,
+.change-review-edit-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+/* 编辑态下保存/取消取代“编辑”按钮：保存靠右，取消紧挨其后 */
+.change-review-file-header .change-review-edit-action + .change-review-edit-action {
+    margin-left: 0;
+}
+/* 编辑态：外层 diff 容器不再滚动，整块交给内联编辑器内部滚动，避免双滚动条 */
+.change-review-diff.change-review-editing {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.change-review-inline-editor {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    background: color-mix(in srgb, var(--codex-surface-solid) 95%, var(--codex-canvas));
+    border: 1px solid var(--codex-border, var(--border-color));
+    border-radius: 8px;
+    overflow: hidden;
+}
+.change-review-editor-gutter {
+    flex: 0 0 44px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--codex-surface-solid) 98%, var(--codex-canvas));
+    border-right: 1px solid var(--codex-border, var(--border-color));
+    color: var(--codex-faint, var(--text-muted));
+    font-family: "SFMono-Regular", Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 20px;
+    text-align: right;
+    padding: 10px 8px 10px 0;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.change-review-editor-gutter span {
+    display: block;
+    white-space: pre;
+}
+.change-review-editor-input {
+    flex: 1;
+    min-width: 0;
+    resize: none;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--codex-text, var(--text-primary));
+    font-family: "SFMono-Regular", Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 20px;
+    padding: 10px 12px;
+    tab-size: 4;
+    white-space: pre;
+    overflow: auto;
+}

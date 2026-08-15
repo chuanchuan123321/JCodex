@@ -250,3 +250,53 @@ def test_edit_after_successful_write_is_not_stale(tmp_path) -> None:
 
     assert not result.startswith("Error: changed since it was read")
     assert target.read_text(encoding="utf-8") == "hello world\n"
+
+
+def test_multiple_edits_after_single_read_are_not_stale(tmp_path) -> None:
+    # One read unlocks an arbitrary sequence of edits on the same file: every
+    # successful edit refreshes the recorded version, so later edits are not
+    # mistaken for stale targets.
+    path = tmp_path / "target.txt"
+    path.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+
+    executor.execute_file_read({"filePath": str(path)})
+
+    for old, new in (("line1", "A"), ("line2", "B"), ("line3", "C")):
+        result = executor.execute(
+            {
+                "tool": "edit",
+                "params": {
+                    "filePath": str(path),
+                    "oldString": old,
+                    "newString": new,
+                },
+            }
+        )
+        assert not result.startswith("Error: changed since it was read"), result
+
+    assert path.read_text(encoding="utf-8") == "A\nB\nC\n"
+
+
+def test_write_overwrites_file_changed_since_read(tmp_path) -> None:
+    # A whole-file write replaces everything, so it is not treated as stale
+    # even when the target changed on disk after the last read.
+    path = tmp_path / "target.txt"
+    path.write_text("old content\n", encoding="utf-8")
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+
+    executor.execute_file_read({"filePath": str(path)})
+
+    # The file changes on disk without another read (e.g. the user edited it).
+    path.write_text("user edited\n", encoding="utf-8")
+
+    result = executor.execute(
+        {
+            "tool": "write",
+            "params": {"path": str(path), "content": "agent output\n"},
+        }
+    )
+
+    assert not result.startswith("Error: changed since it was read")
+    assert path.read_text(encoding="utf-8") == "agent output\n"
+

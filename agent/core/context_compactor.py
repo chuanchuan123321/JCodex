@@ -505,7 +505,7 @@ identifiers, commands, paths, configuration values, and unresolved errors when r
                     )
                 report(
                     "summarizing",
-                    f"正在摘要早期对话（保留最近 {self.policy.retain_percent}% 原文，{stage_name}）",
+                    f"正在摘要早期对话（{stage_name}）",
                 )
                 try:
                     raw = sampler(
@@ -517,18 +517,12 @@ identifiers, commands, paths, configuration values, and unresolved errors when r
                 except Exception as exc:
                     last_error = str(exc)
                     if self._is_context_error(last_error):
+                        # 输入超长：相同输入重试没有意义，换更小输入 stage。
                         break
-                    # 传输/服务端失败：返回错误，由调用方降级到全量替换。
-                    return CompactionOutput(
-                        False,
-                        "error",
-                        "上下文摘要请求失败，未重复发送相同输入",
-                        tokens_before=snapshot.tokens,
-                        tokens_after=snapshot.tokens,
-                        attempts=attempts,
-                        input_stage=f"retain{self.policy.retain_percent}_{stage_name}",
-                        error=last_error,
-                    )
+                    # 传输/服务端/输出截断失败：用相同输入重试（attempts 由外层
+                    # while 控制），保住最近 retain_percent% 的原文尾部；重试
+                    # 耗尽后才降级到全量替换。
+                    continue
                 if len(summary) < self.policy.min_summary_chars:
                     last_error = (
                         f"摘要过短：{len(summary)} < {self.policy.min_summary_chars} chars"

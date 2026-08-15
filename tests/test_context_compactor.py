@@ -118,10 +118,11 @@ def test_context_overflow_degrades_input_stage() -> None:
     assert "system instructions" in prompts[1]
 
 
-def test_transport_failure_does_not_retry_identical_compaction_input() -> None:
-    # Each path refuses to retry its OWN identical input on a transport
-    # failure; the retention path degrades to full replacement (a different,
-    # larger input), which also fails without retrying.
+def test_transport_failure_retries_same_input_then_degrades() -> None:
+    # A transport failure retries the SAME retention input (to keep the
+    # verbatim tail), never a smaller fitted/lossy transcript; only after the
+    # attempt budget is exhausted does it degrade to full replacement, which
+    # fails without retrying its identical input.
     policy = ContextPolicy(
         context_window=2_000,
         max_attempts=3,
@@ -138,7 +139,37 @@ def test_transport_failure_does_not_retry_identical_compaction_input() -> None:
     assert output.success is False
     assert output.attempts == 1
     assert output.input_stage == "verbatim"  # the final (full-replace) stage
-    assert len(calls) == 2  # retention attempt + full-replace attempt, no retries
+    # retention retries the same input 3 times + full-replace verbatim once
+    assert len(calls) == 4
+    # The retried retention inputs must be identical, not fitted/lossy.
+    assert all("EARLIER" in prompt for prompt in calls[:3])
+    assert calls[0] == calls[1] == calls[2]
+
+
+def test_retention_retries_same_input_after_transport_failure() -> None:
+    # A transient transport failure on the retention path must not drop the
+    # verbatim tail: the same input is retried and the tail survives.
+    policy = ContextPolicy(
+        context_window=2_000,
+        max_attempts=3,
+    )
+    compactor = ContextCompactor(policy)
+    calls = []
+
+    def sampler(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise RuntimeError("upstream connect error")
+        return healthy_summary()
+
+    output = compactor.compact(snapshot(policy), sampler)
+
+    assert output.success is True
+    assert output.input_stage == "retain16_verbatim"
+    assert output.retained_tail
+    assert "implemented the fix" in output.retained_tail
+    assert len(calls) == 2
+    assert calls[0] == calls[1]  # same input, retried verbatim
 
 
 def test_fitted_input_never_drops_system_instructions() -> None:
