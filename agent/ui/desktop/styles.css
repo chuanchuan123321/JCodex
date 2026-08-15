@@ -1366,7 +1366,7 @@ body.split-pane-mode .agent-detail-panel.is-open {
     color: var(--text-secondary);
     white-space: pre-wrap;
     word-break: break-all;
-    max-height: 150px;
+    max-height: 55vh;
     overflow-y: auto;
 }
 

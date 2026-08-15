@@ -2315,7 +2315,7 @@ function renderAgentTool(outputState, activity) {
                 ))}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
-            <div class="tool-result">${formatContent(event.result.substring(0, 1600))}</div>
+            <div class="tool-result">${formatContent(String(event.result || ''))}</div>
         </details>`;
     if (!execution) {
         outputState.host.appendChild(element);
@@ -8001,14 +8001,23 @@ function toolResultFailed(value) {
             /* fall through to text heuristics */
         }
     }
-    // ShellTool 的 ✓ Success 状态行是权威成功结果：正文里的
+    // 旧渲染器的 ✓ Success 状态行是权威成功结果（防御性保留）；正文里的
     // "No such file or directory" 等文本（删除后验证输出）不构成失败。
     if (/^✓\s*success/i.test(text)) return false;
     if (/^(?:error|failed|failure|fatal):/i.test(text)) return true;
     if (/^✗/.test(text)) return true;
     if (/^(?:错误|失败)[：:]|^执行失败|^(?:unable to|error occurred)|^无法/.test(text)) return true;
-    // 只依据状态行/前缀判定：ShellTool 失败一定以 ✗ Failed 开头，
-    // 工具错误以 Error: 等前缀开头；正文里的内嵌文本不再参与判定。
+    // 标记契约：非零退出是报告不是错误，但对该卡片而言仍是失败态
+    // （不当作成功复用）；只有精确的标记行参与判定，正文内嵌文本不参与。
+    if (text.includes('[cancelled]')) return true;
+    if (text.includes('[timed out after') || text.includes('[timed out]')) return true;
+    if (text.includes('[killed by signal')) return true;
+    const exitMarker = text.lastIndexOf('[exit code: ');
+    if (exitMarker >= 0) {
+        const end = text.indexOf(']', exitMarker);
+        const code = text.slice(exitMarker + '[exit code: '.length, end).trim();
+        if (/^[1-9]\d*$/.test(code)) return true;
+    }
     return false;
 }
 
@@ -8150,7 +8159,7 @@ function finishToolExecution(result, msgId) {
                 ))}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
-            <div class="tool-result">${formatContent(String(result.result || '').substring(0, 1600))}</div>
+            <div class="tool-result">${formatContent(String(result.result || ''))}</div>
         </details>`;
 }
 
@@ -8414,7 +8423,7 @@ function addToolMessage(
                 ))}</span>
                 <svg class="tool-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </summary>
-            <div class="tool-result">${formatContent(String(result).substring(0, 1600))}</div>
+            <div class="tool-result">${formatContent(String(result))}</div>
         </details>
     `;
     chatMessages.appendChild(toolDiv);

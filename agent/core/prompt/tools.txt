@@ -20,7 +20,7 @@ The following tools are available for you to use. Each tool has a specific purpo
 
 ### Web
 
-- **WebSearch**: Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs.
+- **WebSearch**: Search the public web for current or unknown information using the Tavily API - returns an optional summary answer plus source URLs with snippets and related images.
 - **WebFetch**: Fetches content from a specified URL. Takes a URL and optional format as input.
 
 ### Subagents

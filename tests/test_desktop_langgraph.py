@@ -1540,7 +1540,8 @@ def test_platform_instruction_is_injected_per_os(monkeypatch, tmp_path) -> None:
     windows_prompt, _ = executor.build_system_prompt("检查项目")
     assert "{platform_instruction}" not in windows_prompt
     assert "当前运行在 Windows 上" in windows_prompt
-    assert "cmd.exe 里没有 python3" in windows_prompt
+    assert "模型可见的 shell 工具是 pwsh" in windows_prompt
+    assert "没有 python3" in windows_prompt
 
     monkeypatch.setattr(desktop.platform, "system", lambda: "Darwin")
     mac_prompt, _ = executor.build_system_prompt("检查项目")

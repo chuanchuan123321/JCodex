@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from agent.core.env_utils import env_int
 
@@ -19,9 +17,8 @@ SummarySampler = Callable[[str], str]
 ProgressCallback = Callable[[str, str], None]
 
 DEFAULT_TRIGGER_PERCENT = 85
-DEFAULT_PREFIRE_LEAD_PERCENT = 10
 DEFAULT_SUMMARY_RESERVE_TOKENS = 32_768
-MIN_SUMMARY_SEED_CHARS = 500
+MIN_SUMMARY_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -30,20 +27,17 @@ class ContextPolicy:
 
     context_window: int
     trigger_percent: int = DEFAULT_TRIGGER_PERCENT
-    prefire_lead_percent: int = DEFAULT_PREFIRE_LEAD_PERCENT
     summary_reserve_tokens: int = DEFAULT_SUMMARY_RESERVE_TOKENS
     max_attempts: int = 3
-    min_summary_chars: int = MIN_SUMMARY_SEED_CHARS
-    two_pass_enabled: bool = True
+    min_summary_chars: int = MIN_SUMMARY_CHARS
+    # Percent of the CURRENT conversation tokens kept verbatim as the recent
+    # tail while the earlier part is summarized. 0 disables retention
+    # (full replacement).
+    retain_percent: int = 16
 
     @property
     def trigger_tokens(self) -> int:
         return max(1, self.context_window * self.trigger_percent // 100)
-
-    @property
-    def prefire_tokens(self) -> int:
-        percent = max(0, self.trigger_percent - self.prefire_lead_percent)
-        return max(1, self.context_window * percent // 100)
 
 
 @dataclass(frozen=True)
@@ -79,30 +73,16 @@ class CompactionOutput:
     tokens_after: int = 0
     attempts: int = 0
     input_stage: str = "verbatim"
-    two_pass_used: bool = False
     error: str = ""
-
-
-@dataclass
-class _PrefireCache:
-    fingerprint: str
-    prefix_len: int
-    note: str
-
-
-@dataclass
-class _PrefireState:
-    thread: Optional[threading.Thread] = None
-    cache: Optional[_PrefireCache] = None
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    # Verbatim recent tail kept by retention compaction; empty for full replace.
+    retained_tail: str = ""
 
 
 class ContextCompactor:
-    """Estimate, prefire, summarize, validate, and replace model context."""
+    """Estimate, summarize, validate, and replace model context."""
 
     def __init__(self, policy: ContextPolicy):
         self.policy = policy
-        self._prefire = _PrefireState()
 
     @staticmethod
     def policy_from_runtime(
@@ -116,25 +96,18 @@ class ContextCompactor:
         return ContextPolicy(
             context_window=context_window,
             trigger_percent=max(1, min(100, trigger_percent)),
-            prefire_lead_percent=max(
-                0,
-                env_int("COMPACTION_PREFIRE_LEAD_PERCENT", DEFAULT_PREFIRE_LEAD_PERCENT),
-            ),
             max_attempts=max(1, env_int("COMPACTION_MAX_ATTEMPTS", 3)),
-            min_summary_chars=max(
-                1,
-                env_int("COMPACTION_MIN_SUMMARY_CHARS", MIN_SUMMARY_SEED_CHARS),
+            retain_percent=max(
+                0,
+                min(50, env_int("COMPACTION_RETAIN_PERCENT", 16)),
             ),
-            two_pass_enabled=os.getenv("COMPACTION_TWO_PASS", "true").lower()
-            in {"1", "true", "yes", "on"},
         )
 
     def refresh_policy(
         self, max_tokens: int, _legacy_compress_at: Optional[int] = None
     ) -> None:
-        """Apply settings changed at runtime and invalidate speculative state."""
+        """Apply settings changed at runtime."""
         self.policy = self.policy_from_runtime(max_tokens)
-        self.clear_prefire()
 
     @staticmethod
     def estimate_text_tokens(text: str) -> int:
@@ -193,6 +166,46 @@ class ContextCompactor:
             record["tool_calls"] = tool_calls
         return record
 
+    @staticmethod
+    def _infer_step_role(step: str) -> str:
+        """Infer the speaker role from an execution-history step's prefix.
+
+        Steps are free text with recognizable markers: user requests/approvals,
+        assistant responses, and tool executions. Everything else defaults to
+        user so no step is ever dropped.
+        """
+        if step.startswith("【用户请求】") or step.startswith("【用户审批】"):
+            return "user"
+        if step.startswith("【AI响应】") or step.startswith("【最终回应】"):
+            return "assistant"
+        if step.startswith("执行 "):
+            return "tool"
+        return "user"
+
+    @classmethod
+    def records_from_history_steps(
+        cls, steps: Sequence[str]
+    ) -> list[BaseMessage]:
+        """Turn free-text execution-history steps into role-annotated messages.
+
+        Used by the manual-compaction fallback so the summary prompt shows the
+        real speaker (``[USER]``/``[AI]``/``[TOOL]``) instead of labeling every
+        step ``[HUMAN]``, and so retention can balance tool call/result pairs.
+        """
+        messages: list[BaseMessage] = []
+        for step in steps:
+            text = str(step or "").strip()
+            if not text:
+                continue
+            role = cls._infer_step_role(text)
+            if role == "assistant":
+                messages.append(AIMessage(content=text))
+            elif role == "tool":
+                messages.append(ToolMessage(content=text, tool_call_id=""))
+            else:
+                messages.append(HumanMessage(content=text))
+        return messages
+
     @classmethod
     def build_snapshot(
         cls,
@@ -240,74 +253,39 @@ class ContextCompactor:
     def should_compact(self, snapshot: ContextSnapshot) -> bool:
         return snapshot.tokens > self.policy.trigger_tokens
 
-    def should_prefire(self, snapshot: ContextSnapshot) -> bool:
-        return (
-            self.policy.two_pass_enabled
-            and len(snapshot.records) >= 4
-            and self.policy.prefire_tokens < snapshot.tokens <= self.policy.trigger_tokens
+    def _retention_split(self, snapshot: ContextSnapshot) -> Optional[int]:
+        """Index of the first record kept verbatim, or None when no split applies.
+
+        Walks the conversation backward accumulating token estimates until the
+        retained tail reaches ``retain_percent`` of the CURRENT conversation
+        tokens (not the max context window), so the tail scales with how much
+        memory is actually in use. Then adjusts so the tail never starts with
+        an orphaned tool result (its calling assistant message must stay in the
+        summarized part).
+        """
+        if self.policy.retain_percent <= 0 or not snapshot.records:
+            return None
+        retain_tokens = max(
+            1, snapshot.tokens * self.policy.retain_percent // 100
         )
-
-    @staticmethod
-    def _fingerprint(records: Sequence[Mapping[str, Any]]) -> str:
-        payload = json.dumps(
-            list(records), ensure_ascii=False, sort_keys=True, default=str
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
-
-    def start_prefire(self, snapshot: ContextSnapshot, sampler: SummarySampler) -> bool:
-        """Speculatively summarize the oldest ~95% without mutating graph state."""
-        if not self.should_prefire(snapshot):
-            return False
-        with self._prefire.lock:
-            if self._prefire.cache is not None:
-                return False
-            if self._prefire.thread and self._prefire.thread.is_alive():
-                return False
-            split = max(1, int(len(snapshot.records) * 0.95))
-            prefix = snapshot.records[:split]
-            fingerprint = self._fingerprint(prefix)
-
-            def worker() -> None:
-                prompt = self._build_summary_prompt(
-                    self.format_transcript(prefix),
-                    two_pass_note=None,
-                    pass_one=True,
-                )
-                try:
-                    note = self.clean_summary(sampler(prompt))
-                except Exception:
-                    note = ""
-                with self._prefire.lock:
-                    if note:
-                        self._prefire.cache = _PrefireCache(
-                            fingerprint=fingerprint,
-                            prefix_len=split,
-                            note=note,
-                        )
-                    self._prefire.thread = None
-
-            thread = threading.Thread(target=worker, daemon=True)
-            self._prefire.thread = thread
-            thread.start()
-            return True
-
-    def clear_prefire(self) -> None:
-        with self._prefire.lock:
-            self._prefire.cache = None
-
-    def _take_valid_prefire(self, snapshot: ContextSnapshot) -> Optional[_PrefireCache]:
-        with self._prefire.lock:
-            thread = self._prefire.thread
-        if thread and thread.is_alive():
-            thread.join()
-        with self._prefire.lock:
-            cache = self._prefire.cache
-            self._prefire.cache = None
-        if not cache or cache.prefix_len > len(snapshot.records):
+        records = snapshot.records
+        accumulated = 0
+        split = len(records)
+        for index in range(len(records) - 1, -1, -1):
+            content = str(records[index].get("content", "") or "")
+            accumulated += self.estimate_text_tokens(content) + 28
+            split = index
+            if accumulated >= retain_tokens:
+                break
+        if split <= 0:
+            # The whole conversation fits in the retained tail: nothing worth
+            # summarizing separately, so fall back to full replacement.
             return None
-        if self._fingerprint(snapshot.records[: cache.prefix_len]) != cache.fingerprint:
-            return None
-        return cache
+        while split < len(records) and str(records[split].get("role", "")) == "tool":
+            split -= 1
+            if split <= 0:
+                return None
+        return split
 
     @staticmethod
     def clean_summary(summary: str) -> str:
@@ -408,7 +386,11 @@ class ContextCompactor:
             system["content"] = self._truncate_middle(content, max(256, len(content) // 2))
         return ""
 
-    def _input_stages(self, snapshot: ContextSnapshot) -> list[tuple[str, str]]:
+    def _input_stages(
+        self,
+        snapshot: ContextSnapshot,
+        message_records: Optional[Sequence[Mapping[str, Any]]] = None,
+    ) -> list[tuple[str, str]]:
         reserve = min(
             self.policy.summary_reserve_tokens,
             max(2_000, self.policy.context_window // 4),
@@ -420,10 +402,10 @@ class ContextCompactor:
         )
         records = (
             {"role": "system", "content": snapshot.system_prompt},
-            *snapshot.records,
+            *(snapshot.records if message_records is None else message_records),
         )
         return [
-            ("verbatim", snapshot.transcript),
+            ("verbatim", self.format_transcript(records)),
             ("verbatim_fitted", self._fit_records(records, fitted_budget, False)),
             ("lossy", self._fit_records(records, lossy_budget, True)),
         ]
@@ -432,25 +414,20 @@ class ContextCompactor:
     def _build_summary_prompt(
         transcript: str,
         *,
-        two_pass_note: Optional[str],
-        pass_one: bool = False,
+        retained_tail: bool = False,
     ) -> str:
-        if pass_one:
+        if retained_tail:
             purpose = (
-                "Create NOTE1 for a later second-pass compaction. Preserve every durable "
-                "fact needed to continue the task, including requests, decisions, file paths, "
-                "tool results, errors, current state, and next steps."
+                "Create a self-contained summary of the EARLIER conversation below. The most "
+                "recent messages are preserved verbatim after this summary and are NOT included "
+                "here — do not summarize them; only the earlier part is replaced by this summary. "
+                "Focus on durable facts from the earlier part that the verbatim tail does not carry."
             )
         else:
             purpose = (
                 "Create a self-contained continuation summary that will replace the full "
                 "conversation. The next agent must be able to continue without the original."
             )
-        note = (
-            f"\n\n## EARLIER PREFIX NOTE\n{two_pass_note}"
-            if two_pass_note
-            else ""
-        )
         return f"""{purpose}
 
 Return only a <summary> block. Include these numbered sections:
@@ -466,7 +443,6 @@ Return only a <summary> block. Include these numbered sections:
 
 Do not include private chain-of-thought. Be detailed rather than vague. Preserve exact
 identifiers, commands, paths, configuration values, and unresolved errors when relevant.
-{note}
 
 ## CONVERSATION TO COMPACT
 {transcript}
@@ -479,36 +455,159 @@ identifiers, commands, paths, configuration values, and unresolved errors when r
         progress: Optional[ProgressCallback] = None,
         cancelled: Optional[Callable[[], bool]] = None,
     ) -> CompactionOutput:
-        """Run full replacement with two-pass reuse, retries, and input degradation."""
+        """Run replacement with retention, two-pass reuse, retries, and input degradation."""
         report = progress or (lambda _stage, _content: None)
         is_cancelled = cancelled or (lambda: False)
         if is_cancelled():
             return CompactionOutput(False, "cancelled", "Context compaction cancelled")
 
-        cache = self._take_valid_prefire(snapshot)
-        if cache:
-            tail = self.format_transcript(snapshot.records[cache.prefix_len :])
-            report("summarizing", "正在合并预压缩摘要与最近上下文")
-            try:
-                raw = sampler(
-                    self._build_summary_prompt(tail, two_pass_note=cache.note)
-                )
-                summary = self.clean_summary(raw)
-                if len(summary) >= self.policy.min_summary_chars:
-                    return CompactionOutput(
-                        True,
-                        "success",
-                        "上下文已通过两阶段全量摘要重建",
-                        summary=summary,
-                        tokens_before=snapshot.tokens,
-                        tokens_after=self.estimate_text_tokens(summary),
-                        attempts=1,
-                        input_stage="two_pass",
-                        two_pass_used=True,
-                    )
-            except Exception:
-                pass
+        # Retention: keep the recent tail verbatim, summarize only the earlier part.
+        split = self._retention_split(snapshot)
+        tail_records = snapshot.records[split:] if split is not None else None
 
+        if tail_records is not None:
+            outcome = self._compact_retained(
+                snapshot, split, sampler, report, is_cancelled
+            )
+            if outcome.success or outcome.status == "cancelled":
+                return outcome
+            # 原版式降级：保留路径任何失败（太短/传输/超长）都回退到全量替换，
+            # 与旧版"预压缩缓存失败后落到主循环"同款语义。
+            report("retrying", "保留摘要失败，回退全量替换")
+        return self._compact_full(snapshot, sampler, report, is_cancelled)
+
+    def _compact_retained(
+        self,
+        snapshot: ContextSnapshot,
+        split: int,
+        sampler: SummarySampler,
+        report: ProgressCallback,
+        is_cancelled: Callable[[], bool],
+    ) -> CompactionOutput:
+        """Summarize the earlier part, keep the recent tail verbatim."""
+        message_records = snapshot.records[:split]
+        tail_records = snapshot.records[split:]
+        stages = self._input_stages(snapshot, message_records)
+        attempts = 0
+        last_error = ""
+        for stage_name, transcript in stages:
+            if not transcript:
+                continue
+            while attempts < self.policy.max_attempts:
+                attempts += 1
+                if is_cancelled():
+                    return CompactionOutput(
+                        False,
+                        "cancelled",
+                        "Context compaction cancelled",
+                        tokens_before=snapshot.tokens,
+                        attempts=attempts,
+                    )
+                report(
+                    "summarizing",
+                    f"正在摘要早期对话（保留最近 {self.policy.retain_percent}% 原文，{stage_name}）",
+                )
+                try:
+                    raw = sampler(
+                        self._build_summary_prompt(
+                            transcript, retained_tail=True
+                        )
+                    )
+                    summary = self.clean_summary(raw)
+                except Exception as exc:
+                    last_error = str(exc)
+                    if self._is_context_error(last_error):
+                        break
+                    # 传输/服务端失败：返回错误，由调用方降级到全量替换。
+                    return CompactionOutput(
+                        False,
+                        "error",
+                        "上下文摘要请求失败，未重复发送相同输入",
+                        tokens_before=snapshot.tokens,
+                        tokens_after=snapshot.tokens,
+                        attempts=attempts,
+                        input_stage=f"retain{self.policy.retain_percent}_{stage_name}",
+                        error=last_error,
+                    )
+                if len(summary) < self.policy.min_summary_chars:
+                    last_error = (
+                        f"摘要过短：{len(summary)} < {self.policy.min_summary_chars} chars"
+                    )
+                    continue
+                return self._retention_output(
+                    snapshot,
+                    summary,
+                    tail_records,
+                    f"retain{self.policy.retain_percent}_{stage_name}",
+                    attempts,
+                )
+
+        return CompactionOutput(
+            False,
+            "error",
+            "无法生成通过质量校验的上下文摘要",
+            tokens_before=snapshot.tokens,
+            tokens_after=snapshot.tokens,
+            attempts=attempts,
+            error=last_error,
+        )
+
+    @staticmethod
+    def _tail_text(tail_records: Sequence[Mapping[str, Any]]) -> str:
+        """Join the retained records' raw contents without transcript headers.
+
+        The ``## MESSAGE N [ROLE]`` headers are prompt formatting; storing them
+        in the memory files only wastes tokens (steps already carry their own
+        role markers such as ``【用户请求】``), so the retained tail is kept as
+        plain step text.
+        """
+        lines = [
+            str(record.get("content", "")).strip()
+            for record in tail_records
+            if str(record.get("content", "")).strip()
+        ]
+        return "\n".join(lines)
+
+    def _retention_output(
+        self,
+        snapshot: ContextSnapshot,
+        summary: str,
+        tail_records: Sequence[Mapping[str, Any]],
+        input_stage: str,
+        attempts: int,
+    ) -> CompactionOutput:
+        """Compose the final context: pure summary + verbatim recent tail.
+
+        The summary goes to the accumulated-compression memory and the tail
+        goes to execution_history.md — the two are reassembled separately when
+        the next prompt context is built, so the tail must not be duplicated
+        inside the summary.
+        """
+        tail_text = self._tail_text(tail_records)
+        tokens_after = (
+            self.estimate_text_tokens(summary)
+            + self.estimate_text_tokens(tail_text)
+        )
+        return CompactionOutput(
+            True,
+            "success",
+            "早期对话已整理为摘要，最近上下文原文保留",
+            summary=summary,
+            tokens_before=snapshot.tokens,
+            tokens_after=tokens_after,
+            attempts=attempts,
+            input_stage=input_stage,
+            retained_tail=tail_text,
+        )
+
+    def _compact_full(
+        self,
+        snapshot: ContextSnapshot,
+        sampler: SummarySampler,
+        report: ProgressCallback,
+        is_cancelled: Callable[[], bool],
+    ) -> CompactionOutput:
+        """Full replacement: summarize the whole conversation (no retention)."""
         stages = self._input_stages(snapshot)
         attempts = 0
         last_error = ""
@@ -528,7 +627,7 @@ identifiers, commands, paths, configuration values, and unresolved errors when r
                 report("summarizing", f"正在生成全量续接摘要（{stage_name}）")
                 try:
                     raw = sampler(
-                        self._build_summary_prompt(transcript, two_pass_note=None)
+                        self._build_summary_prompt(transcript)
                     )
                     summary = self.clean_summary(raw)
                 except Exception as exc:

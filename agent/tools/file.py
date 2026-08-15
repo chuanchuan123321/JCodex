@@ -12,6 +12,11 @@ class FileTool:
 
     DEFAULT_READ_LIMIT = 1000
     MAX_READ_TOKENS = 25_000
+    # A single line longer than this is truncated with an explicit suffix so
+    # memory stays bounded even for newline-free giant lines.
+    MAX_LINE_LENGTH = 2000
+    # Streaming read block size; large files are never buffered whole.
+    STREAM_CHUNK_SIZE = 64 * 1024
 
     IMAGE_EXTENSIONS = {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff",
@@ -38,9 +43,13 @@ class FileTool:
     ) -> Tuple[bool, str]:
         """Read file contents with Grok Build-compatible pagination.
 
-        Non-skill reads are capped at 1000 lines. The complete selected window
-        must also fit Grok Build's 25,000-token estimate; otherwise the model
-        receives a range/search instruction instead of a partial file body.
+        Non-skill reads are capped at 1000 lines. The file is streamed in
+        bounded blocks, so arbitrarily large files never buffer whole; a single
+        line longer than MAX_LINE_LENGTH is truncated with an explicit suffix.
+        When the requested window would exceed the token budget, the read
+        returns the partial window that fits and ends with a continuation
+        footer (`(Showing lines X-Y. Use offset=Y+1 to continue.)`) instead of
+        refusing; reaching end of file ends with `(End of file - total N lines)`.
 
         Args:
             path: File path to read
@@ -78,54 +87,77 @@ class FileTool:
             if offset < 1:
                 offset = 1
 
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
+            def _lines():
+                # Stream the file in bounded blocks; the text-mode reader
+                # handles multi-byte characters split across block boundaries.
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    buf = ""
+                    while True:
+                        chunk = f.read(FileTool.STREAM_CHUNK_SIZE)
+                        if not chunk:
+                            if buf:
+                                yield buf.rstrip("\r")
+                            return
+                        buf += chunk
+                        parts = buf.split("\n")
+                        buf = parts.pop()
+                        for part in parts:
+                            yield part.rstrip("\r")
 
-            total_lines = len(lines)
+            selected: List[Tuple[int, str]] = []
+            total_lines = 0
+            output_bytes = 0
+            budget_cut = False
+            window_full = False
+            try:
+                for raw_line in _lines():
+                    total_lines += 1
+                    if total_lines < offset:
+                        continue
+                    if len(selected) >= limit:
+                        window_full = True
+                        break
+                    text = raw_line
+                    if len(text) > FileTool.MAX_LINE_LENGTH:
+                        text = (
+                            text[: FileTool.MAX_LINE_LENGTH]
+                            + f"... (line truncated to {FileTool.MAX_LINE_LENGTH} chars)"
+                        )
+                    line_bytes = len(text.encode("utf-8")) + 1
+                    if selected and output_bytes + line_bytes > FileTool.MAX_READ_TOKENS * 4:
+                        budget_cut = True
+                        break
+                    output_bytes += line_bytes
+                    selected.append((total_lines, text))
+            except OSError as e:
+                return False, f"Error reading file: {str(e)}"
 
             if offset > total_lines:
-                return (
-                    False,
-                    f"Offset {offset} is out of range (file has {total_lines} lines)",
-                )
+                # Reading an empty file from the default offset is a valid
+                # empty result, not an out-of-range error.
+                if not (total_lines == 0 and offset == 1):
+                    return (
+                        False,
+                        f"Offset {offset} is out of range (file has {total_lines} lines)",
+                    )
 
-            # Calculate slice
-            start_idx = offset - 1  # Convert to 0-indexed
-            end_idx = min(start_idx + limit, total_lines)
-
-            selected_lines = lines[start_idx:end_idx]
-
-            # Grok Build anchors the first line and every tenth line. It does
-            # not clip individual lines because that corrupts minified files.
+            # Grok Build anchors the first line and every tenth line.
             output_parts = []
-            for i, line in enumerate(selected_lines, start=offset):
-                content = line.rstrip("\r\n")
+            for i, content in selected:
                 output_parts.append(
                     f"{i}\u2192{content}" if i == offset or i % 10 == 0 else content
                 )
 
-            output = "\n".join(output_parts)
-            estimated_tokens = len(output.encode("utf-8")) // 4
-            if estimated_tokens > FileTool.MAX_READ_TOKENS:
-                range_specified = offset != 1 or limit != FileTool.DEFAULT_READ_LIMIT
-                if range_specified:
-                    message = (
-                        f"The requested line range (offset={offset}, limit={limit}) "
-                        f"contains {estimated_tokens} tokens, which exceeds the "
-                        f"maximum allowed tokens ({FileTool.MAX_READ_TOKENS} tokens). "
-                        "Try a smaller limit, a different starting offset, or use "
-                        "grep to search for specific content."
-                    )
-                else:
-                    message = (
-                        f"File content ({estimated_tokens} tokens) exceeds maximum "
-                        f"allowed tokens ({FileTool.MAX_READ_TOKENS} tokens). Please "
-                        "use offset and limit parameters to read a shorter range, or "
-                        "use grep to search for specific content."
-                    )
-                return False, message
-
-            return True, output
+            body = "\n".join(output_parts)
+            end_line = selected[-1][0] if selected else offset - 1
+            if budget_cut or window_full:
+                footer = (
+                    f"(Showing lines {offset}-{end_line}. "
+                    f"Use offset={end_line + 1} to continue.)"
+                )
+            else:
+                footer = f"(End of file - total {total_lines} lines)"
+            return True, f"{body}\n\n{footer}" if body else footer
 
         except FileNotFoundError:
             return False, f"File not found: {path}"

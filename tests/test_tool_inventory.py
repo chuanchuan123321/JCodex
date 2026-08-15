@@ -39,7 +39,7 @@ def test_tool_inventory_keeps_unique_local_capabilities() -> None:
     names = [tool["function"]["name"] for tool in executor.get_available_tools()]
 
     assert names.count("glob") == 1
-    assert {"grep", "codesearch", "edit", "glob"}.issubset(names)
+    assert {"grep", "edit", "glob"}.issubset(names)
     assert "search_files" not in names
     assert "search_files" not in executor.tools
     redundant_terminal_tools = {
@@ -223,6 +223,10 @@ def test_tool_inventory_exposes_executable_grok_compatible_surface(tmp_path: Pat
     assert {"run_terminal_cmd", "read_file", "search_replace"}.issubset(
         executor.tools
     )
+    # The canonical web names are web_search/web_fetch; the websearch/read_url
+    # names stay dispatch-only so older persisted calls still resolve.
+    assert {"websearch", "read_url"}.isdisjoint(names)
+    assert {"websearch", "read_url"}.issubset(executor.tools)
 
     started = json.loads(
         executor.execute(

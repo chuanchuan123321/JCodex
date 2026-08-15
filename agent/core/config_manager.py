@@ -159,7 +159,7 @@ class ConfigManager:
 
     def export_search_keys_to_env(self) -> None:
         """Keep web search API keys in runtime env if they already exist in .env."""
-        for key in ("TAVILY_API_KEY", "EXA_API_KEY"):
+        for key in ("TAVILY_API_KEY",):
             value = os.getenv(key)
             if value:
                 os.environ[key] = value

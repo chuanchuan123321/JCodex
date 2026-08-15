@@ -138,7 +138,6 @@ _SUBAGENT_READ_TOOLS = {
     "glob",
     "grep",
     "websearch",
-    "codesearch",
     "read_url",
     "load_skill",
     "web_search",
@@ -390,17 +389,20 @@ def _platform_instruction() -> str:
     """Return the one-line OS note injected into ``Agent.md``.
 
     The model reads this before its first command, so Windows runs stop
-    guessing Unix commands in cmd.exe. macOS stays empty to keep its
+    guessing Unix commands. The model-facing shell tool on Windows is the
+    ``pwsh`` tool (PowerShell dialect); the legacy ``bash`` name still runs
+    cmd.exe only for older persisted calls. macOS stays empty to keep its
     existing behavior unchanged.
     """
     system = platform.system()
     if system == "Windows":
         return (
-            "当前运行在 Windows 上。shell 工具在 cmd.exe 中执行："
-            "请使用 dir、type、copy、move、del、findstr、where、mkdir、rmdir "
-            "等 Windows 命令，不要使用 ls、cat、cp、mv、rm、grep、sleep 等 "
-            "Unix 命令；cmd.exe 里没有 python3，若已安装 Python 用 python "
-            "或 py；路径使用反斜杠（如 C:\\Users\\...）。"
+            "当前运行在 Windows 上。模型可见的 shell 工具是 pwsh（PowerShell）："
+            "请使用 PowerShell 语法，环境变量用 $env:NAME，路径用反斜杠（如 C:\\Users\\...），"
+            "优先使用 Get-ChildItem、Get-Content、Copy-Item、Move-Item、Remove-Item、"
+            "Select-String、Where-Object 等 cmdlet；没有 python3，若已安装 Python 用 "
+            "python 或 py。cmd.exe 命令（dir、type、copy、del 等）不再推荐——那是旧的 "
+            "bash 兼容路径，仅历史存档调用会用到。"
         )
     if system == "Darwin":
         return ""
@@ -2245,10 +2247,16 @@ class DesktopTaskExecutor:
             history_text = snapshot["history_text"]
             context_snapshot = snapshot.get("context_snapshot")
             if context_snapshot is None:
+                # 用执行历史步骤逐条建记录并推断角色（用户/助手/工具），
+                # 而不是把全部历史塞成单条消息或全部标成 HUMAN。
+                history_steps = snapshot.get("execution_history") or []
+                messages = ContextCompactor.records_from_history_steps(history_steps)
+                if not messages:
+                    messages = [HumanMessage(content=history_text)]
                 context_snapshot = ContextCompactor.build_snapshot(
                     {
                         "system_prompt": "",
-                        "messages": [HumanMessage(content=history_text)],
+                        "messages": messages,
                         "step_count": step_count,
                     },
                     self.context_compactor.policy,
@@ -2295,6 +2303,9 @@ class DesktopTaskExecutor:
             self.ai_engine.clear_history()
             self.step_count = 0
             self.memory_manager.clear_execution_history()
+            if compacted.retained_tail:
+                # 保留机制：把最近原文尾部写回短期记忆文件，而不是完全清空。
+                self.memory_manager.save_execution_history([compacted.retained_tail])
 
             return result(
                 True,
@@ -2304,7 +2315,6 @@ class DesktopTaskExecutor:
                 archive_path=full_archive_path,
                 attempts=compacted.attempts,
                 input_stage=compacted.input_stage,
-                two_pass_used=compacted.two_pass_used,
                 memory_flush_status=(
                     flush_result.status if flush_result else "below_threshold"
                 ),
@@ -3819,10 +3829,6 @@ def _run_subagent_turn(
             multi_agent_enabled=False,
         )
         context_snapshot = snapshot["context_snapshot"]
-        if child.context_compactor.should_prefire(context_snapshot):
-            child.context_compactor.start_prefire(
-                context_snapshot, child._sample_compaction_prompt
-            )
         if not child.context_compactor.should_compact(context_snapshot):
             return None
         return {
@@ -4330,11 +4336,6 @@ def _graph_compression_check(run: DesktopRunContext, state: dict) -> Optional[di
         multi_agent_enabled=run.multi_agent_enabled,
     )
     context_snapshot = snapshot["context_snapshot"]
-    if run.executor.context_compactor.should_prefire(context_snapshot):
-        run.executor.context_compactor.start_prefire(
-            context_snapshot,
-            run.executor._sample_compaction_prompt,
-        )
     if not run.executor.context_compactor.should_compact(context_snapshot):
         return None
     return {
@@ -4472,7 +4473,7 @@ def _tool_target(tool_name: object, params: object) -> str:
         return text("description") or text("workdir") or "终端命令"
     if name in {"read_url"}:
         return text("url")
-    if name in {"websearch", "web_search", "codesearch"}:
+    if name in {"websearch", "web_search"}:
         query = text("query") or text("pattern")
         path = text("path")
         return f"{path} · {query}" if path and query else query or path

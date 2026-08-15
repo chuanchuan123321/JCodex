@@ -15,7 +15,6 @@ class ToolLoopGuard:
         "file_read",
         "glob",
         "grep",
-        "codesearch",
         "web_search",
         "websearch",
         "read_url",
@@ -155,11 +154,14 @@ class ToolLoopGuard:
                     return False
             except (json.JSONDecodeError, TypeError):
                 pass
-        # ShellTool 的状态行是权威结果：以 ✓ Success 开头时，即使正文里出现
-        # "No such file or directory" 等文本（例如删除后的验证输出），也不应
-        # 被误判为失败；命令真正失败时状态行一定是 ✗ Failed。
+        # Legacy defensive checks: results produced by the old renderer
+        # (✓ Success / ✗ Failed status line) may still sit in cached state.
         if lowered.startswith("✓ success"):
             return True
+        # Infrastructure failures: only Error:-style prefixes are errors.
+        # A non-zero shell exit is a report, not an error (see the
+        # marker contract below), so it is not treated as success for the
+        # purpose of result reuse.
         if lowered.startswith(
             (
                 "error:",
@@ -178,9 +180,22 @@ class ToolLoopGuard:
             )
         ):
             return False
-        # 只依据状态行/前缀判定：ShellTool 失败一定以 ✗ Failed 开头，
-        # 工具错误以 Error: 等前缀开头；正文里的内嵌文本不再参与判定，
-        # 避免“删除后验证”这类输出被误判为失败。
+        # Shell marker contract: only the exact marker lines decide.
+        # Body text ("No such file or directory" inside a delete-verification
+        # output) never participates, so verification output is not misjudged.
+        if "[cancelled]" in raw_result:
+            return False
+        if "[timed out after" in raw_result or "[timed out]" in raw_result:
+            return False
+        if "[killed by signal" in raw_result:
+            return False
+        marker = "[exit code: "
+        idx = raw_result.rfind(marker)
+        if idx >= 0:
+            end = raw_result.find("]", idx)
+            code = raw_result[idx + len(marker):end].strip()
+            if code.isdigit() and int(code) != 0:
+                return False
         return True
 
     def before_call(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:

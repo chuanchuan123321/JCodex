@@ -13,12 +13,13 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 from langchain_community.agent_toolkits import FileManagementToolkit
 
-from agent.tools.shell import ShellTool
+from agent.tools.shell import ShellTool, decode_stream
+from agent.tools.url_fetch import fetch_url
 from agent.tools.file import FileTool
 from agent.tools.time_tool import TimeTool
 from agent.tools.pdf_tool import PDFTool
@@ -26,7 +27,6 @@ from agent.tools.skill_tool import SkillTool
 from agent.tools.grep import execute_grep, get_grep_tool_definition
 from agent.tools.edit import execute_edit, get_edit_tool_definition
 from agent.tools.websearch import execute_websearch, get_websearch_tool_definition
-from agent.tools.codesearch import execute_codesearch, get_codesearch_tool_definition
 from agent.tools.preview import PreviewManager
 from agent.tools.plan import PlanTool
 from agent.core.multi_agent import MULTI_AGENT_TOOL_NAMES
@@ -71,7 +71,7 @@ _SCOPED_MUTATION_TARGETS = {
 # Shell commands cannot be constrained reliably with path preflight checks: a
 # command can write through redirection, child processes, scripts, or utilities.
 _SCOPED_COMMAND_TOOLS = frozenset(
-    {"bash", "shell", "run_terminal_cmd", "monitor"}
+    {"bash", "shell", "run_terminal_cmd", "pwsh", "monitor"}
 )
 _MUTATION_SCOPE_UNSET = object()
 
@@ -117,7 +117,7 @@ class ExtendedToolExecutor:
         data_root: Optional[str] = None,
         restrict_reads_to_project: bool = False,
     ):
-        self.shell_tool = ShellTool()
+        # self.shell_tool is created below, after workspace_temp_root resolves.
         self.file_tool = FileTool()
         self.pdf_tool = PDFTool()
         self.skill_tool = SkillTool(skills_loader) if skills_loader else None
@@ -130,6 +130,9 @@ class ExtendedToolExecutor:
         self.workspace_temp_root = (
             self.workspace_root / "temp"
         ).resolve()
+        # Truncated shell output spills here so the model can read the tail
+        # that was cut from the returned result.
+        self.shell_tool = ShellTool(spill_dir=str(self.workspace_temp_root))
         # Group background-command output logs under temp/tasks.
         self.task_log_root = self.workspace_temp_root / "tasks"
         try:
@@ -184,6 +187,10 @@ class ExtendedToolExecutor:
         self._task_reference_roots: Dict[str, tuple[Path, ...]] = {}
         self._task_reference_roots_lock = threading.RLock()
         self.memory_store = None
+        # File version fingerprints (mtime_ns, size) recorded on each successful
+        # read, so a later edit/write can detect that the target changed since
+        # it was read and demand a re-read instead of mutating stale content.
+        self._read_versions: Dict[str, Tuple[int, int]] = {}
         self._background_tasks: Dict[str, Dict[str, Any]] = {}
         self._background_tasks_lock = threading.RLock()
         self._scheduled_tasks: Dict[str, Dict[str, Any]] = {}
@@ -192,13 +199,13 @@ class ExtendedToolExecutor:
         self._goal_state: Dict[str, Any] = {"status": "active", "message": ""}
         self.tools: Dict[str, Callable] = {
             "bash": self.execute_shell,
+            "pwsh": self.execute_shell,
             "read": self.execute_file_read,
             "glob": self.execute_glob,
             "grep": self.execute_grep,
             "edit": self.execute_edit,
             "write": self.execute_file_write,
             "websearch": execute_websearch,
-            "codesearch": execute_codesearch,
             "read_url": self.execute_read_url,
             "send_file": self.execute_send_file,
             "generate_pdf": self.execute_generate_pdf,
@@ -313,54 +320,12 @@ class ExtendedToolExecutor:
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "bash",
-                    "description": (
-                        "Executes a given shell command with optional timeout, ensuring proper handling "
-                        "and security measures. AVOID using cd - use the workdir parameter instead."
-                        + (
-                            " On Windows commands run in cmd.exe: use Windows-compatible commands "
-                            "(dir, type, copy, move, del, findstr, where, mkdir, rmdir) instead of "
-                            "ls/cat/cp/mv/rm/grep; python3 does not exist in cmd.exe - use python or py if installed; PowerShell is available via powershell -Command \"...\"."
-                            if os.name == "nt"
-                            else ""
-                        )
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "description": "The command to execute",
-                            },
-                            "timeout": {
-                                "type": "number",
-                                "description": "Optional timeout in milliseconds",
-                            },
-                            "workdir": {
-                                "type": "string",
-                                "description": "The working directory to run the command in",
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "Clear, concise description of what this command does",
-                            },
-                            "is_background": {
-                                "type": "boolean",
-                                "description": "Run a long-lived command in the background and return a task ID",
-                            },
-                        },
-                        "required": ["command"],
-                    },
-                },
-            },
+            *self._shell_tool_definitions(),
             {
                 "type": "function",
                 "function": {
                     "name": "read",
-                    "description": "Read a file or directory from the local filesystem. PDF, Word, and Excel files are parsed automatically. Image files cannot be read; the read tool only supports document files. Reads at most 1000 lines per call. For large files, use grep first, then read a focused range with offset and limit.",
+                    "description": "Read a file or directory from the local filesystem. PDF, Word, and Excel files are parsed automatically. Image files cannot be read; the read tool only supports document files. Reads at most 1000 lines per call. A window cut short by the output budget ends with `(Showing lines X-Y. Use offset=Y+1 to continue.)` — follow it to keep reading; lines longer than 2000 characters are truncated with an explicit suffix. For large files, use grep first, then read a focused range with offset and limit.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -402,29 +367,6 @@ class ExtendedToolExecutor:
                             },
                         },
                         "required": ["content", "path"],
-                    },
-                },
-            },
-            get_websearch_tool_definition(),
-            get_codesearch_tool_definition(),
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_url",
-                    "description": "Fetches content from a specified URL. Takes a URL and optional format as input.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "url": {
-                                "type": "string",
-                                "description": "The URL to fetch content from",
-                            },
-                            "format": {
-                                "type": "string",
-                                "description": "The format to return (text, markdown, html)",
-                            },
-                        },
-                        "required": ["url"],
                     },
                 },
             },
@@ -573,17 +515,110 @@ class ExtendedToolExecutor:
             ]
         return tools
 
+    def _shell_tool_definitions(self) -> List[Dict[str, Any]]:
+        """Return the model-facing shell tool for this platform.
+
+        Platform split: macOS/Linux expose the ``bash`` tool with a
+        POSIX-dialect contract; Windows exposes the ``pwsh`` tool with a
+        PowerShell-dialect contract (when PowerShell is available) so the model
+        never receives commands in the wrong dialect. The legacy ``bash``/
+        ``run_terminal_cmd`` names stay registered for dispatch so older
+        checkpoints can still resume, but they are not advertised to the model
+        on Windows.
+        """
+        if os.name == "nt" and ShellTool._resolve_pwsh() is not None:
+            return [self._pwsh_tool_definition()]
+        return [self._bash_tool_definition()]
+
+    @staticmethod
+    def _shell_tool_parameters() -> Dict[str, Any]:
+        """Shared parameter schema for the bash/pwsh tools."""
+        return {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The command to execute",
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Optional timeout in milliseconds",
+                },
+                "workdir": {
+                    "type": "string",
+                    "description": "The working directory to run the command in. Defaults to the session workspace; a relative path is resolved against it.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\".",
+                },
+                "is_background": {
+                    "type": "boolean",
+                    "description": "Run a long-lived command in the background and return a task ID; collect output with get_task_output and stop it with kill_task",
+                },
+            },
+            "required": ["command"],
+        }
+
+    def _bash_tool_definition(self) -> Dict[str, Any]:
+        """The POSIX shell tool contract (macOS/Linux)."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": (
+                    "Execute a command in the system shell (bash on macOS, sh on Linux) and return "
+                    "its stdout/stderr. Each call runs in a fresh shell: no state (cwd, variables, "
+                    "functions) persists between calls — pass `workdir` instead of using `cd`. "
+                    "Non-zero exits are reported as `[exit code: N]`: a non-zero exit is a report, "
+                    "not an error (grep with no matches, diff with differences, and curl -f exit "
+                    "non-zero normally) — inspect the output and decide how to react. Timeouts, "
+                    "cancellations, and signal kills appear as `[timed out after Ns]`, `[cancelled]`, "
+                    "and `[killed by signal: X]`. Truncated output appends "
+                    "`[output truncated; full output: <path>]`; read the full log file when the tail "
+                    "is not enough. Check the `[exit code: N]` marker on every result; investigate "
+                    "failures before moving on."
+                ),
+                "parameters": self._shell_tool_parameters(),
+            },
+        }
+
+    def _pwsh_tool_definition(self) -> Dict[str, Any]:
+        """The Windows PowerShell tool contract."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "pwsh",
+                "description": (
+                    "Execute a PowerShell command via `pwsh -NoProfile -NonInteractive -Command` "
+                    "(falling back to `powershell` when pwsh is absent) and return its stdout/stderr. "
+                    "Each call runs in a fresh PowerShell process: no state (cwd, variables, functions) "
+                    "persists between calls — pass `workdir` instead of using `cd`. Paths use native "
+                    "Windows form (`C:\\...`); read environment variables with `$env:NAME`; use "
+                    "PowerShell cmdlets (Get-ChildItem, Get-Content, Copy-Item, Move-Item, "
+                    "Remove-Item, Select-String, Where-Object) rather than POSIX commands. "
+                    "Non-zero exits are reported as `[exit code: N]`: a non-zero exit is a report, not "
+                    "an error — inspect the output and decide how to react. On Windows a force-killed "
+                    "command settles as `[exit code: 1]` without a signal marker — treat it as an "
+                    "interruption, not a command failure. Timeouts appear as `[timed out after Ns]`; "
+                    "truncated output appends `[output truncated; full output: <path>]`. Check the "
+                    "`[exit code: N]` marker on every result; investigate failures before moving on."
+                ),
+                "parameters": self._shell_tool_parameters(),
+            },
+        }
+
     def _grok_compatible_tool_definitions(self) -> List[Dict[str, Any]]:
         """Return executable Grok Build-compatible aliases and extensions."""
         definitions = []
         aliases = {
             "web_search": (
                 "websearch",
-                "Search the public web for current information and relevant sources.",
+                "Search the public web for current or unknown information. Returns an optional summary answer and a list of source URLs with snippets. Set include_images to true only for visual queries (images, photos, products); images come back as related links with little or no description. Use focused queries and avoid repeating equivalent searches.",
             ),
             "web_fetch": (
                 "read_url",
-                "Fetch a specific public URL and return its content as markdown or text.",
+                "Fetches content from a specific HTTP(S) URL and returns it decoded to text. Only same-host redirects are followed automatically; a redirect to a different host is refused — fetch that URL directly. Non-text responses (images, archives, downloads) are rejected. Long pages are truncated with a notice at the end; fetch a more specific URL or section for the full text.",
             ),
         }
         by_name = {
@@ -1142,6 +1177,10 @@ class ExtendedToolExecutor:
         if scope_error:
             return scope_error
 
+        stale_error = self._stale_mutation_error(tool_name, params)
+        if stale_error:
+            return stale_error
+
         if tool_name in MULTI_AGENT_TOOL_NAMES:
             return self._execute_multi_agent_tool(tool_name, params, runtime)
 
@@ -1192,8 +1231,8 @@ class ExtendedToolExecutor:
                     params, conversation_id=resolved_conversation_id,
                     message_id=resolved_message_id,
                 )
-            if tool_name in {"bash", "shell"}:
-                return self.execute_shell(params, runtime=runtime)
+            if tool_name in {"bash", "shell", "run_terminal_cmd", "pwsh"}:
+                return self.execute_shell(params, runtime=runtime, tool_name=tool_name)
             if tool_name == "use_tool":
                 return self.execute_use_tool(params, runtime=runtime)
             if tool_name in {"read", "file_read"}:
@@ -1287,6 +1326,72 @@ class ExtendedToolExecutor:
                     f"write paths: {target}"
                 )
         return ""
+
+    def _stale_mutation_error(
+        self, tool_name: object, params: object
+    ) -> str:
+        """Reject edits/writes whose target changed since the last read.
+
+        A successful read records the target's version fingerprint; if the
+        file changed on disk before a later mutation, the model is editing
+        content it never actually saw, so the mutation fails and demands a
+        re-read instead of silently corrupting the new content.
+        """
+        if not getattr(self, "_read_versions", None):
+            return ""
+        normalized_name = str(tool_name or "").strip()
+        target_groups = _SCOPED_MUTATION_TARGETS.get(normalized_name)
+        if target_groups is None:
+            return ""
+        normalized_params = params if isinstance(params, dict) else {}
+        for aliases in target_groups:
+            target = next(
+                (
+                    normalized_params.get(key)
+                    for key in aliases
+                    if isinstance(normalized_params.get(key), str)
+                    and normalized_params.get(key)
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            path = os.path.normcase(
+                os.path.realpath(FileTool.expand_path(target))
+            )
+            recorded = self._read_versions.get(path)
+            if recorded is None:
+                return ""
+            current = self._stat_version(path)
+            if current is not None and current != recorded:
+                return (
+                    f"Error: {target} changed since it was read; the edit target "
+                    "is stale. Re-read the file before editing it again."
+                )
+            return ""
+        return ""
+
+    @staticmethod
+    def _stat_version(path: str) -> Optional[Tuple[int, int]]:
+        """Fingerprint a file's current on-disk version (mtime_ns, size)."""
+        try:
+            stat = os.stat(path)
+            return (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+
+    def _note_read_version(self, file_path: str) -> None:
+        """Record a successful read's version fingerprint for stale checks."""
+        try:
+            path = os.path.normcase(
+                os.path.realpath(FileTool.expand_path(file_path))
+            )
+            if os.path.isfile(path):
+                version = self._stat_version(path)
+                if version is not None:
+                    self._read_versions[path] = version
+        except Exception:
+            pass
 
     def _normalize_mutation_scope_roots(
         self, raw_roots: object
@@ -1724,14 +1829,25 @@ class ExtendedToolExecutor:
         self,
         params: Dict[str, Any],
         runtime: Optional[Dict[str, Any]] = None,
+        tool_name: Optional[str] = None,
     ) -> str:
-        """Execute shell command"""
+        """Execute shell command.
+
+        Args:
+            params: Tool parameters (command, workdir, timeout, ...).
+            runtime: Per-call runtime (cancellation signals).
+            tool_name: Dispatching tool name. ``pwsh`` runs the command through
+                PowerShell; other names use the platform shell.
+        """
         command = params.get("command", "")
         if not command:
             return "Error: command parameter required"
 
+        # The pwsh tool advertises the PowerShell dialect, so its commands must
+        # run inside PowerShell, not cmd.exe (which shell=True would use).
+        dialect = "pwsh" if tool_name == "pwsh" else "system"
         if bool(params.get("is_background", False)):
-            return self._start_background_command(params)
+            return self._start_background_command(params, dialect=dialect)
 
         timeout = params.get("timeout")
         if timeout is not None:
@@ -1750,6 +1866,7 @@ class ExtendedToolExecutor:
             timeout=timeout,
             cancel_event=(runtime or {}).get("cancel_event"),
             cancelled=(runtime or {}).get("cancelled"),
+            dialect=dialect,
         )
         return self.shell_tool.format_result(result)
 
@@ -1785,6 +1902,7 @@ class ExtendedToolExecutor:
         success, content = self.file_tool.read_file(file_path, offset, limit)
 
         if success:
+            self._note_read_version(file_path)
             return content
         return f"Error: {content}"
 
@@ -1921,7 +2039,12 @@ class ExtendedToolExecutor:
         normalized["oldString"] = params.get("oldString", params.get("old_string", ""))
         normalized["newString"] = params.get("newString", params.get("new_string", ""))
         normalized["replaceAll"] = params.get("replaceAll", params.get("replace_all", False))
-        return execute_edit(normalized)
+        result = execute_edit(normalized)
+        if not str(result).startswith("Error:"):
+            # The mutation succeeded: refresh the recorded version so a later
+            # edit of this file is not mistaken for a stale target.
+            self._note_read_version(normalized["filePath"])
+        return result
 
     def execute_read_excel(self, params: Dict[str, Any]) -> str:
         """Read an Excel workbook as tab-separated sheet content."""
@@ -1965,7 +2088,12 @@ class ExtendedToolExecutor:
             return protection_error
         path = self._resolve_project_path(path)
         success, message = self.file_tool.write_file(path, content)
-        return message if success else f"Error: {message}"
+        if success:
+            # Refresh the recorded version so a later edit of this file is not
+            # mistaken for a stale target.
+            self._note_read_version(path)
+            return message
+        return f"Error: {message}"
 
     def execute_file_list(self, params: Dict[str, Any]) -> str:
         """List files"""
@@ -2089,7 +2217,9 @@ class ExtendedToolExecutor:
         )
         return f"**File:** {requested}\n**Lines:** {len(selected)}\n\n{numbered}"
 
-    def _start_background_command(self, params: Dict[str, Any]) -> str:
+    def _start_background_command(
+        self, params: Dict[str, Any], dialect: str = "system"
+    ) -> str:
         command = str(params.get("command", "")).strip()
         if not command:
             return "Error: command parameter required"
@@ -2097,19 +2227,34 @@ class ExtendedToolExecutor:
         self.task_log_root.mkdir(parents=True, exist_ok=True)
         task_id = uuid.uuid4().hex[:12]
         output_path = self.task_log_root / f"task-{task_id}.log"
-        output_handle = output_path.open("w", encoding="utf-8")
+        output_handle = output_path.open("wb")
         options: Dict[str, Any] = {}
         if os.name == "posix":
             options["start_new_session"] = True
-        process = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=workdir,
-            stdout=output_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-            **options,
-        )
+        elif os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        args: object = command
+        if dialect == "pwsh":
+            pwsh = ShellTool._resolve_pwsh()
+            if pwsh is None:
+                output_handle.close()
+                return (
+                    "Error: PowerShell (pwsh or powershell) was not found on PATH; "
+                    "the pwsh tool requires it."
+                )
+            args = [pwsh, "-NoProfile", "-NonInteractive", "-Command", command]
+        try:
+            process = subprocess.Popen(
+                args,
+                shell=(dialect != "pwsh"),
+                cwd=workdir,
+                stdout=output_handle,
+                stderr=subprocess.STDOUT,
+                **options,
+            )
+        except Exception as e:
+            output_handle.close()
+            return f"Error: failed to start background command: {e}"
         with self._background_tasks_lock:
             self._background_tasks[task_id] = {
                 "process": process,
@@ -2161,9 +2306,11 @@ class ExtendedToolExecutor:
                 if code is not None and not task["output_handle"].closed:
                     task["output_handle"].close()
                 try:
-                    output = task["output_path"].read_text(
-                        encoding="utf-8", errors="replace"
-                    )[-12000:]
+                    # The log is written as raw bytes; decode with the same
+                    # UTF-8 -> GBK -> Latin-1 chain as foreground output so
+                    # Windows cmd/PowerShell (cp936) output stays readable.
+                    raw = task["output_path"].read_bytes()[-48000:]
+                    output = decode_stream(raw)[-12000:]
                 except OSError:
                     output = ""
                 results.append(
@@ -2406,44 +2553,18 @@ class ExtendedToolExecutor:
             return f"Error reading document: {str(e)}"
 
     def execute_read_url(self, params: Dict[str, Any]) -> str:
-        """Read and extract content from a URL"""
+        """Read and extract content from a URL (bounded fetch)."""
         url = params.get("url", "")
         if not url:
             return "Error: url parameter required"
 
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+        outcome = fetch_url(url)
+        if not outcome.ok:
+            return f"Error: {outcome.error}"
 
-            response = requests.get(url, headers=headers, timeout=15)
+        content = outcome.text
 
-            # Try to detect and set correct encoding
-            if response.encoding is None or response.encoding.lower() == "iso-8859-1":
-                # Try to detect encoding from content
-                try:
-                    import chardet
-
-                    detected = chardet.detect(response.content)
-                    if detected and detected.get("encoding"):
-                        response.encoding = detected["encoding"]
-                    else:
-                        response.encoding = "utf-8"
-                except ImportError:
-                    # If chardet not available, try common encodings
-                    for encoding in ["utf-8", "gb2312", "gbk", "big5", "iso-8859-1"]:
-                        try:
-                            response.content.decode(encoding)
-                            response.encoding = encoding
-                            break
-                        except:
-                            continue
-
-            response.raise_for_status()
-
-            # Get text content
-            content = response.text
-
+        if outcome.kind == "html":
             # Try using BeautifulSoup if available
             try:
                 from bs4 import BeautifulSoup
@@ -2465,7 +2586,7 @@ class ExtendedToolExecutor:
                 text = "\n".join(chunk for chunk in chunks if chunk)
 
                 if text:
-                    return f"URL 内容:\n{text}"
+                    content = text
                 else:
                     return "Error: 无法从 URL 提取内容"
 
@@ -2487,17 +2608,13 @@ class ExtendedToolExecutor:
                 # Clean up whitespace
                 content = re.sub(r"\s+", " ", content).strip()
 
-                if content:
-                    return f"URL 内容:\n{content}"
-                else:
+                if not content:
                     return "Error: 无法从 URL 提取内容"
 
-        except requests.exceptions.Timeout:
-            return "Error: 请求超时"
-        except requests.exceptions.RequestException as e:
-            return f"Error: 网络请求失败 - {str(e)}"
-        except Exception as e:
-            return f"Error: 读取 URL 失败 - {str(e)}"
+        if outcome.truncated:
+            content += "\n\n(内容已截断，请访问更具体的 URL 或章节获取全文)"
+
+        return f"URL 内容:\n{content}"
 
     def execute_send_file(self, params: Dict[str, Any]) -> str:
         """Send a file to the user via Feishu"""

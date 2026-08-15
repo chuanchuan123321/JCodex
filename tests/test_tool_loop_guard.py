@@ -54,3 +54,54 @@ def test_tool_error_prefix_still_failure():
     # 工具直接返回的 Error:/failed: 前缀错误仍然判失败。
     assert ToolLoopGuard._succeeded("Error: filePath parameter required") is False
     assert ToolLoopGuard._succeeded("failed: cannot write file") is False
+
+
+# ── marker contract ─────────────────────────────────────────────────────────
+# The shell tool now renders non-zero exits as `[exit code: N]` markers and
+# reports timeouts/cancellations/signal kills with their own markers. Only
+# Error:-style prefixes are infrastructure failures; markers are reports.
+
+
+def test_marker_exit_code_nonzero_is_not_success():
+    assert ToolLoopGuard._succeeded("hello\n[exit code: 1]") is False
+    assert ToolLoopGuard._succeeded("Output:\n[exit code: 127]") is False
+
+
+def test_marker_exit_code_zero_stays_success():
+    # The renderer never emits [exit code: 0], but the parser is defensive.
+    assert ToolLoopGuard._succeeded("hello\n[exit code: 0]") is True
+
+
+def test_marker_timeout_is_not_success():
+    assert ToolLoopGuard._succeeded("started\n[timed out after 30s]") is False
+
+
+def test_marker_cancelled_is_not_success():
+    assert ToolLoopGuard._succeeded("[cancelled]") is False
+
+
+def test_marker_signal_kill_is_not_success():
+    assert ToolLoopGuard._succeeded("output\n[killed by signal: SIGTERM]") is False
+
+
+def test_marker_truncation_is_success():
+    # Truncation is a report, not a failure: the full output is available at
+    # the reported path.
+    result = "data\n[output truncated; full output: /tmp/shell-abc.log]"
+    assert ToolLoopGuard._succeeded(result) is True
+
+
+def test_marker_embedded_failure_text_without_marker_stays_success():
+    # The delete-verification guarantee under the new contract: body text like
+    # "No such file or directory" never participates, only exact markers do.
+    result = (
+        "=== 删除后验证 ===\n"
+        "ls: /Users/a/Library/Application Support/JCodex/workspace/output/study-room: "
+        "No such file or directory\n"
+        "grep_exit=1"
+    )
+    assert ToolLoopGuard._succeeded(result) is True
+
+
+def test_marker_stderr_section_with_clean_exit_is_success():
+    assert ToolLoopGuard._succeeded("warn\n[stderr]\nwarning: something") is True

@@ -694,8 +694,6 @@ class NaturalTaskExecutor:
             self.context_compactor.policy,
             self.available_tools,
         )
-        if self.context_compactor.should_prefire(snapshot):
-            self.context_compactor.start_prefire(snapshot, self._sample_compaction_prompt)
         if not self.context_compactor.should_compact(snapshot):
             return None
         history = memory_manager.load_execution_history()
@@ -1920,10 +1918,16 @@ AI 想要执行以下操作：
             report("analyzing", "正在分析完整模型上下文与工具调用链")
             context_snapshot = snapshot.get("context_snapshot")
             if context_snapshot is None:
+                # 用执行历史步骤逐条建记录并推断角色（用户/助手/工具），
+                # 而不是把全部历史塞成单条消息或全部标成 HUMAN。
+                history_steps = snapshot.get("execution_history") or []
+                messages = ContextCompactor.records_from_history_steps(history_steps)
+                if not messages:
+                    messages = [HumanMessage(content=history_text)]
                 context_snapshot = ContextCompactor.build_snapshot(
                     {
                         "system_prompt": "",
-                        "messages": [HumanMessage(content=history_text)],
+                        "messages": messages,
                         "step_count": step_count,
                     },
                     self.context_compactor.policy,
@@ -1957,6 +1961,9 @@ AI 想要执行以下操作：
             combined = f"{summary}\n📁 详细内容: {full_archive}"
             memory_manager.save_accumulated_compression(combined)
             memory_manager.clear_execution_history()
+            if compacted.retained_tail:
+                # 保留机制：把最近原文尾部写回短期记忆文件，而不是完全清空。
+                memory_manager.save_execution_history([compacted.retained_tail])
             return build_result(
                 True,
                 "success",
@@ -1965,7 +1972,6 @@ AI 想要执行以下操作：
                 archive_path=full_archive,
                 attempts=compacted.attempts,
                 input_stage=compacted.input_stage,
-                two_pass_used=compacted.two_pass_used,
                 memory_flush_status=(
                     flush_result.status if flush_result else "below_threshold"
                 ),
@@ -2400,6 +2406,30 @@ AI 想要执行以下操作：
         }
         return descriptions.get(tool_name, f"执行 {tool_name}")
 
+    @staticmethod
+    def _shell_marker_label(result: str) -> Optional[str]:
+        """Shell marker -> short label, or None when absent.
+
+        A non-zero exit is a report, not an error: the shell tool renders
+        `[exit code: N]` / `[timed out after Ns]` / `[cancelled]` /
+        `[killed by signal: X]` markers, and only infrastructure failures use
+        the `Error:` prefix.
+        """
+        if "[cancelled]" in result:
+            return "命令已取消"
+        if "[timed out after" in result or "[timed out]" in result:
+            return "命令超时"
+        if "[killed by signal" in result:
+            return "命令被信号终止"
+        marker = "[exit code: "
+        idx = result.rfind(marker)
+        if idx >= 0:
+            end = result.find("]", idx)
+            code = result[idx + len(marker):end].strip()
+            if code.isdigit() and int(code) != 0:
+                return f"命令非零退出 (exit code {code})"
+        return None
+
     def _get_result_description(self, tool_name: str, result: str) -> str:
         """Get natural description of the result"""
         # Truncate long results
@@ -2414,11 +2444,13 @@ AI 想要执行以下操作：
             or result_stripped.startswith("错误:")
             or result_stripped.startswith("Traceback")
             or "\nTraceback (most recent call last):" in result
-            or result_stripped.startswith("✗ Failed")
         )
 
         if is_error:
             return f"出现错误: {result_preview}"
+        shell_marker = self._shell_marker_label(result)
+        if shell_marker is not None:
+            return f"{shell_marker}: {result_preview}"
         elif (
             "Success" in result
             or "成功" in result
@@ -2436,14 +2468,15 @@ AI 想要执行以下操作：
         lines = result.split("\n")
         has_long_output = len(lines) > MAX_LINES or len(result) > 1000
 
-        # Check for error state
+        # Check for error state: only infrastructure failures are errors.
+        # Shell non-zero exits / timeouts / cancellations carry marker-style
+        # markers and are reports, not errors (see _shell_marker_label).
         result_stripped = result.lstrip()
         is_error = (
             result_stripped.startswith("Error:")
             or result_stripped.startswith("错误:")
             or result_stripped.startswith("Traceback")
             or "\nTraceback (most recent call last):" in result
-            or result_stripped.startswith("✗ Failed")
         )
 
         if is_error:

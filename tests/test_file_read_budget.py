@@ -18,19 +18,83 @@ def test_read_file_caps_each_window_at_one_thousand_lines(tmp_path) -> None:
     assert "line 11" in content
     assert "1000\u2192line 1000" in content
     assert "line 1001" not in content
+    # The window was cut by the line cap, so the footer teaches the next offset.
+    assert "Use offset=1001 to continue." in content
 
 
-def test_read_file_rejects_an_oversized_single_line_without_corruption(tmp_path) -> None:
+def test_read_file_truncates_an_oversized_single_line(tmp_path) -> None:
     path = tmp_path / "minified.json"
     source = "x" * 100_004
     path.write_text(source, encoding="utf-8")
 
     success, content = FileTool.read_file(str(path))
 
-    assert success is False
-    assert "exceeds maximum allowed tokens (25000 tokens)" in content
-    assert "offset and limit" in content
+    assert success is True
+    assert "(line truncated to 2000 chars)" in content
     assert source not in content
+    assert "(End of file - total 1 lines)" in content
+
+
+def test_read_file_partial_window_when_token_budget_exceeded(tmp_path) -> None:
+    # A window whose full content would exceed the token budget now returns the
+    # partial window that fits, plus a continuation footer, instead of refusing.
+    path = tmp_path / "budget.txt"
+    path.write_text(
+        "".join(f"{'y' * 800} {index}\n" for index in range(1, 300)),
+        encoding="utf-8",
+    )
+
+    success, content = FileTool.read_file(str(path))
+
+    assert success is True
+    assert "exceeds maximum allowed tokens" not in content
+    assert "Use offset=" in content
+    assert "to continue." in content
+
+
+def test_read_file_end_of_file_footer(tmp_path) -> None:
+    path = tmp_path / "small.txt"
+    path.write_text(
+        "".join(f"line {index}\n" for index in range(1, 21)), encoding="utf-8"
+    )
+
+    success, content = FileTool.read_file(str(path))
+
+    assert success is True
+    assert content.endswith("(End of file - total 20 lines)")
+
+
+def test_read_file_empty_file_is_a_valid_read(tmp_path) -> None:
+    path = tmp_path / "empty.txt"
+    path.write_text("", encoding="utf-8")
+
+    success, content = FileTool.read_file(str(path))
+
+    assert success is True
+    assert content == "(End of file - total 0 lines)"
+
+
+def test_read_file_offset_beyond_empty_file_still_errors(tmp_path) -> None:
+    path = tmp_path / "empty.txt"
+    path.write_text("", encoding="utf-8")
+
+    success, content = FileTool.read_file(str(path), offset=5)
+
+    assert success is False
+    assert "out of range" in content
+
+
+def test_read_file_continue_footer_for_focused_range(tmp_path) -> None:
+    path = tmp_path / "numbered.txt"
+    path.write_text(
+        "".join(f"line {index}\n" for index in range(1, 51)), encoding="utf-8"
+    )
+
+    success, content = FileTool.read_file(str(path), offset=10, limit=5)
+
+    assert success is True
+    assert "10\u2192line 10" in content
+    assert content.endswith("(Showing lines 10-14. Use offset=15 to continue.)")
 
 
 def test_read_file_coerces_string_or_float_offset_to_int(tmp_path) -> None:
@@ -94,3 +158,95 @@ def test_execute_file_read_rejects_image_files(tmp_path) -> None:
 
     assert result.startswith("Error: Cannot read image file")
     assert "can only read document files" in result
+
+
+# ── Read/write version staleness ───────────────────────────────────────────
+
+
+def test_edit_rejected_when_file_changed_since_read(tmp_path) -> None:
+    path = tmp_path / "target.txt"
+    path.write_text("old content\n", encoding="utf-8")
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+
+    read_result = executor.execute_file_read({"filePath": str(path)})
+    assert not read_result.startswith("Error:")
+
+    # The file changes on disk without another read (e.g. an external process).
+    path.write_text("brand new content\n", encoding="utf-8")
+
+    result = executor.execute(
+        {
+            "tool": "edit",
+            "params": {
+                "filePath": str(path),
+                "oldString": "brand new content",
+                "newString": "changed",
+            },
+        }
+    )
+
+    assert result.startswith("Error:")
+    assert "changed since it was read" in result
+    assert "Re-read the file" in result
+    # The stale edit must not have mutated the file.
+    assert path.read_text(encoding="utf-8") == "brand new content\n"
+
+
+def test_edit_allowed_when_file_unchanged_since_read(tmp_path) -> None:
+    path = tmp_path / "target.txt"
+    path.write_text("old content\n", encoding="utf-8")
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+
+    executor.execute_file_read({"filePath": str(path)})
+
+    result = executor.execute(
+        {
+            "tool": "edit",
+            "params": {
+                "filePath": str(path),
+                "oldString": "old content",
+                "newString": "new content",
+            },
+        }
+    )
+
+    assert not result.startswith("Error: changed since it was read")
+    assert path.read_text(encoding="utf-8") == "new content\n"
+
+
+def test_write_to_unread_new_file_is_allowed(tmp_path) -> None:
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+    target = tmp_path / "fresh.txt"
+
+    result = executor.execute(
+        {"tool": "write", "params": {"path": str(target), "content": "hello"}}
+    )
+
+    assert not result.startswith("Error: changed since it was read")
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+def test_edit_after_successful_write_is_not_stale(tmp_path) -> None:
+    # A successful mutation refreshes the recorded version, so the read->write
+    # ->edit sequence must not be rejected as stale.
+    executor = ExtendedToolExecutor(project_root=tmp_path, preview_manager=object())
+    target = tmp_path / "fresh.txt"
+
+    executor.execute_file_read({"filePath": str(target)})
+    executor.execute(
+        {"tool": "write", "params": {"path": str(target), "content": "hello\n"}}
+    )
+
+    result = executor.execute(
+        {
+            "tool": "edit",
+            "params": {
+                "filePath": str(target),
+                "oldString": "hello",
+                "newString": "hello world",
+            },
+        }
+    )
+
+    assert not result.startswith("Error: changed since it was read")
+    assert target.read_text(encoding="utf-8") == "hello world\n"

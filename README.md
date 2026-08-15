@@ -65,7 +65,7 @@ Voice input can be used alongside the dark desktop theme, while the integrated r
 - **A real desktop workbench**: persistent tasks, bound project folders, split tasks, file and memory browsers, skills management, change review, image/folder attachments, local Web previews, settings, knowledge, preferences, and data inspection.
 - **Several task interaction modes**: normal approval mode, one-click full-access mode, plan mode, voice mode, multi-agent collaboration, and persistent split-task workspaces can be selected independently where supported.
 - **Durable human-in-the-loop execution**: command approvals and structured questions pause the graph at a checkpoint and resume the same task after the user responds.
-- **Context that scales**: percentage-based prefire and full-replacement compaction keep long runs under the provider context window without conflating short-term continuation state with long-term memory.
+- **Context that scales**: retention-based compaction (the recent tail stays verbatim, the earlier part is summarized) and full-replacement fallback keep long runs under the provider context window without conflating short-term continuation state with long-term memory.
 - **Local, layered memory**: short-term task files, SQLite FTS5/BM25 retrieval, optional embeddings, a structured knowledge base, preference versioning, and execution-data integration serve different persistence needs.
 - **Extensible by files, not only code**: built-in and workspace `SKILL.md` packages can add procedures, scripts, and dependency requirements without changing the agent loop.
 - **Designed for visible work**: streamed reasoning status, ordered tool events, plans, approvals, child-agent activity, diffs, preview lifecycle, token usage, and compaction progress are projected into stable UI events.
@@ -309,7 +309,7 @@ Multi-agent mode gives the primary model coordinator tools for creating and supe
 | `LangGraphRunner` | Ordered model/tool loop, durable state, interrupt/resume, cancellation, step gates, finish guards, and normalized events |
 | `ExtendedToolExecutor` | Structured tool definitions, aliases, dispatch, path/scope validation, background tasks, attachments, skills, schedules, memory tools, and previews |
 | `ToolLoopGuard` | Detects repeated or unproductive tool calls before they consume the whole step budget |
-| `ContextCompactor` | Exact prompt snapshots, token estimation, prefire summaries, two-pass compaction, validation, archival, and full context replacement |
+| `ContextCompactor` | Exact prompt snapshots, token estimation, retention-based or full-replacement compaction, validation, archival, and context replacement |
 | `ConversationStore` | Atomic persistent desktop tasks, messages, attachments, split state, completion state, and task-local memory paths |
 | `MemoryStore` | Markdown-backed long-term memory with SQLite FTS5/BM25, optional embeddings, recency weighting, deduplication, and optional MMR |
 | `MultiAgentTeam` | Thread-safe child lifecycle, dependencies, inboxes, artifacts, public activity, write ownership, waiting, and cancellation |
@@ -323,7 +323,7 @@ The model sees JSON-schema function tools. The exact inventory is filtered by ru
 | --- | --- | --- |
 | Files and code | `read`, `glob`, `grep`, `edit`, `write`, `list_dir` | `read` understands text, PDF, Word, and Excel; large text reads are line-bounded |
 | Commands and processes | `bash`, `monitor`, `get_task_output`, `kill_task` | Supports foreground and background processes with cancellation and output polling |
-| Research | `websearch`, `codesearch`, `read_url` | Tavily is optional; Web-search calls are counted per task |
+| Research | `web_search`, `web_fetch` | Tavily is optional; Web-search calls are counted per task |
 | Media and documents | `view_image`, `generate_pdf` | Images are restricted to task attachments or allowed workspace output/temp paths |
 | Planning and interaction | `todo_write`, `update_plan`, `question` | Visibility depends on plan/voice mode; questions create resumable interrupts |
 | Memory and discovery | `memory_search`, `memory_get`, `search_tool`, `use_tool`, `load_skill` | Supports progressive tool and skill discovery instead of a permanently huge prompt |
@@ -341,12 +341,12 @@ Legacy aliases remain registered so older persisted checkpoints can still resume
 Compaction is continuation state, not long-term memory. The compactor:
 
 1. Builds a snapshot from the system prompt, messages, tool calls/results, and active tool schemas.
-2. Starts speculative prefire work before the hard trigger when configured.
-3. At `AUTO_COMPACT_THRESHOLD_PERCENT`, generates and validates a structured continuation summary.
-4. Replaces the older graph context while preserving current instructions and audit metadata.
+2. Splits the conversation at the retention boundary: the recent ~16% of tokens stay verbatim, the earlier part is scheduled for summarization.
+3. At `AUTO_COMPACT_THRESHOLD_PERCENT`, generates and validates a structured continuation summary of the earlier part.
+4. Replaces the older context while keeping the retained tail, preserving current instructions and audit metadata.
 5. Archives the replaced transcript and reports tokens before/after to the UI.
 
-Two-pass compaction is enabled by default. Manual `/compact` uses the same shared mechanism.
+Retention compaction is on by default (`COMPACTION_RETAIN_PERCENT=16`); setting it to 0 falls back to full replacement. Manual `/compact` uses the same shared mechanism.
 
 ### Long-term memory
 

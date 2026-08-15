@@ -1,9 +1,16 @@
-"""WebSearch tool - Real-time web search using Exa API"""
+"""WebSearch tool - Real-time web search using the Tavily API."""
 
 import os
-import requests
-from typing import Dict, Any, Optional
+import time
 from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+import requests
+
+TAVILY_ENDPOINT = "https://api.tavily.com/search"
+#: Transient network failures (reset/timeout) are retried once before giving up.
+RETRY_ATTEMPTS = 2
+RETRY_DELAY_S = 0.5
 
 
 def _normalize_image_items(image_items: Any) -> list:
@@ -42,35 +49,31 @@ class WebSearchResult:
 
 
 class WebSearchTool:
-    """Web search tool using Exa AI API"""
+    """Web search tool using the Tavily API."""
 
     def __init__(self):
-        self.api_key = os.getenv("EXA_API_KEY") or os.getenv("TAVILY_API_KEY")
+        self.api_key = os.getenv("TAVILY_API_KEY")
         self.default_num_results = 8
 
     def execute(
         self,
         query: str,
         num_results: Optional[int] = None,
-        livecrawl: str = "fallback",
-        search_type: str = "auto",
+        include_images: Optional[bool] = None,
     ) -> WebSearchResult:
-        """Execute web search
+        """Execute a Tavily web search.
 
         Args:
-            query: Search query
-            num_results: Number of results to return (default: 8)
-            livecrawl: 'fallback' or 'preferred' for live crawling
-            search_type: 'auto', 'fast', or 'deep'
-
-        Returns:
-            WebSearchResult with search results
+            query: The search query.
+            num_results: Number of results to return (default 8).
+            include_images: Whether to request related images. Defaults to
+                False; the caller opts in when visual context is relevant.
         """
         if not self.api_key:
             return WebSearchResult(
                 success=False,
                 results="",
-                error="Please set EXA_API_KEY or TAVILY_API_KEY in environment variables",
+                error="Please set TAVILY_API_KEY in environment variables",
             )
 
         if not query:
@@ -79,79 +82,69 @@ class WebSearchTool:
             )
 
         num_results = num_results or self.default_num_results
+        return self._search_tavily(query, num_results, bool(include_images))
 
-        try:
-            # Try Exa API first
-            return self._search_exa(query, num_results, livecrawl, search_type)
-        except Exception as e:
-            # Fallback to Tavily
-            return self._search_tavily(query, num_results)
-
-    def _search_exa(
-        self, query: str, num_results: int, livecrawl: str, search_type: str
+    def _search_tavily(
+        self, query: str, num_results: int, include_images: bool = False
     ) -> WebSearchResult:
-        """Search using Exa API"""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "query": query,
-            "num_results": num_results,
-            "livecrawl": livecrawl,
-            "type": search_type,
-        }
-
-        response = requests.post(
-            "https://api.exa.ai/search", headers=headers, json=payload, timeout=30
-        )
-        response.raise_for_status()
-
-        data = response.json()
-
-        results = []
-        results.append(f"Search results for: {query}\n")
-
-        for i, item in enumerate(data.get("results", []), 1):
-            title = item.get("title", "Untitled")
-            url = item.get("url", "")
-            content = item.get("content", "")[:300]
-
-            results.append(f"{i}. {title}")
-            results.append(f"   URL: {url}")
-            image = item.get("image") or ""
-            if image:
-                results.append(f"   图片: ![image]({image})")
-            if content:
-                results.append(f"   {content}...")
-            results.append("")
-
-        if not results:
-            return WebSearchResult(
-                success=True, results=f"No results found for: {query}"
-            )
-
-        return WebSearchResult(success=True, results="\n".join(results))
-
-    def _search_tavily(self, query: str, num_results: int) -> WebSearchResult:
-        """Search using Tavily API as fallback"""
+        """Search using the Tavily API."""
         headers = {"Content-Type": "application/json"}
 
         payload = {
             "api_key": self.api_key,
             "query": query,
             "include_answer": True,
-            "include_images": True,
+            "include_images": include_images,
             "max_results": num_results,
         }
 
-        response = requests.post(
-            "https://api.tavily.com/search", headers=headers, json=payload, timeout=30
-        )
-        response.raise_for_status()
+        response = None
+        last_error = ""
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                response = requests.post(
+                    TAVILY_ENDPOINT, headers=headers, json=payload, timeout=30
+                )
+                response.raise_for_status()
+                break
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status in (401, 403):
+                    return WebSearchResult(
+                        success=False,
+                        results="",
+                        error="Tavily API key 无效或未授权，请检查 TAVILY_API_KEY",
+                    )
+                if status == 429:
+                    return WebSearchResult(
+                        success=False,
+                        results="",
+                        error="Tavily 请求过于频繁，请稍后重试",
+                    )
+                return WebSearchResult(
+                    success=False,
+                    results="",
+                    error=f"Tavily API 错误 (HTTP {status})",
+                )
+            except requests.exceptions.ConnectionError:
+                # TCP-level failure (e.g. "Connection reset by peer") — transient
+                # network trouble, retried once before giving up.
+                last_error = "网络连接失败（连接被重置），请检查网络或代理后重试"
+                time.sleep(RETRY_DELAY_S)
+            except requests.exceptions.Timeout:
+                last_error = "网络请求超时，请检查网络或代理后重试"
+                time.sleep(RETRY_DELAY_S)
+        if response is None:
+            return WebSearchResult(
+                success=False, results="", error=last_error or "网络请求失败"
+            )
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            return WebSearchResult(
+                success=False, results="", error="Tavily 返回了无法解析的响应"
+            )
 
         results = []
         results.append(f"Search results for: {query}\n")
@@ -172,16 +165,18 @@ class WebSearchTool:
                 results.append(f"   {content}...")
             results.append("")
 
-        # Include query-related images (top-level list plus per-result images)
-        image_items = list(data.get("images") or [])
-        for item in data.get("results", []):
-            image_items.extend(item.get("images") or [])
+        # Include query-related images (top-level list plus per-result images),
+        # only when the caller requested them.
+        if include_images:
+            image_items = list(data.get("images") or [])
+            for item in data.get("results", []):
+                image_items.extend(item.get("images") or [])
 
-        images = _normalize_image_items(image_items)
-        if images:
-            results.append("相关图片：")
-            results.extend(_format_image_links(images))
-            results.append("")
+            images = _normalize_image_items(image_items)
+            if images:
+                results.append("相关图片：")
+                results.extend(_format_image_links(images))
+                results.append("")
 
         if len(results) == 1:
             return WebSearchResult(
@@ -198,7 +193,14 @@ def get_websearch_tool_definition() -> Dict[str, Any]:
         "type": "function",
         "function": {
             "name": "websearch",
-            "description": "Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs. Provides up-to-date information for current events and recent data. Supports configurable result counts, returns the content from the most relevant websites, and includes related image links when available.",
+            "description": (
+                "Search the public web for current or unknown information using the "
+                "Tavily API. Returns an optional summary answer plus a list of source "
+                "URLs with snippets. Set include_images to true only when the query is "
+                "about visuals (images, logos, photos, products) — images are related "
+                "links with little or no description, so they cost tokens without "
+                "adding much to text-only questions."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -207,15 +209,9 @@ def get_websearch_tool_definition() -> Dict[str, Any]:
                         "type": "integer",
                         "description": "Number of search results to return (default: 8)",
                     },
-                    "livecrawl": {
-                        "type": "string",
-                        "enum": ["fallback", "preferred"],
-                        "description": "Live crawl mode - 'fallback': use live crawling as backup if cached unavailable, 'preferred': prioritize live crawling (default: 'fallback')",
-                    },
-                    "type": {
-                        "type": "string",
-                        "enum": ["auto", "fast", "deep"],
-                        "description": "Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search",
+                    "include_images": {
+                        "type": "boolean",
+                        "description": "Whether to include related image links in the results (default: false)",
                     },
                 },
                 "required": ["query"],
@@ -233,10 +229,9 @@ def execute_websearch(params: Dict[str, Any]) -> str:
         return "Error: query parameter required"
 
     num_results = params.get("numResults")
-    livecrawl = params.get("livecrawl", "fallback")
-    search_type = params.get("type", "auto")
+    include_images = params.get("include_images")
 
-    result = tool.execute(query, num_results, livecrawl, search_type)
+    result = tool.execute(query, num_results, include_images)
 
     if result.success:
         return result.results

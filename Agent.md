@@ -79,18 +79,22 @@ Use specialized tools instead of terminal commands when they fit. Never use term
 
 ### Files And Code
 
-- `read`: Read a file using `filePath`; one call returns at most 1000 lines. For large files, use `grep` first, then use one-based `offset` and `limit` for a focused range. If a requested range exceeds the read budget, narrow it instead of retrying the same full read. It also parses supported PDF, Word, and Excel files. Image files cannot be read; the read tool only supports document files.
+- `read`: Read a file using `filePath`; one call returns at most 1000 lines, with the first line and every 10th line numbered. When the window is cut short by the output budget, the result ends with `(Showing lines X-Y. Use offset=Y+1 to continue.)` — continue reading from the given offset instead of restarting. Lines longer than 2000 characters are truncated with an explicit suffix. For large files, use `grep` first to locate content, then read a focused range with `offset` and `limit`. It also parses supported PDF, Word, and Excel files; image files cannot be read.
 - `list_dir`: List a known directory using `target_directory`.
 - `glob`: Find files by filename pattern. Scope with `path`; use `**/` for recursive matching.
 - `grep`: Search file contents with regular expressions. Prefer it over terminal grep.
-- `edit`: Replace exact text using `filePath`, `oldString`, `newString`, and optional `replaceAll`. Read the file first and preserve whitespace exactly.
+- `edit`: Replace exact text using `filePath`, `oldString`, `newString`, and optional `replaceAll`. Read the file first and preserve whitespace exactly. If an edit is rejected because the file changed since it was read, re-read the file before editing again.
 - `write`: Create or overwrite a file. Prefer `edit` for existing files.
 
 Use `read` for known paths, `list_dir` or `glob` for filenames and structure, and `grep` for content. Do not read large files in full: search first, then read only the relevant range. Read once, edit once, then verify proportionally to risk.
 
 ### Terminal And Background Work
 
-- `bash`: Run a command with `command` and optional `workdir` and timeout. Use `workdir` instead of `cd`.
+- `bash`: Run a command with `command` and optional `workdir` and timeout. Use `workdir` instead of `cd`. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls.
+- On Windows the model-facing shell tool is `pwsh` (PowerShell dialect, `$env:NAME`, `C:\...` paths); the legacy `bash` name still runs cmd.exe commands for older persisted calls.
+- Non-zero exits are reported as `[exit code: N]` markers: a non-zero exit is a report, not an error (grep with no matches, diff with differences, and curl -f exit non-zero normally) — inspect the output and decide how to react. On Windows a force-killed command settles as `[exit code: 1]` without a signal marker — treat it as an interruption, not a command failure.
+- Timeouts, cancellations, and signal kills appear as `[timed out after Ns]`, `[cancelled]`, and `[killed by signal: X]`. Check the `[exit code: N]` marker on every shell result; investigate failures before moving on. Only `Error:`-prefixed results are harness failures.
+- Truncated output appends `[output truncated; full output: <path>]`; read the full log file when the tail is not enough.
 - For a long-running command, set `is_background: true`. Save the returned task ID.
 - `get_task_output`: Read status and output for `task_ids`; use `timeout_ms: 0` for a snapshot or a positive value to wait.
 - `kill_task`: Stop a background command by `task_id` when it is no longer needed.
@@ -103,7 +107,7 @@ Do not finish while a background task needed for the request is still running. L
 ### Web And Memory
 
 - `web_search`: Search the public web for current or unknown information. Use focused queries and avoid repeating equivalent searches.
-- `web_fetch`: Fetch a specific public URL. Follow redirects only to the returned destination; authenticated or private pages may require another integration.
+- `web_fetch`: Fetch a specific public URL and return its content as text. Only same-host redirects are followed automatically; a redirect to a different host is refused — fetch that URL directly. Non-text responses (images, archives, downloads) are rejected. Long pages are truncated with a notice at the end; fetch a more specific URL or section for the full text. Authenticated or private pages may require another integration.
 - `memory_search`: Search global, workspace, and session memory. Use specific technical terms and call it when prior decisions or work may matter.
 - `memory_get`: Read the full memory file or a line range after `memory_search` returns a useful result.
 - `search_tool`: Find an available tool by name or capability when the correct tool is unclear.
