@@ -4576,19 +4576,41 @@ def _review_file_fingerprint(path: Path) -> str:
 
 
 def _resolve_review_path(raw_path: str) -> Optional[Path]:
-    """Resolve and contain a review edit target inside the project root."""
+    """Resolve and contain a review edit target inside a real project root.
+
+    The module-level PROJECT_ROOT is the source-tree root (or the bundle
+    directory when packaged), but tasks bind to per-conversation project
+    roots. The containment check therefore accepts the module root, the data
+    root, and every project root currently used by an active executor — a
+    review file always comes from one of those, and accepting them keeps the
+    packed app from rejecting project files as "out of bounds".
+    """
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
     try:
         candidate = Path(raw_path).expanduser().resolve()
     except (OSError, RuntimeError):
         return None
-    root = Path(PROJECT_ROOT).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None
-    return candidate
+    roots = [PROJECT_ROOT, DATA_ROOT]
+    active_root = getattr(os_agent, "project_root", None)
+    if active_root:
+        roots.append(active_root)
+    with state_lock:
+        roots.extend(
+            run.executor.project_root
+            for run in conversation_runs.values()
+            if run.executor
+            and getattr(run.executor, "project_root", None)
+        )
+    for root in dict.fromkeys(roots):
+        try:
+            candidate.relative_to(Path(root).resolve())
+            return candidate
+        except ValueError:
+            continue
+        except OSError:
+            continue
+    return None
 
 
 @eel.expose
