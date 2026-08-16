@@ -680,6 +680,58 @@ body.split-pane-mode .agent-detail-panel.is-open {
     background: var(--user-message-bg);
 }
 
+/* 超长用户消息折叠：超过 350px（≈350pt）时收起，点击气泡展开/收起 */
+.message.user .message-bubble.is-collapsible {
+    max-height: 350px;
+    overflow: hidden;
+    position: relative;
+    cursor: pointer;
+    transition: max-height 200ms ease;
+}
+.message.user .message-bubble.is-collapsible.is-expanded {
+    max-height: 9999px;
+}
+.message.user .message-bubble.is-collapsible::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 36px;
+    background: linear-gradient(to bottom, transparent, var(--user-message-bg));
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    pointer-events: none;
+}
+.message.user .message-bubble.is-collapsible.is-expanded::after {
+    display: none;
+}
+/* 折叠态的“展开 ▾”提示：右下角浅灰文字，无按钮外观 */
+.message-expand-btn {
+    position: absolute;
+    right: 10px;
+    bottom: 6px;
+    z-index: 1;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.6;
+    cursor: pointer;
+    transition: color 140ms ease;
+}
+.message-expand-btn:hover {
+    color: var(--text-secondary);
+}
+/* 展开态：“收起 ▴”落到内容末尾右下角（内容流内，不悬浮覆盖） */
+.message.user .message-bubble.is-expanded .message-expand-btn {
+    position: static;
+    display: block;
+    width: fit-content;
+    margin: 8px 0 0 auto;
+}
+
 .message.ai .message-bubble {
     background: transparent;
 }

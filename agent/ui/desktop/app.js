@@ -7241,6 +7241,28 @@ function addMessage(role, content, isError = false, animate = true) {
     `;
 
     chatMessages.appendChild(messageDiv);
+    // 用户消息内容超过 350px（macOS 上 ≈350pt）时折叠：底部渐变 + 右下角
+    // “展开 ▾”文字，点击展开后变为“收起 ▴”，可来回切换。
+    if (role === 'user' && !isError) {
+        const bubble = messageDiv.querySelector('.message-bubble');
+        if (bubble && bubble.scrollHeight > 350) {
+            bubble.classList.add('is-collapsible');
+            const expandBtn = document.createElement('button');
+            expandBtn.type = 'button';
+            expandBtn.className = 'message-expand-btn';
+            expandBtn.textContent = '展开 ▾';
+            const toggleCollapse = () => {
+                const expanded = bubble.classList.toggle('is-expanded');
+                expandBtn.textContent = expanded ? '收起 ▴' : '展开 ▾';
+            };
+            expandBtn.addEventListener('click', event => {
+                event.stopPropagation();
+                toggleCollapse();
+            });
+            bubble.appendChild(expandBtn);
+            bubble.addEventListener('click', toggleCollapse);
+        }
+    }
     if (animate) requestAnimationFrame(() => messageDiv.classList.add('is-visible'));
     else messageDiv.classList.add('is-visible');
     if (!isRestoringConversation) followChatOutput(chatMessages);
