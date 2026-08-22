@@ -99,8 +99,8 @@ class AIEngine:
         self.api_base_url = self.normalize_api_base_url(self.api_base_url)
         self.api_path = self.get_api_path_for_base_url(self.api_base_url)
 
-        if not self.api_key and not self.is_local_base_url(self.api_base_url):
-            raise ValueError("API_KEY not found in environment variables")
+        # 允许空 API key 构造（新用户首次启动未配置时初始化不能失败）；
+        # 真正发起请求时才在 _post_chat_completion* 里给出“请先配置”提示。
 
         self.conversation_history: List[Dict[str, Any]] = []
 
@@ -123,6 +123,12 @@ class AIEngine:
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send a chat-completions request using the current model settings."""
+        if not self.api_key and not self.is_local_base_url(self.api_base_url):
+            return {
+                "content": "请先在设置中配置 API Key（API_BASE_URL / API_KEY / API_MODEL）",
+                "tool_calls": [],
+                "finish_reason": "error",
+            }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -215,6 +221,12 @@ class AIEngine:
         on_tool_delta: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None,
     ) -> Dict[str, Any]:
         """Send a streaming chat request and assemble the final message."""
+        if not self.api_key and not self.is_local_base_url(self.api_base_url):
+            return {
+                "content": "请先在设置中配置 API Key（API_BASE_URL / API_KEY / API_MODEL）",
+                "tool_calls": [],
+                "finish_reason": "error",
+            }
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",

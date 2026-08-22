@@ -1147,6 +1147,8 @@ class PreviewManager:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=3,
+                    # GUI 宿主（桌面应用）下不指定则每次 taskkill 都弹控制台窗口
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except (OSError, subprocess.SubprocessError):
                 taskkill_available = False

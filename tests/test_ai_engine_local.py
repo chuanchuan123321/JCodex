@@ -43,13 +43,26 @@ def test_localhost_allows_empty_api_key(monkeypatch) -> None:
         "http://192.168.1.10:8080",
     ],
 )
-def test_remote_base_url_still_requires_api_key(monkeypatch, url) -> None:
+def test_remote_base_url_without_key_constructs_but_fails_on_request(
+    monkeypatch, url
+) -> None:
+    # 新用户首次启动未配置 key 时，初始化不能失败：构造成功，
+    # 真正请求时才返回“请先配置”的友好错误。
     _clear_model_env(monkeypatch)
     monkeypatch.setenv("API_BASE_URL", url)
     monkeypatch.delenv("API_KEY", raising=False)
 
-    with pytest.raises(ValueError, match="API_KEY not found"):
-        ai_engine.AIEngine()
+    engine = ai_engine.AIEngine()
+    assert engine.api_key is None
+
+    result = engine._post_chat_completion([{"role": "user", "content": "hi"}])
+    assert result["finish_reason"] == "error"
+    assert "API Key" in result["content"]
+
+    stream_result = engine._post_chat_completion_stream(
+        [{"role": "user", "content": "hi"}]
+    )
+    assert stream_result["finish_reason"] == "error"
 
 
 class _FakePostResponse:
