@@ -2242,7 +2242,10 @@ class ExtendedToolExecutor:
         if os.name == "posix":
             options["start_new_session"] = True
         elif os.name == "nt":
-            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            options["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
         args: object = command
         if dialect == "pwsh":
             pwsh = ShellTool._resolve_pwsh()

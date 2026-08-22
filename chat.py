@@ -2388,6 +2388,8 @@ AI 想要执行以下操作：
         dangerous_tools = {
             "bash",
             "shell",
+            "pwsh",  # PowerShell 命令与 bash 同级，询问模式下同样需要审批
+            "run_terminal_cmd",  # bash 的兼容别名
             "write",  # 写入文件（OpenCode风格）
             "edit",  # 编辑文件
             "send_file",

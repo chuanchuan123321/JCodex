@@ -114,7 +114,12 @@ class ShellTool:
         if os.name == "posix":
             popen_options["start_new_session"] = True
         elif os.name == "nt":
-            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            # 独立进程组便于整体终止；CREATE_NO_WINDOW 阻止 GUI 宿主（桌面应用）
+            # 启动 pwsh/cmd 时弹出新的控制台窗口。
+            popen_options["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
         args: object = command
         if dialect == "pwsh":
             pwsh = self._resolve_pwsh()
@@ -317,6 +322,9 @@ class ShellTool:
                             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                             capture_output=True,
                             timeout=5,
+                            creationflags=getattr(
+                                subprocess, "CREATE_NO_WINDOW", 0
+                            ),
                         )
                     except Exception:
                         pass
